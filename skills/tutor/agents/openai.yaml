@@ -1,0 +1,5 @@
+interface:
+  display_name: "Tutor"
+  short_description: "Tutor from a source text with guided questions"
+policy:
+  allow_implicit_invocation: false

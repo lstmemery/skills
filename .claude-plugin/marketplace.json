@@ -1,0 +1,24 @@
+{
+  "name": "lstmemery",
+  "owner": {
+    "name": "Matt Emery",
+    "url": "https://github.com/lstmemery"
+  },
+  "description": "Matt Emery's agent skills for real engineering, as an installable Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "lstmemery-skills",
+      "source": "./",
+      "description": "Agent skills for real engineering: grilling, spec/ticket flows, TDD, dual-axis code review, domain modelling, source-grounded research.",
+      "category": "engineering",
+      "keywords": [
+        "engineering",
+        "skills",
+        "tdd",
+        "code-review",
+        "grilling",
+        "research"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "name": "lstmemery-skills",
+  "version": "1.0.0",
+  "description": "Agent skills for real engineering: grilling, spec/ticket flows, TDD, dual-axis code review, domain modelling, source-grounded research.",
+  "author": {
+    "name": "Matt Emery",
+    "url": "https://github.com/lstmemery"
+  },
+  "homepage": "https://github.com/lstmemery/skills",
+  "repository": "https://github.com/lstmemery/skills",
+  "license": "MIT",
+  "keywords": [
+    "engineering",
+    "skills",
+    "tdd",
+    "code-review",
+    "grilling",
+    "domain-modeling",
+    "research"
+  ],
+  "skills": [
+    "./skills/code-review",
+    "./skills/codebase-design",
+    "./skills/deep-research",
+    "./skills/domain-modeling",
+    "./skills/grill-with-docs",
+    "./skills/grilling",
+    "./skills/handoff",
+    "./skills/implement",
+    "./skills/prototype",
+    "./skills/research",
+    "./skills/setup-matt-pocock-skills",
+    "./skills/tdd",
+    "./skills/teach",
+    "./skills/to-spec",
+    "./skills/to-tickets",
+    "./skills/tutor",
+    "./skills/writing-for-agents",
+    "./skills/writing-for-humans"
+  ]
+}

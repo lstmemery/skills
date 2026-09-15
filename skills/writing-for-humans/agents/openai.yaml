@@ -1,0 +1,3 @@
+display_name: Writing for humans
+short_description: Copy-edit model prose for clarity while preserving meaning
+default_prompt: Copy-edit this draft for human readability while preserving facts, citations, uncertainty, requested tone, and format.
