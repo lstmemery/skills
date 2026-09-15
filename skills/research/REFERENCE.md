@@ -74,6 +74,8 @@ Before publishing, inspect the draft and evidence table:
 6. Record contradictions with both URLs and the disposition. Do not silently
    average, harmonize, or choose the newer-looking number.
 
+## Report skeleton
+
 ```markdown
 # <Specific topic>
 
