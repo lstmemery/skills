@@ -25,6 +25,64 @@ underneath it.
 
 Do not assume a runtime or model exists because it appears in an example.
 
+## Name
+
+When the environment lets agents carry a name, rename yourself to
+`Orchestrator` before the first delegation, so the user can always find the
+coordinator at a glance:
+
+- Herdr (`HERDR_ENV=1`): label the pane `Orchestrator` and, if the pane has
+  no live agent name yet, name the agent:
+
+  ```sh
+  herdr pane rename "$HERDR_PANE_ID" Orchestrator
+  herdr agent rename "$HERDR_PANE_ID" orchestrator
+  ```
+
+  Herdr agent names are constrained to `[a-z][a-z0-9_-]{0,31}`, so the agent
+  name is the lowercase `orchestrator` while the visible pane label is
+  `Orchestrator`. Do not clear or overwrite a name another agent already
+  uses in that pane.
+- Other multiplexers: use the native equivalent (session title, tab label,
+  tmux rename-window) with the same display string, `Orchestrator`.
+
+## Context Handoff
+
+An orchestrator is replaceable; the work is not. When your context reaches
+200k tokens (read the harness context indicator every turn; act at 200k or
+when a live estimate shows you will cross it during the next delegation),
+hand off instead of squeezing:
+
+1. Hand off at a safe boundary — after all delegated results are collected
+   and reported, never mid-turn with children still running. Anything in
+   flight is named in the handoff, not left implicit.
+2. Write a handoff document at the workspace root,
+   `HANDOFF-<topic>-<YYYY-MM-DD>.md`: transition reason, status, decisions,
+   constraints, what is verified with evidence, unresolved items, artifact
+   paths, and the exact next action. Reference files by path; never inline
+   secret values into the document or the successor prompt.
+3. Spin up a successor of the same type (same harness and kind) and give it
+   the handoff. In Herdr (`HERDR_ENV=1`):
+
+   ```sh
+   herdr pane split --current --direction right --cwd "$PWD" --no-focus
+   herdr agent rename "$HERDR_PANE_ID" --clear  # free the name for the successor
+   herdr agent start orchestrator --kind <your-kind> --pane <returned-pane-id>
+   herdr agent prompt orchestrator \
+     "Load and follow skill orchestrator, read HANDOFF-<topic>-<YYYY-MM-DD>.md, and resume its next action." \
+     --wait
+   ```
+
+   If `orchestrator` cannot be reused, pick a free variant name and say so in
+   the handoff.
+4. Kill yourself only after the successor has accepted the handoff (the
+   prompt returned and the successor is working or idle):
+   `herdr pane close "$HERDR_PANE_ID"` — this ends your process; the session
+   transcript on disk is your record. If the successor fails to start, stay
+   alive and report the failure instead.
+5. Outside Herdr: write the handoff document and tell the user how to start
+   the successor; do not half-hand-off.
+
 ## Preferences
 
 Preferences are routing policy for the calling agent. They may describe:
