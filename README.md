@@ -52,8 +52,15 @@ mattpocock/skills with light harness adaptations).
 | grill-with-docs | upstream | wrapper pairing `grilling` + `domain-modeling` |
 | setup-matt-pocock-skills | upstream | carried verbatim |
 | implement | adapted | closeout rules for tracker ticket states |
+| orchestrator | upstream (BSL 1.1) | carried verbatim from [backnotprop/orchestrator](https://github.com/backnotprop/orchestrator); its CLI self-installs on first use |
 
 ## License
 
 MIT — see [LICENSE](LICENSE). Upstream skills derive from
 [mattpocock/skills](https://github.com/mattpocock/skills) by Matt Pocock.
+
+Exception: [`skills/orchestrator`](skills/orchestrator/SKILL.md) is carried
+from [backnotprop/orchestrator](https://github.com/backnotprop/orchestrator)
+under **Business Source License 1.1** (Additional Use Grant permits production
+use; converts to Apache-2.0 on 2029-07-09). Its full BSL text ships inside the
+skill folder as `LICENSE` and is not re-licensed by this repo's MIT grant.
