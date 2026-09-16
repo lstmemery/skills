@@ -24,4 +24,13 @@ and notify me.
 
 ## User Preferences
 
-No preferences set.
+- When the user asks for an omp job or names the `omp` runtime, launch
+  runtime `omp`. It is registered in `~/.orchestrator/config.json`
+  (process adapter around the `omp` CLI). Never substitute `pi` for `omp`:
+  `pi` is the predecessor harness with its own sessions and auth, not a
+  fallback for omp.
+- Inside Herdr (`HERDR_ENV=1`), spin up new child agents in their own new
+  workspace (`herdr pane split`, then `herdr pane move --new-workspace
+  --label <task-name> --no-focus`) and drive them with `herdr agent`
+  commands — not as orchestrator background launch tasks. Orchestrator
+  launch stays for `shell` tasks and for work outside Herdr.

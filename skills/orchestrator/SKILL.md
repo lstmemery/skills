@@ -19,11 +19,102 @@ underneath it.
    install it with `npm install -g @backnotprop/orchestrator-cli`.
 4. Run `orchestrator help --json --compact` for the current command contract.
 5. Run `orchestrator doctor --json --compact` when runtime availability is
-   uncertain. Choose only from `runtimeSummary.availableIds`.
+   uncertain. Launch only runtimes from `runtimeSummary.availableIds` — but
+   when the user names a runtime that is missing there, treat it as a
+   registration gap and register it (see "User-Named Runtimes") instead of
+   substituting a different runtime.
 6. Run `orchestrator models <runtime> --json --compact` before choosing an
    exact model value.
 
 Do not assume a runtime or model exists because it appears in an example.
+
+## User-Named Runtimes
+
+When the user names a runtime, use exactly that runtime id.
+`runtimeSummary.availableIds` lists what is currently registered, not what
+the user wants:
+
+- A user-named runtime missing from `runtimeSummary.availableIds` is a
+  registration gap, not permission to substitute. Register it (see below),
+  re-run doctor to confirm it appears, then launch. If you cannot register
+  it, launch nothing and report the missing runtime id.
+- Never silently substitute `pi` for `omp` or the reverse. `omp` is the
+  current harness (`omp` CLI); `pi` is its predecessor — a different agent
+  with different sessions, auth, and identity, even though the two CLIs look
+  alike. Substituting is valid only when the current request or
+  `PREFERENCES.md` explicitly defines that fallback. The `pi`-backed parent
+  run reported by doctor (`parent.run.source: pi-fallback`) is an internal
+  detail of `orchestrator run` and never licenses launching child jobs with
+  `pi` when the user asked for `omp`.
+
+### Registering a missing runtime (config)
+
+Orchestrator reads config JSON from, in order: `$XDG_CONFIG_HOME/orchestrator/config.json`
+or `~/.config/orchestrator/config.json`, `~/.orchestrator/config.json`,
+`<workspace>/orchestrator.config.json`, and
+`<workspace>/.orchestrator/config.json`. An `agents.<id>` object registers
+a process runtime:
+
+```json
+{
+  "agents": {
+    "omp": {
+      "adapter": "process",
+      "command": "omp",
+      "args": ["-p", "--auto-approve"],
+      "prompt": "argv-last",
+      "output": "text",
+      "displayName": "OMP",
+      "modelFlag": "--model",
+      "timeoutMs": 1800000
+    }
+  }
+}
+```
+
+- `{prompt}` inside `args` receives the task text; use `prompt` transport
+  (`argv-last`, `argv-first`, or `stdin`) instead when the CLI takes the
+  prompt as its last argument.
+- `output` is `text`, `json`, or `{"format": "jsonl", "finalEvent": "<name>"}`.
+- Non-built-in ids require `adapter: "process"` plus `command`; built-in ids
+  may only be enabled or disabled, not redefined.
+- Verify with `orchestrator doctor --json --compact`: the new id must appear
+  in `runtimeSummary.availableIds` with `available: true` before launching.
+
+## Spawn Default: Herdr Spaces
+
+When this session runs inside Herdr (`HERDR_ENV=1`), the user's standing
+preference is that new child agents run as Herdr agents in their own new
+workspace — not as orchestrator background tasks. Orchestrator background
+launch is the fallback for: exact `shell` commands, work outside a Herdr
+session, or runtimes with no matching Herdr kind. The orchestrator CLI
+remains the planning and steering surface; the child lives in Herdr.
+
+Spawn pattern (parse IDs from JSON responses; never guess them):
+
+```sh
+herdr pane split --current --direction right --cwd "$PWD" --no-focus
+# read the pane id from .result.pane.pane_id, then give it its own workspace:
+herdr pane move <pane-id> --new-workspace --label "<task-name>" --no-focus
+# a moved pane gets a new id — continue with .result.move_result.pane.pane_id
+herdr agent start <name> --kind <kind> --pane <moved-pane-id>
+herdr agent prompt <name> "<task>" --wait
+```
+
+- Map runtime ids to Herdr kinds: `claude-code`→`claude`, `codex`→`codex`,
+  `pi`→`pi`, `omp`→`omp`, `copilot`→`copilot`, `grok`→`grok`.
+- Collect results with `herdr agent prompt --wait` (first settled
+  idle/done/blocked), `herdr agent wait`, and
+  `herdr agent read --source recent-unwrapped`. Stop stale work by closing
+  the pane you created (`herdr pane close <pane-id>`), not with orchestrator
+  interrupt.
+- An omp-train (PII jail) job is a pane command, not an agent kind: run
+  `omp-train --harness codex exec --skip-git-repo-check "<task>"` in the new
+  pane and let Herdr classify the foreground process natively. NEVER
+  `agent start --kind codex` for jail work — that starts codex outside the
+  jail against the operator's own codex home.
+- When handing work back, report the agent name, kind, workspace label, and
+  outcome instead of an orchestrator task id.
 
 ## Name
 
@@ -154,7 +245,9 @@ orchestrator read <task-id|prefix> --wait --json --compact
 ```
 
 Use `shell` for exact local commands. Use an AI runtime for review,
-implementation, research, exploration, or analysis.
+implementation, research, exploration, or analysis. Inside Herdr, spawn AI
+runtimes in their own Herdr workspace instead (see "Spawn Default: Herdr
+Spaces"); background launch here is the fallback.
 
 ## Fan Out
 
@@ -186,6 +279,10 @@ orchestrator read <task-id> <task-id> --wait --json --compact
 ```
 
 Do not collapse several task ids into one quoted string.
+
+Inside Herdr, fan out one Herdr workspace and agent per task instead (see
+"Spawn Default: Herdr Spaces"); use a manifest only for the background-launch
+fallback.
 
 ## Let Orchestrator Coordinate
 
