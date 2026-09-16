@@ -46,6 +46,16 @@ coordinator at a glance:
 - Other multiplexers: use the native equivalent (session title, tab label,
   tmux rename-window) with the same display string, `Orchestrator`.
 
+## Steering Intake
+
+When the user interjects with steering mid-run, do not act on it immediately:
+append it to the ordered `todo` list at the position it belongs (existing
+phase when it continues that work, new phase when it is a different kind of
+work), then finish the current unit to its next safe boundary and work the
+list in order. Only two things act immediately: an explicit stop/cancel, or a
+steering message saying the current unit is itself wrong. Everything else is
+queue-then-execute, so the user can see and reorder the whole surface.
+
 ## Context Handoff
 
 An orchestrator is replaceable; the work is not. When your context reaches
