@@ -83,10 +83,15 @@ use the smallest sufficient rung:
 question → diagnostic feedback → smallest hint → worked substep → full example
 ```
 
+Pair diagnostic feedback with brief, specific encouragement that supports
+persistence without praising completion as mastery.
+
 After a successful assisted attempt, require a same-session attempt with one
 fewer rung. End with blank-page retrieval, one near-transfer item, and one
 far-transfer item tied to the mission. Mark each result as assisted,
-independent, or transfer; compare confidence with performance.
+independent, or transfer; compare confidence with performance. Do not infer
+learning from immediate correctness, fluent explanations, satisfaction, or
+confidence alone.
 
 Verification is separate from generation. Cite the primary source for factual
 claims. For code use a compiler, tests, or executable example; for mathematics
