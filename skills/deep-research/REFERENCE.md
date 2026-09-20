@@ -6,7 +6,7 @@ Companion to [SKILL.md](SKILL.md). Every rule in the skill traces to a measured 
 
 | Rule in SKILL.md | Evidence | Source |
 |---|---|---|
-| Fan out into parallel subagents | Orchestrator-worker (Opus 4 lead + Sonnet 4 subagents) beat single-agent Opus 4 by **90.2%** on Anthropic's internal research eval; subagents compress separate search spaces into separate context windows | [PRIMARY] https://www.anthropic.com/engineering/multi-agent-research-system |
+| No parallel subagent threads inside a worker (cost rule) | Orchestrator-worker delegation beat single-agent Opus 4 by **90.2%** on Anthropic's internal research eval — that pattern (separate workers, one per slice, orchestrated) is unaffected. What was measured 2026-09-16 on deployed harnesses: a SINGLE worker spawning its own parallel subagent threads multiplied raw token use several times per job and hid that cost from the caller's visible counter. In-worker fan-out is forbidden; delegation of slices to separate workers at the orchestrator level stays available. | [PRIMARY] https://www.anthropic.com/engineering/multi-agent-research-system + [MEASURED] 2026-09-16 per-session token audit |
 | Shape- and effort-scaled execution | Anthropic's shipped heuristics scale calls and workers with question complexity; early agents spawned 50 subagents for simple queries until these rules were added | [PRIMARY] Anthropic engineering blog (same URL) |
 | Spend is the lever, but bounded | Token usage alone explains **~80%** of BrowseComp performance variance; multi-agent costs ~15x chat tokens — worth it only for high-value parallelizable work | [PRIMARY] Anthropic engineering blog |
 | Test-time compute genuinely scales | BrowseComp accuracy scales smoothly with browsing effort; best-of-N confidence voting over 64 samples adds **15-25%** | [PRIMARY] https://arxiv.org/abs/2504.12516 |
@@ -34,6 +34,8 @@ Copy the prompt per slice into its delegation. The shared contract travels with 
 Slice N: <sub-question>. Non-goals: <what other slices own>.
 
 # Change
+0. Do not spawn subagents: execute this slice entirely in your own thread,
+   one source at a time.
 1. Search wide first (short queries), evaluate the landscape, then narrow.
 2. Follow every claim to the source that owns it — official docs, source code,
    specs, papers, first-party APIs. Roundups and listicles are leads only.
@@ -63,13 +65,13 @@ Run before writing the report, against the merged artifact set:
 
 ## 4. Wide vs deep execution shapes
 
-- **Deep** (one hard question, long causal chain): fewer subagents, more iterations each; replan after every round; keep a running sub-question graph.
-- **Wide** (large-N sweep: 50 competitors, 200 packages): one subagent per chunk with identical structured per-item output, then aggregate — MapReduce-shaped decomposition beats iterative depth here (+5.11-17.50% Item F1, 45.8% less runtime, https://arxiv.org/abs/2602.01331).
+- **Deep** (one hard question, long causal chain): fewer rounds, more iterations each; replan after every round; keep a running sub-question graph.
+- **Wide** (large-N sweep: 50 competitors, 200 packages): one pass per chunk with identical structured per-item output, run in the current thread one chunk at a time, then aggregate. (MapReduce-shaped decomposition beat iterative depth by +5.11-17.50% Item F1, 45.8% less runtime, https://arxiv.org/abs/2602.01331 — apply the shape, not the spawning.)
 - **Mixed**: run the wide sweep first to enumerate candidates, then a deep pass on the shortlist.
 
 ## 5. Anti-patterns
 
-- Spawning subagents before checking the runtime-provided prior art.
+- A worker spawning its own parallel subagent threads (the measured cost rule; check the runtime-provided prior art first anyway).
 - Overlapping slices — two agents running the same searches, findings double-counted.
 - A report whose TL;DR contains a number that appears nowhere in the artifacts.
 - Smoothing over a contradiction between two sources instead of naming it.

@@ -20,13 +20,18 @@ and a report that another person can audit. Keep the working vocabulary small:
   `[PRIOR-NOTE]` delta instead of re-deriving it.
 - State the audience, decision, recency window, comparison axes, and what
   “best” means when those are implicit in the request.
-- Choose an execution shape and an effort budget before delegating:
-  - **wide:** independent slices run concurrently;
+- Choose an execution shape and an effort budget before starting:
+  - **wide:** independent slices run one at a time in the current thread;
   - **deep:** a few slices run in rounds, with a replan after each round;
   - **mixed:** enumerate candidates first, then investigate a shortlist deeply.
-  Set the worker ceiling to the smaller of the independent-slice count and the
-  collaboration slots available at runtime (leaving a slot for the
-  orchestrator). Do not create a single-fact swarm.
+  Do not create a single-fact swarm. Do not spawn subagent threads from within
+  this execution: every slice runs in the current thread, whatever the shape.
+  (Delegating slices to separate workers is an orchestrator decision outside
+  this recipe; the measured cost problem was one worker spawning its
+  own parallel threads.) Measured 2026-09-16: a worker running slices as
+  parallel subagent sessions multiplied raw token use several times per job
+  (each thread re-reads its own context) while hiding that cost from the
+  caller's visible token counter.
 - Write a plan containing the question, sub-questions, success criteria, date
   window, execution shape, effort budget, and explicit out-of-scope items.
 
@@ -45,13 +50,15 @@ slice, and every slice has an owner, boundary, and acceptance condition.
 
 ## 3. Gather
 
-- For **wide**, delegate independent slices concurrently.
-- For **deep**, delegate the first round, inspect artifacts, and replan the
-  next round from what remains unverified.
+- For **wide**, run the independent slices one at a time in the current
+  thread; do not delegate them to subagents.
+- For **deep**, run the first round in the current thread, inspect artifacts,
+  and replan the next round from what remains unverified.
 - For **mixed**, enumerate candidates first, then run a deep pass on the
   shortlist.
-- When delegating, load the worker contract in
-  [REFERENCE.md](REFERENCE.md#worker-contract).
+- When this recipe is handed to you as a worker, load the worker contract in
+  [REFERENCE.md](REFERENCE.md#worker-contract) and follow its rule forbidding
+  subagents.
 - Require each artifact to use rows of `claim | URL | exact quote or number |
   retrieval date | source role`, plus an explicit unresolved-items list. Pass
   artifact paths and structured rows; do not relay findings through prose.
