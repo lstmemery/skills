@@ -50,3 +50,9 @@ Update an existing block in place, preserving surrounding sections. Always write
 Done when the chosen instruction file and all three configuration docs agree with the reviewed choices, pointers resolve, and no duplicate block exists. Report the files and which engineering skills consume them. They can be edited directly; rerunning is useful for changing trackers or restarting configuration.
 
 When **adding or evaluating a candidate skill for the suite**, read [VETTING.md](VETTING.md). Routine repo setup does not load that branch.
+
+## Local ticket operations
+
+For local Markdown tracker mechanics, use [LOCAL-TICKETS.md](LOCAL-TICKETS.md).
+It defines the shared command used by ticket publication, Wayfinder, and
+implementation closeout. It does not automate the setup choices above.
