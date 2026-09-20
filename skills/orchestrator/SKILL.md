@@ -47,10 +47,10 @@ Start with an offline preview, retain one run directory, and continue only with
 the returned argv:
 
 ```sh
-python3 scripts/herdr-jobs.py run --manifest REQUEST.json \\
+python3 scripts/herdr-jobs.py run --manifest REQUEST.json \
   --policy launch-policy.json --run-dir RUN_DIR --preview
-python3 scripts/herdr-jobs.py run --manifest REQUEST.json \\
-  --policy launch-policy.json --run-dir RUN_DIR \\
+python3 scripts/herdr-jobs.py run --manifest REQUEST.json \
+  --policy launch-policy.json --run-dir RUN_DIR \
   --host-contract HOST_CONTRACT --wait-seconds 30
 python3 scripts/herdr-jobs.py resume --run-dir RUN_DIR --wait-seconds 30
 python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 30
