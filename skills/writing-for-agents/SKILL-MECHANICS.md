@@ -1,22 +1,19 @@
 # Skill mechanics
 
-The skill-specific branch of [`writing-for-agents`](SKILL.md): what changes when the document is a skill (frontmatter, the invocation choice, and router skills). Everything else about writing it is the universal reference in `SKILL.md`.
+Read this branch of [writing-for-agents](SKILL.md) when creating or editing a skill. The active runtime contract owns loading commands, discovery behavior, and supported metadata.
 
-## Invocation
+## Discovery and explicit loading
 
-Two choices, trading the two loads:
+**Automatic discovery** lets the agent select a skill from the names and descriptions the harness exposes. **Explicit loading** follows a user request or an applicable instruction naming that skill. These are different operations: a manual invocation policy does not, by itself, establish whether another document can explicitly load the skill.
 
-- A **model-invoked** skill keeps a `description`, so the agent can fire it autonomously, and other skills can reach it. You can still type its name: model-invocation always _includes_ user reach; a description only ever adds agent discovery, never removes the human's. The description is the skill's top-level context pointer, forced to stay loaded at all times: permanent context load in exchange for discoverability. A model-invoked skill whose content is all reference is also one home for shared reference: another skill can invoke it, so reference needed by several skills lives in one place. Mechanics: omit `disable-model-invocation`, and write a model-facing description carrying the trigger branches (the pointer-writing rules in `SKILL.md` apply in full).
-- A **user-invoked** skill strips the description from the agent's reach: only the human typing its name can invoke it, and no other skill can. Zero context load, but it spends cognitive load: you are the index that must remember it exists. Mechanics: set `disable-model-invocation: true`; the `description` becomes human-facing: a one-line summary, trigger lists stripped.
+Preserve the existing invocation policy unless the user requests a change. This library uses `disable-model-invocation: true` for manual entrypoints and, where present, `policy.allow_implicit_invocation: false` in `agents/openai.yaml`. Retain those settings and unrelated UI metadata; let the target runtime interpret them. Do not infer that descriptions are always loaded, always hidden, or inaccessible to explicit references across every harness.
 
-Pick model-invocation only when the agent must reach the skill on its own, or another skill must. If it only ever fires by hand, make it user-invoked and pay no context load.
+Write discoverable descriptions as precise context pointers: capability, meaningful trigger branches, and boundaries that prevent likely misrouting. Manual descriptions can be short human summaries. New entrypoints should follow the target environment's skill-creation guidance and user intent.
 
-Shared reference that two user-invoked skills both need can live in neither: with no descriptions, neither can fire the other. Push it to a plain file outside the skill system: external reference any skill can point at.
+## Composition and shared reference
 
-## Splitting by invocation
+A **router skill** is an entrypoint that selects or composes named workflows. Keep its branches and return boundary clear, and use the runtime's supported mechanism for loading dependencies. A router may reduce what the human must remember while still increasing the instructions and work loaded by a run.
 
-The invocation cut of splitting (the sequence cut lives in `SKILL.md`): split off a model-invoked skill when you have a distinct leading word that should trigger it on its own (a trigger word you actually use in your prompts), or another skill must reach it. You pay context load for the new always-loaded description, so that independent reach has to be worth it.
+Split off a skill when it needs a distinct invocation or independent task contract. Use an ordinary linked reference for detail that only supports an existing branch. Shared material has one owner; explicit pointers can reach that owner using the runtime's allowed mechanism. Invocation policy alone is not a reason to duplicate shared reference or move it outside a skill directory.
 
-## Router skills
-
-When user-invoked skills multiply past what you can remember, that piled-up cognitive load is cured by a **router skill**: one user-invoked skill that names the others and when to reach for each, so the human has one skill to remember instead of many. It can only hint, never fire them: user-invoked skills have no description, so nothing but the human can reach them.
+When changing a router or invocation policy, verify the actual loading path in the target harness. A static link check establishes file reachability, not discovery reliability.

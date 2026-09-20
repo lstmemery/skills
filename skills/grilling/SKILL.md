@@ -1,47 +1,52 @@
 ---
 name: grilling
-description: Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases.
+description: Stress-test a plan, decision, or idea through a relentless interview when the user asks to be grilled.
 ---
 
-Interview the user relentlessly until you reach a shared understanding. Map this as a **design tree**: every decision branches into the decisions that hang off it.
+# Grilling
 
-Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled: the questions you can ask _now_ without guessing at answers you haven't heard yet. Ask the whole frontier in one round, then wait for the user's answers before the next round.
+Reach a shared understanding by working a **design tree**: decisions and the
+decisions that depend on them. Finish when every relevant branch is settled or
+explicitly excluded, no material decision is silently assumed, and the user
+confirms the concrete understanding. Existing explicit decisions count; do not
+ask the user to approve the same choice again.
 
-**Route the round through the harness's interactive ask-question facility** when
-the profile provides one — one call per round carrying every frontier question,
-never one call per question. On the **host** profile that facility is the `ask`
-tool, and it takes:
+## Rounds
 
-- `question` states the decision; `header` is a short display chip.
-- `options` are the real alternatives, 2–5 of them. Keep `label`s short and put the tradeoff in each option's `description`.
-- `recommended` marks your answer. You always have one — an unranked menu is not a grill.
-- `multi: true` only when the decision genuinely takes several answers at once.
-- Never add an "Other" option; the UI appends "Other (type your own)" itself.
+The **frontier** contains all material decisions whose prerequisites are
+settled. Ask the whole frontier in one round and wait for its answers before
+asking dependent questions. An answer that depends on another open question
+belongs to a later round. Recompute after each answer; prune branches the
+selected scope makes irrelevant.
 
-A harness with no such facility formats the round inline instead, one block per
-question, and the requirements are the same — numbered questions, real
-alternatives, a marked recommendation:
+For each question give real alternatives and a recommendation. Put evidence,
+tradeoffs, and disagreement with the premise in surrounding prose; make the
+question itself the decision. Avoid asking the user for routine implementation
+choices already determined by the agreed scope.
 
-```
-❓ **Q1** — **<question title>**: <question body, may be several paragraphs, including the choices>
+Use the harness's interactive question facility when available, with one call
+carrying the whole frontier. Follow its actual schema and limits, concise labels,
+and recommendation support; never add an Other choice when the UI supplies one.
+When no interactive facility exists, read
+[QUESTION-FORMAT.md](QUESTION-FORMAT.md) for the inline format.
 
-➡️ <your recommended answer>
+A bare `A` or `a` means agreement with every recommendation in the current
+round. Record those decisions and advance without asking for elaboration.
+Silence is not an answer, approval, or selection of the displayed default.
 
----
+## Facts and records
 
-❓ **Q2** — **<question title>**: <question body>
+Find facts yourself. A quick check stays inline; delegate a substantial,
+independent factual sweep when its value earns the overhead and delegation is
+available. Give it a bounded question and permitted sources. While it runs,
+ask unrelated frontier questions; only its dependent decisions wait.
 
-➡️ <your recommended answer>
-```
+Keep a compact record of settled decisions, rejected alternatives with material
+reasons, unresolved prerequisites, and the next frontier. The user owns design
+choices; observations and proposals remain distinguishable from those choices.
 
-Either way the evidence goes in the surrounding message text, not inside the
-options: what you measured, what it rules out, and where you disagree with the
-user's premise. The question carries the _decision_; the prose carries the _case_.
-
-Shorthand: a reply that is just `A` (or `a`) means "I agree" — take every recommended option for that round and move on without asking the user to elaborate.
-
-Each round the user answers reshapes the tree: settled decisions push the frontier outward and unblock questions that depended on them. Recompute the frontier and ask the next round. A question whose answer depends on another question still open in this round belongs to a _later_ round, not this one.
-
-Finding _facts_ is your job, never the user's. When a frontier question needs a fact from the environment (filesystem, tools, etc.), look it up yourself — a quick check runs inline; a substantive sweep goes to a **sub-agent** — and never ask the user for anything you could look up yourself. Don't block on a running exploration: it is an unsettled prerequisite, so only the questions downstream of it wait for the answer; ask the rest of the frontier now. The _decisions_ are the user's: put each to them and wait.
-
-The session is done when the frontier is empty: every branch of the design tree visited, nothing left silently assumed. Do not act on it until the user confirms you have reached a shared understanding.
+Prepare authorized reversible drafts and supporting documents so the final
+shared-understanding check has a concrete result to inspect. Before executing
+a still-unconfirmed design, obtain confirmation of that result; cite the
+remaining decision rather than adding a generic approval cycle. Confirmation
+does not grant unrelated publication, installation, or external-action authority.

@@ -12,7 +12,7 @@ disable-model-invocation: true
 
 **A ticket is publishable only when:**
 
-- it names one narrow, usable business outcome and the end-to-end boundaries it crosses;
+- it names one narrow, usable business outcome and the end-to-end boundaries it crosses, without duplicating another ticket's scope;
 - acceptance criteria are observable and sufficient to write a test before sizing or publication;
 - it is independently verifiable in one reviewable change and fits the project's normal iteration; split or make a bounded spike when uncertainty prevents that;
 - every `Blocked by` reference names a real ticket, has no self-edge, participates in an acyclic graph, and reverse edges agree;
@@ -25,7 +25,7 @@ disable-model-invocation: true
 1. **Gather.** Read the source and relevant domain/ADR/tracker docs. Search existing issues for duplicates when the tracker supports it. Identify the user outcome, constraints, and unresolved decisions.
 2. **Slice.** Draft tracer-bullet tickets that cross the necessary layers and are demoable alone. Preserve business value in every split; a layer-only task belongs under a value-bearing ticket or is a bounded research/prototype task. State the verification path and acceptance criteria for each ticket.
 3. **Handle dependencies.** Add an edge only for a genuine product or technical gate, never a preferred implementation order. For a wide mechanical refactor, use explicit **expand → migrate batches → contract**: migration batches block on expand; contract blocks on every batch; verify compatibility at each phase. If a batch cannot stay green alone, use an integration-and-verify ticket and say so.
-4. **Validate.** Check duplicate scope, outcome/value, acceptance-before-size, iteration fit, real references, self-edges, cycles, reverse-edge agreement, and an unblocked frontier. Record `Evidence missing: …` for unknowns. Return unestimable or unverifiable work to `to-spec` or make it a bounded spike.
+4. **Validate.** Apply the publishability gate above once to the complete graph. Record `Evidence missing: …` for unknowns. Return unestimable or unverifiable work to the spec's unresolved decisions or make it a bounded spike; a manual-only skill is not implicitly invoked by that return.
 5. **Review.** Present the numbered graph with each title, outcome, acceptance criteria, and blockers. Ask only: is granularity right, are blockers genuine, and should anything merge/split? Iterate until approved. If approval is unavailable, keep the draft unpublished.
 6. **Publish.** Publish blockers first using the configured tracker and apply `ready-for-agent`; the frontier is any ticket whose blockers are complete. Local Markdown uses one file per ticket in dependency order under the feature's issues directory; use the local template below and canonical textual `Blocked by` fields. Real trackers use native blocking links where supported and retain the semantic field for portability. Leave parent issues unchanged. Record the artifact identifiers and validation evidence.
 

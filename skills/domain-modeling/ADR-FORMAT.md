@@ -24,13 +24,8 @@ For high-uncertainty or high-lock-in choices, add `Alternatives`, `Confidence`, 
 
 ## Eligibility
 
-Offer an ADR only when all three are true:
-
-1. changing the choice later has meaningful cost;
-2. a future reader would be surprised without the rationale; and
-3. real alternatives were weighed.
-
-Qualifying examples include context ownership and integration, aggregate consistency boundaries, architectural shape, durable technology choices, deliberate deviations, and constraints absent from code. Routine naming changes and obvious choices stay in the glossary or ordinary documentation.
+Apply [ADR eligibility in SKILL.md](SKILL.md#adr-eligibility) before creating a
+record. This file owns the record format and numbering, not a second eligibility gate.
 
 ## Numbering
 

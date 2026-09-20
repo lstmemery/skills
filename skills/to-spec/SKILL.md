@@ -12,13 +12,11 @@ disable-model-invocation: true
 
 **Publish only when all are true:**
 
-- the problem, desired outcome, actors, constraints, and out-of-scope boundary are stated;
-- behavior covers each distinct actor/outcome and important alternate or failure path; stop when a new story duplicates an outcome or adds no acceptance-relevant behavior;
-- every requirement is clear, singular, consistent, feasible, individually verifiable, and traceable to a goal/problem and a verification method;
-- applicable quality attributes and human/operational constraints are recorded (or marked `Not applicable` with a reason);
-- scenarios describe observable behavior (`Given/When/Then` where it clarifies a rule) and avoid implementation choreography;
-- significant decisions record context, decision, consequences/trade-offs, alternatives, status, and owner; unresolved material decisions are exposed;
-- testing decisions name external behavior, seams, modules, and repository precedent.
+- **Problem and scope:** state the problem, outcome, actors, constraints, and exclusions.
+- **Behavior:** cover distinct actor/outcomes and important alternate/failure paths with observable scenarios (`Given/When/Then` when useful). Stop adding stories when they duplicate outcomes or add no acceptance-relevant behavior; keep implementation choreography out.
+- **Quality and constraints:** record applicable quality attributes and human/operational constraints, or mark them `Not applicable` with a reason.
+- **Decisions:** record context, choice, consequences/tradeoffs, alternatives, status, and owner; expose unresolved material decisions.
+- **Verification and traceability:** every requirement is singular, clear, consistent, feasible, verifiable, and linked to a goal/problem and verification method. Testing decisions name external behavior, seams, modules, and repository precedent.
 
 ## Process
 

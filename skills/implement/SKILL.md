@@ -1,21 +1,29 @@
 ---
 name: implement
-description: "Implement a piece of work based on a spec or set of tickets."
+description: Implement work from a spec or tickets, verify it, review it, and commit.
 disable-model-invocation: true
 ---
 
-Implement the work described by the user in the spec or tickets.
+# Implement
 
-Use TDD where possible, at seams the request, the spec, or existing tests have already settled — load and follow skill `tdd` for the loop and the seam rules.
+Implement the requested spec or tickets. Finish with verified behavior, every
+review finding dispositioned, a commit, and the applicable ticket closeout.
+Follow the task's existing authorization, isolation, and review boundaries.
 
-Run typechecking regularly, single test files regularly, and the full test suite once at the end.
-
-Once done, load and follow skill `code-review` to review the work.
-
-Refactor at green state: with the tests passing, clean up structure. The red → green loop stays refactor-free.
-
-Resolve every accepted review finding before committing: apply it, or record the reason it was rejected. Accepted findings are never left unresolved.
-
-Commit your work to the current branch.
-
-Closeout: when the work is accepted — finished and verified — set the ticket's `Status:` line to `done`, the terminal state for an implementation ticket. Decision and wayfinding tickets terminate as `resolved` under their own workflow; leave them to it.
+1. **Build.** For behavior with a meaningful runnable test, load and follow `tdd`
+   at a seam settled by the request, spec, ticket, or existing contract. Its seam
+   rule governs unresolved design choices. When no meaningful test seam exists,
+   record that limitation and use applicable verification. TDD returns here at
+   green; keep refactoring outside its red → green cycles.
+2. **Verify.** Run typechecking and affected test files during implementation.
+   Complete the repository's required checks and full suite at final verification.
+3. **Review.** Load and follow `code-review` against the completed change. Preserve
+   its Standards/Spec separation and explicit missing-spec procedure.
+4. **Refactor and resolve.** With tests green, clean up structure. Accept and fix
+   each applicable finding or record why it was rejected; leave no accepted
+   finding unresolved. Rerun affected checks after changes, refreshing review
+   evidence where the reviewed behavior changed. Final verification covers the
+   actual candidate being committed.
+5. **Commit and close.** Commit to the task's current branch. When finished and
+   verified, set an implementation ticket's `Status:` to `done`. Decision and
+   wayfinding tickets terminate as `resolved` under their own workflows.

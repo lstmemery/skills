@@ -1,42 +1,42 @@
 # Orchestrator Preferences
 
-Preferences are optional. Replace `No preferences set.` with plain-language
-instructions for choosing agents, models, fallbacks, and limit behavior.
-
-The current user request always wins. The skill still checks live runtime
-availability and provider limits before applying a preference.
-
-Preferences may use human model names. The skill resolves them against live
-runtime catalogs and aliases instead of relying on remembered model slugs.
-
-<!--
-Example:
-
-Use Fable only for extensive UI work.
-Use GPT-5.6 Sol for most deep execution work.
-Use Grok 4.5 Agent for simple coding tasks.
-Use Pi with Kimi 2.7 for exploration.
-When Fable is out of usage, use GPT-5.6.
-When GPT-5.6 is out of usage, use Opus.
-When every allowed provider is out of usage, pause new work until limits reset
-and notify me.
--->
+Apply only non-comment content under User Preferences. Current explicit user
+instructions take precedence. Resolve runtime and model names against live
+capabilities; unknown usage is not exhaustion.
 
 ## User Preferences
 
-- When the user asks for an omp job or names the `omp` runtime, launch
-  runtime `omp`. It is registered in `~/.orchestrator/config.json`
-  (process adapter around the `omp` CLI). Never substitute `pi` for `omp`:
-  `pi` is the predecessor harness with its own sessions and auth, not a
-  fallback for omp.
-- Inside Herdr (`HERDR_ENV=1`), spin up new child agents in their own new
-  workspace (`herdr pane split`, then `herdr pane move --new-workspace
-  --label <task-name> --no-focus`) and drive them with `herdr agent`
-  commands — not as orchestrator background launch tasks. Orchestrator
-  launch stays for `shell` tasks and for work outside Herdr.
-- Deep research and shopping jobs run as omp-train codex agents — the
-  `omp-train --harness codex exec` pane command in their own Herdr workspace
-  (PII jail), never a bare codex or omp agent — unless the user names a
-  different runtime in the request. Shopping jobs load and follow
-  `skill://shopping`; deep research jobs follow the deep-research worker
-  contract. (Set 2026-09-16 by user instruction.)
+- Delegate as much execution as possible. Use the coordinator for routing,
+  task state, and user communication; delegate substantive reasoning and review.
+  Fast models are preferred for coordinators. No exact model is pinned here.
+- Inside Herdr, place each worker in a new pane in its own new workspace.
+  Preserve the user's focus. Support different harnesses across workers.
+- Use isolated worktrees for repository changes, including small fixes. Prefer
+  standalone Treehouse for their lifecycle. Research and other work that does
+  not change a repository uses an ordinary task output folder.
+- Provide a Herdr diff/file pane beside a coding worker, using reviewr when
+  compatible. Show the complete task change, including committed work.
+- Local commits are allowed. Present code for the user's decision before opening
+  a PR or applying/merging changes into the target branch, including local-only
+  fixes. Approval to open a PR does not also authorize its later merge.
+- Every coding task runs the repository's applicable checks and the existing
+  `code-review` skill's Standards/Spec review before human inspection. Resolve
+  accepted findings and record any rejection with its reason. Follow that
+  skill's explicit missing-spec procedure when a spec cannot be found.
+- Continue supervision and routine authorized follow-ups while the user is away.
+  Queue decisions that require the user and continue independent work.
+- Maintain a compact task ledger and hand over to a fresh coordinator at safe
+  boundaries before context gets large. Do not depend on a universal 200k trigger.
+- Keep personal orchestration policy in this skill and standalone tool settings;
+  an upstream project clone is not a workflow dependency. Use deterministic
+  tools and scripts when they provide a concrete guarantee. Choose verification
+  from task and repository policy; add project-wide modes only when explicitly
+  selected.
+- When the user names `omp`, launch `omp`. Treat it as a distinct harness from
+  `pi`; register a missing process adapter when permitted, rather than substitute.
+- Deep research and shopping use jailed Codex workers via
+  `omp-train --harness codex exec` unless the user names another runtime.
+  On a host Herdr session, launch that as a pane command in its own workspace,
+  preserving the jail boundary. Shopping workers load skill `shopping`; deep
+  research workers follow their worker contract. Inside a jail, use only an
+  available in-jail route; never reach outward to a host Herdr session.

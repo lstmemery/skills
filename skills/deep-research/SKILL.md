@@ -1,128 +1,76 @@
 ---
 name: deep-research
-description: >-
-  Use for a broad, multi-source or high-stakes investigation: comparisons,
-  landscape scans, literature reviews, buy/build decisions, or any question
-  requiring parallel evidence and an auditable report. Route a single fact,
-  one source, or a “what does this document say?” lookup to `research`.
+description: Investigate broad comparisons, literature, landscapes, buy/build decisions, and high-stakes questions; use research for focused lookups.
 ---
 
 # Deep Research
 
-Use this recipe when the question needs several searches, independent evidence,
-and a report that another person can audit. Keep the working vocabulary small:
-`scope`, `contract`, `slice`, `artifact`, `audit`, `gap`, and `stop rule`.
+Produce a source-grounded report whose material claims can be audited.
+Finish when the scoped questions are supported or explicitly unresolved,
+claims pass the shared evidence check, and the finished report is delivered
+through the active runtime's output and delivery contract.
 
-## 1. Scope
+Single facts and document lookups belong to `research`. Within this recipe,
+execute all slices in the current thread. Workers do not spawn subagents;
+any authorized delegation is a coordinator decision outside this recipe.
 
-- Inspect the provided prior-art locations with the available filesystem/search
-  tools before the first web search. Reuse relevant prior work as a
-  `[PRIOR-NOTE]` delta instead of re-deriving it.
-- State the audience, decision, recency window, comparison axes, and what
-  “best” means when those are implicit in the request.
-- Choose an execution shape and an effort budget before starting:
-  - **wide:** independent slices run one at a time in the current thread;
-  - **deep:** a few slices run in rounds, with a replan after each round;
-  - **mixed:** enumerate candidates first, then investigate a shortlist deeply.
-  Do not create a single-fact swarm. Do not spawn subagent threads from within
-  this execution: every slice runs in the current thread, whatever the shape.
-  (Delegating slices to separate workers is an orchestrator decision outside
-  this recipe; the measured cost problem was one worker spawning its
-  own parallel threads.) Measured 2026-09-16: a worker running slices as
-  parallel subagent sessions multiplied raw token use several times per job
-  (each thread re-reads its own context) while hiding that cost from the
-  caller's visible token counter.
-- Write a plan containing the question, sub-questions, success criteria, date
-  window, execution shape, effort budget, and explicit out-of-scope items.
+## Scope and decompose
 
-**Done when:** the plan records implicit context, prior-art reuse or absence,
-the execution shape, the effort budget, and the out-of-scope boundary.
+Inspect supplied prior art before searching. Record audience, decision,
+recency window, comparison axes, definitions of “best,” exclusions, effort
+budget, and a stop rule. Prior reports remain prior-note evidence under the
+shared [research evidence contract](../research/EVIDENCE.md); read it before
+gathering or checking claims.
 
-## 2. Decompose
+Choose the execution shape from the question:
 
-Create non-overlapping `slice`s. For each, record its objective, output schema,
-preferred source classes, explicit boundary, owner, and acceptance condition.
-Put the shared `contract` (definitions, comparison axes, date window, and
-citation format) in delegation context once.
+- **Wide:** independent items or slices with comparable outputs, processed
+  one at a time in the current thread.
+- **Deep:** a dependent source/causal chain, investigated in rounds with a
+  replan after each round.
+- **Mixed:** enumerate candidates, then investigate a shortlist deeply.
 
-**Done when:** every requested sub-question or decision belongs to exactly one
-slice, and every slice has an owner, boundary, and acceptance condition.
+For a large or difficult decomposition, read
+[execution shapes](REFERENCE.md#execution-shapes). Give each slice one objective,
+source classes, boundary, owner, acceptance condition, and artifact path.
+Every requested part belongs to a slice; overlapping searches need an explicit
+reason. Keep shared definitions, date window, and comparison axes consistent.
 
-## 3. Gather
+## Gather and synthesize
 
-- For **wide**, run the independent slices one at a time in the current
-  thread; do not delegate them to subagents.
-- For **deep**, run the first round in the current thread, inspect artifacts,
-  and replan the next round from what remains unverified.
-- For **mixed**, enumerate candidates first, then run a deep pass on the
-  shortlist.
-- When this recipe is handed to you as a worker, load the worker contract in
-  [REFERENCE.md](REFERENCE.md#worker-contract) and follow its rule forbidding
-  subagents.
-- Require each artifact to use rows of `claim | URL | exact quote or number |
-  retrieval date | source role`, plus an explicit unresolved-items list. Pass
-  artifact paths and structured rows; do not relay findings through prose.
+Open sources that own the claims and record rows using the shared evidence
+contract. Each slice must return support or an unresolved item for every
+requested part, plus contradictions and its stopping reason. Read artifacts
+directly; passing their paths preserves evidence better than a prose relay.
 
-**Done when:** every slice has an artifact in the agreed schema, each
-acceptance condition is met or explicitly unresolved, and the `stop rule` is
-recorded.
+When executing a delegated slice, also read the
+[worker contract](REFERENCE.md#worker-contract). Follow its scope and stop rules;
+return the slice artifact to the coordinator without publishing it.
 
-## 4. Synthesize
+Build findings from the captured evidence. Synthesize independent sources
+where a claim has multiple owners; for a single-owner fact explain why that
+source is sufficient. Preserve conflicting claims and either resolve them with
+evidence or name the unresolved disagreement. Replan only around remaining gaps.
 
-Read artifacts directly and build findings from their evidence. Synthesize
-multiple independent sources when a claim has multiple owners. For a
-single-owner fact, explain why one primary source is sufficient. Record
-contradictions with both claims and URLs, then resolve them or carry them into
-the gap statement.
+## Check and deliver
 
-**Done when:** every finding maps to artifact rows, every contradiction has a
-disposition, and every single-source finding has a sufficiency explanation.
+Apply the shared claim check to the whole report, including uncited prose and
+summary claims. Captured, sufficiently current source text can satisfy the
+check; refetch when evidence is missing, incomplete, stale, or conflicting.
+Stop when the scoped coverage is met, further retrieval repeats evidence,
+and remaining uncertainty is explicit. Fix or qualify unsupported wording;
+a gap is acceptable only after the relevant search/check work was attempted.
 
-## 5. Audit
+Write one dated report with goal/scope/date, a brief method note, a cited
+summary of at most eight bullets, findings organized by the question, a
+comparison table when useful, caveats, an answer or recommendation with its
+tradeoff, a gap statement, and sources annotated by support/role/retrieval date.
+The report must stand alone and its summary must stay within the evidence.
 
-Load the citation-audit checklist from
-[REFERENCE.md](REFERENCE.md#citation-audit). Reopen load-bearing numbers,
-dates, versions, prices, and superlatives. Audit uncited load-bearing claims,
-label source roles, and apply the stop rule.
+Before delivery, verify scope and slice coverage, evidence links and claim-check
+results, conflict dispositions, named gaps, and report date/filename. Use the
+runtime's delivery contract for the finished report only; plans, slice artifacts,
+and check notes are working material. Report the delivery state actually observed.
 
-**Done when:** every retained load-bearing claim has a source opened during
-this run (or an explicit prior-note label), unresolved items are in the gap
-list, and no contradiction remains unreviewed.
-
-## 6. Report
-
-Write one dated report in the runtime’s designated output directory. Include:
-
-1. Goal, date, and method note (verified at source versus merely discovered)
-2. A cited TL;DR of no more than eight bullets
-3. Findings, one section per slice
-4. A comparison table when the question is comparative
-5. Failure modes and caveats
-6. An answer or recommendation; state the tradeoff when making a decision
-7. A gap statement explaining what could not be verified and why
-8. Sources, with each URL annotated by support, source role, and retrieval date
-
-**Done when:** the report stands alone, the TL;DR has no unsupported claim, and
-the filename/date and required sections are present.
-
-## 7. Hand off
-
-Deliver only the finished report through the runtime's delivery contract. Do not
-deliver plans, slice artifacts, or audit scratch work.
-
-**Done when:** the delivery step names exactly the final report and the
-release gate below passes.
-
-## Release gate
-
-Record pass/fail before handoff. All gates must pass: prior art checked; scope,
-shape, and effort recorded; slices non-overlapping with acceptance conditions;
-artifacts complete or unresolved items named; findings traceable to artifacts;
-load-bearing and uncited claims audited; contradictions resolved or in gaps;
-gap statement present; report schema, date, and filename valid; and handoff
-points only to the finished report. A failed gate must be fixed before queuing;
-document an evidence gap in the report only after the required search and audit
-work has been completed.
-
-For the worker contract, detailed audit checklist, evidence rationale, and
-wide/deep/mixed guidance, use [REFERENCE.md](REFERENCE.md).
+For evidence rationale and historical cost observations when maintaining this
+skill, read [REFERENCE.md](REFERENCE.md#evidence-and-maintenance).
