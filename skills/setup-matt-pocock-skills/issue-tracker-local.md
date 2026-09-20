@@ -1,30 +1,61 @@
 # Issue tracker: Local Markdown
 
-Issues and specs for this repo live as markdown files in `.scratch/`.
+Issues and specs for this repo live as Markdown files under `.scratch/`.
+One feature uses one directory: `.scratch/<feature-slug>/`, with `PRD.md`,
+`issues/NN-slug.md` records, a `Status:` field near the top, and comments under
+`## Comments`. The leading issue number is the ticket identity. Use the shared
+[local-ticket command](LOCAL-TICKETS.md) for parsing, validation, frontier
+selection, claims, publication, resolution, closeout, and recovery. It is the
+single authority for these mechanics; this file defines storage and domain
+lifecycle only.
 
-## Conventions
+## Ticket storage
 
-- One feature per directory: `.scratch/<feature-slug>/`
-- The spec is `.scratch/<feature-slug>/PRD.md`
-- Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a single combined tickets file
-- Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
-- Comments and conversation history append to the bottom of the file under a `## Comments` heading
+- Implementation issues are one file per ticket under
+  `.scratch/<feature-slug>/issues/`, numbered from `01`.
+- A feature's Wayfinder map is `.scratch/<effort-slug>/map.md`; its child tickets
+  use the same `issues/NN-slug.md` shape and a `Type:` field.
+- `publish` creates a file under the selected feature root. A referenced ticket
+  path is read directly; agents do not infer it by searching arbitrary files.
+- All agents working on the same feature use one canonical feature directory,
+  including agents in separate code worktrees. A copied tracker has separate
+  state and cannot prevent duplicate claims.
 
-## When a skill says "publish to the issue tracker"
+## Lifecycles
 
-Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).
+Implementation tickets **omit** `Type:`. They use the configured triage labels:
+`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix`.
+Publication sets `ready-for-agent`; verified implementation closeout sets `done`.
+`wontfix` means closed without action and does not satisfy a dependent ticket.
+Revise that dependency explicitly when the work should proceed another way.
 
-## When a skill says "fetch the relevant ticket"
+Wayfinding child tickets **always** carry one of `research`, `prototype`,
+`grilling`, or `task` in `Type:`. They have no `Status:` while open and
+unclaimed, `claimed` while owned, and `resolved` after the answer is recorded.
+Only a `done` implementation predecessor or `resolved` Wayfinding predecessor
+satisfies a dependency. A cycle, self-edge, dangling ID, duplicate number, or
+ambiguous field is invalid rather than an empty frontier.
 
-Read the file at the referenced path. The user will normally pass the path or the issue number directly.
+The helper records `Claimed by:` and `Claim ID:` for both ticket kinds, separate
+from implementation triage. Claims never expire. Explicit release or
+reassignment is required; reassignment invalidates the previous claim. Active
+claim history stays in `.ticket-operations/`; resolution and completion retire
+active ownership while retaining that history.
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
+The map is an index: its `Destination`, `Notes`, `Decisions so far`, `Not yet
+specified`, and `Out of scope` sections orient the effort. Child detail lives in
+the ticket. A frontier is open, unblocked, and unclaimed. Wayfinder claims a
+child before work, then records an accepted answer, marks it `resolved`, and
+adds a linked gist to the map. The session limit and human-in-the-loop rule stay
+in `wayfinder/SKILL.md`; the helper performs only the supplied file transitions.
 
-- **Map**: `.scratch/<effort>/map.md` (the Notes / Decisions-so-far / Fog body).
-- **Child ticket**: `.scratch/<effort>/issues/NN-<slug>.md`, numbered from `01`, with the question in the body. A `Type:` line records the ticket type (`research`/`prototype`/`grilling`/`task`); a `Status:` line records `claimed`/`resolved`.
-- **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked when every file it lists is `resolved`.
-- **Frontier**: scan `.scratch/<effort>/issues/` for files that are open, unblocked, and unclaimed; first by number wins.
-- **Claim**: set `Status: claimed` and save before any work.
-- **Resolve**: append the answer under an `## Answer` heading, set `Status: resolved`, then append a context pointer (gist + link) to the map's Decisions-so-far in `map.md`.
+## Recovery and remote boundaries
+
+Mutation previews report concrete diffs and a plan hash. Apply requires that
+hash; the helper rechecks current file hashes and dependencies. Cooperative
+callers use the feature directory lock. Interrupted multi-file updates can be
+resumed only when current files match their recorded before/after states;
+independent edits produce a conflict. Remote trackers, board moves, assignment,
+comments, and commits are outside this local backend.
