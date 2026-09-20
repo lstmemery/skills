@@ -39,3 +39,10 @@ Use the configured issue tracker's **Wayfinding operations** for storage, child 
 | `task` | Agent or human | Prerequisite work needed to decide, such as provisioning access. Do it when authorized and possible; otherwise give the human precise steps. Record completion and resulting facts or credential locations, never secret values. |
 
 Handle bounded research lookups inline. Delegate substantial independent research when a separate agent adds value; load `research` in that worker too. Give it the claimed ticket, question, sources/constraints, and output location; inspect findings before resolution. Preserve evidence in a durable artifact linked from the ticket. Use the calling workflow's isolation policy for any repository changes; a read-only lookup needs no throwaway branch merely to exist.
+
+## Local Markdown mechanics
+
+When using local Markdown, follow the shared [local-ticket command](../setup-matt-pocock-skills/LOCAL-TICKETS.md) for frontier, claim, release/reassignment, and accepted resolution.
+Use the canonical shared feature root from every code worktree. A cancelled
+blocker does not satisfy a dependency. Preserve human decision requirements and
+the session limit above; the helper owns the file updates and recovery.

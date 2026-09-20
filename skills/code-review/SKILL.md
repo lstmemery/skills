@@ -15,20 +15,21 @@ reported its full findings or none, with skipped axes and blockers explicit.
 Choose the mode matching the request. Ask if the target is absent or ambiguous
 (for example, “since main” might mean a branch or working changes).
 
-| Mode | Change and history |
-|---|---|
-| Committed branch / PR | `git diff <base>...HEAD` and `git log <base>..HEAD --oneline`; base is the intended landing branch. |
-| Exact commit, SHA, tag, or `HEAD~N` | `git diff <commit> HEAD` and `git log <commit>..HEAD --oneline`; compare exactly these endpoints. |
-| Working tree / staged / WIP | `git diff HEAD` includes staged and unstaged work. Also list `git ls-files --others --exclude-standard` and read every untracked file in full. |
+Use [CAPTURE.md](CAPTURE.md) and `scripts/capture.py` for the selected branch,
+exact-base-to-HEAD, or WIP mode. Preview names refs and paths; capture pins them
+and includes regular non-ignored untracked files in WIP. Save the capture outside
+the repo. Both axes receive the same capture ID and read surrounding source from
+its saved inventories. Review judgment stays with the reviewers.
 
-Resolve every used ref with `git rev-parse <ref>` before reviewing. Record the
-mode, resolved refs, exact commands, and untracked-file list where relevant;
-give both axes the same captured change. A bad ref blocks review.
+Find the authorities below before final capture so their versions can be included
+with `--authority`. Missing/unsupported content remains visible. Review available
+material with partial findings; full-scope review stays incomplete until gaps are
+covered or scope is explicitly changed. Preserve the explicit missing-spec process.
 
-An empty committed diff excludes any uncommitted work: check `git status --short`
-and offer WIP mode when that is where the change lives. With no changes in the
-selected range, report nothing to review. WIP is empty only when both its diff
-and untracked-file list are empty.
+An empty committed capture excludes uncommitted work: use its worktree notice to
+offer WIP mode when appropriate. An empty WIP capture has neither net changes nor
+untracked work. A bad ref blocks capture; report nothing to review only for a
+valid empty selected scope.
 
 ## 2. Find the authorities
 
@@ -48,7 +49,7 @@ Standards always applies, including when no such documents exist.
 ## 3. Run the axes
 
 With a spec, run **two parallel sub-agents with separate review contexts**.
-Give each the captured change and its relevant authority files. Use bounded
+Give each the same verified capture and its relevant captured authority files. Use bounded
 briefs rather than the other axis's findings. Without a spec, after the explicit
 missing-spec procedure, perform Standards inline; one axis needs no worker.
 
@@ -71,3 +72,8 @@ verbatim or lightly cleaned; link any complete findings file beside its summary.
 Keep the axes separate without merging or reranking them. End with each axis's
 finding count and its own worst issue, or “none”; identify any skipped or blocked
 axis. Summary limits never discard findings.
+
+Before claiming the current checkout has been reviewed, run capture `check`.
+If source or authorities drifted, finish findings for the captured version and
+require a fresh review for the current version. Keep Standards and Spec findings
+separate, and include the capture ID, coverage gaps, and drift in the result.
