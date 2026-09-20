@@ -35,7 +35,11 @@ mattpocock/skills with light harness adaptations).
 | Skill | Origin | What changed |
 |---|---|---|
 | deep-research | original | — |
+| diagnosing-bugs | upstream | carried from [mattpocock/skills](https://github.com/mattpocock/skills) |
+| herdr | upstream | carried from [herdrdev/herdr](https://github.com/herdrdev/herdr) |
 | tutor | original | — |
+| wayfinder | adapted | shared decision-ticket map and harness-neutral routing |
+| wizard | upstream | carried from [mattpocock/skills](https://github.com/mattpocock/skills) |
 | writing-for-humans | original | — |
 | research | adapted | rebuilt from a 12-line upstream stub; Consensus MCP route, citation audit, evidence-table recipe |
 | domain-modeling | adapted | rewritten and condensed; boundary/ownership framing |
