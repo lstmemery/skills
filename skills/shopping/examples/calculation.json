@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-09-20T12:00:00Z",
+  "currency": "USD",
+  "rounding": {
+    "places": 2,
+    "mode": "half_up"
+  },
+  "fx": [],
+  "offers": [
+    {
+      "offer_id": "synthetic-offer",
+      "quantity": 1,
+      "shipments": [
+        {
+          "shipment_id": "parcel",
+          "quantity": 1,
+          "price_basis": "per_item",
+          "item_price": {
+            "amount": "100",
+            "currency": "USD"
+          },
+          "packages": [],
+          "observed_at": "2026-09-20T10:00:00Z",
+          "evidence_refs": [
+            "synthetic-quote"
+          ]
+        }
+      ],
+      "charges": [
+        {
+          "component_id": "delivery",
+          "kind": "shipping",
+          "scope": "order",
+          "basis": "once",
+          "money": {
+            "low": "5",
+            "expected": "5",
+            "high": "5",
+            "currency": "USD"
+          },
+          "included": false,
+          "threshold": null,
+          "observed_at": "2026-09-20T10:00:00Z",
+          "evidence_refs": [
+            "synthetic-quote"
+          ]
+        },
+        {
+          "component_id": "sales-tax",
+          "kind": "tax",
+          "scope": "order",
+          "basis": "once",
+          "money": {
+            "low": "18",
+            "expected": "18",
+            "high": "18",
+            "currency": "USD"
+          },
+          "included": false,
+          "threshold": null,
+          "observed_at": "2026-09-20T10:00:00Z",
+          "evidence_refs": [
+            "synthetic-quote"
+          ]
+        }
+      ],
+      "promotions": [
+        {
+          "benefit_id": "coupon",
+          "kind": "discount",
+          "status": "validated",
+          "guaranteed": true,
+          "threshold": null,
+          "conditions": [],
+          "allocations": [
+            {
+              "shipment_id": "parcel",
+              "reduction": {
+                "amount": {
+                  "amount": "10",
+                  "currency": "USD"
+                }
+              }
+            }
+          ],
+          "observed_at": "2026-09-20T10:00:00Z",
+          "evidence_refs": [
+            "synthetic-quote"
+          ]
+        },
+        {
+          "benefit_id": "cashback",
+          "kind": "cashback",
+          "status": "validated",
+          "guaranteed": true,
+          "threshold": null,
+          "conditions": [
+            "attribution remains unconfirmed"
+          ],
+          "allocations": [
+            {
+              "shipment_id": "parcel",
+              "reduction": {
+                "amount": {
+                  "amount": "3",
+                  "currency": "USD"
+                }
+              }
+            }
+          ],
+          "observed_at": "2026-09-20T10:00:00Z",
+          "evidence_refs": [
+            "synthetic-quote"
+          ],
+          "confirmed": false
+        }
+      ],
+      "return_costs": [],
+      "unknowns": []
+    }
+  ]
+}
