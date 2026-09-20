@@ -34,3 +34,9 @@ and notify me.
   --label <task-name> --no-focus`) and drive them with `herdr agent`
   commands — not as orchestrator background launch tasks. Orchestrator
   launch stays for `shell` tasks and for work outside Herdr.
+- Deep research and shopping jobs run as omp-train codex agents — the
+  `omp-train --harness codex exec` pane command in their own Herdr workspace
+  (PII jail), never a bare codex or omp agent — unless the user names a
+  different runtime in the request. Shopping jobs load and follow
+  `skill://shopping`; deep research jobs follow the deep-research worker
+  contract. (Set 2026-09-16 by user instruction.)
