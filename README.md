@@ -56,7 +56,7 @@ mattpocock/skills with light harness adaptations).
 | grill-with-docs | upstream | wrapper pairing `grilling` + `domain-modeling` |
 | setup-matt-pocock-skills | upstream | carried verbatim |
 | implement | adapted | closeout rules for tracker ticket states |
-| orchestrator | upstream (BSL 1.1) | carried verbatim from [backnotprop/orchestrator](https://github.com/backnotprop/orchestrator); its CLI self-installs on first use |
+| orchestrator | upstream (BSL 1.1) | initially carried from [backnotprop/orchestrator](https://github.com/backnotprop/orchestrator); reworked with a managed Herdr job helper (policy, scripts, tests) |
 
 ## License
 

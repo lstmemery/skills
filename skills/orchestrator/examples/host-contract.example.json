@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "verified": false,
+  "herdr_help_sha256": "",
+  "herdr_agent_help_sha256": "",
+  "orchestrator_help_sha256": "",
+  "supported_kinds": [],
+  "server_version": "",
+  "paths": {
+    "session_id": ["SET_FROM_VERIFIED_HOST_RESPONSE"],
+    "server_version": ["SET_FROM_VERIFIED_HOST_RESPONSE"],
+    "agent_state": ["SET_FROM_VERIFIED_HOST_RESPONSE"],
+    "agent_pane_id": ["SET_FROM_VERIFIED_HOST_RESPONSE"],
+    "agent_kind": ["SET_FROM_VERIFIED_HOST_RESPONSE"],
+    "agent_name": ["SET_FROM_VERIFIED_HOST_RESPONSE"]
+  },
+  "jail_export": null
+}

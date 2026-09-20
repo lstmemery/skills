@@ -1,0 +1,1 @@
+Inspect this synthetic fixture: an item is described as both available and unavailable at the same time. Report the contradiction and identify the missing observation needed to resolve it. This is an offline example; no search or external access is needed.

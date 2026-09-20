@@ -4,6 +4,15 @@ Apply only non-comment content under User Preferences. Current explicit user
 instructions take precedence. Resolve runtime and model names against live
 capabilities; unknown usage is not exhaustion.
 
+## Managed Herdr Jobs
+
+For independent ordinary-agent and omp-train jobs in an authorized Herdr host
+session, [launch-policy.json](launch-policy.json) is the executable authority
+and [managed-jobs.md](references/managed-jobs.md) defines request overrides,
+receipts, collection, and recovery. Keep executable routing in that policy
+rather than duplicating it in prose. The coordinator retains task intent and
+acceptance of worker output.
+
 ## User Preferences
 
 - Delegate as much execution as possible. Use the coordinator for routing,
