@@ -65,7 +65,15 @@ rebate and a discount must not subtract the same benefit twice.
    seller, fulfillment, and quantity distinctions. Load
    [RECORDS.md](RECORDS.md) when normalizing comparison records.
 3. **Calculate and validate.** Compute reproducible total ranges with linked
-   inputs. For promotions, read [coupon-validation.md](coupon-validation.md).
+   inputs. For supported arithmetic, use the offline calculator and explicit
+   input contract in [CALCULATOR.md](CALCULATOR.md). Keep existing run records;
+   derive a calculation input without migrating the consumer's layout. The
+   command checks structure and computes supplied rules; product selection,
+   terms interpretation, promotion validation, evidence quality, and policy
+   decisions remain this workflow's responsibility. If the helper is absent or
+   a rule is unsupported, retain the Decimal/manual formula and explicit gaps;
+   do not install anything or force unsupported rules into the schema.
+   For promotions, read [coupon-validation.md](coupon-validation.md).
    For conditional thresholds, split shipments, returns, dimensional weight,
    or import costs, read [shipping-normalization.md](shipping-normalization.md).
    A straightforward quoted domestic shipping charge needs only the core
