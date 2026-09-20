@@ -26,6 +26,40 @@ gaps, and the next decision if any. Include worker identity, harness/model when
 known, workspace, and status in a compact task card. Keep full logs and code in
 linked artifacts.
 
+## Select the branch
+
+For independent ordinary-agent and omp-train jobs in an authorized Herdr host
+session, use **Managed Herdr Jobs** below. Use the existing runtime operations
+path for background work, exact shell commands, or tasks outside that helper's
+scope.
+
+## Managed Herdr Jobs
+
+Use `scripts/herdr-jobs.py` for independent ordinary-agent and omp-train jobs.
+It validates the request and host binding, records launch effects, observes
+workers, and collects bounded result artifacts. Read
+[managed-jobs.md](references/managed-jobs.md) for the request schema, receipt
+contract, recovery rules, and result states; read
+[host-integration.md](references/host-integration.md) before first live use or
+after an installed Herdr/launcher contract changes.
+
+Start with an offline preview, retain one run directory, and continue only with
+the returned argv:
+
+```sh
+python3 scripts/herdr-jobs.py run --manifest REQUEST.json \\
+  --policy launch-policy.json --run-dir RUN_DIR --preview
+python3 scripts/herdr-jobs.py run --manifest REQUEST.json \\
+  --policy launch-policy.json --run-dir RUN_DIR \\
+  --host-contract HOST_CONTRACT --wait-seconds 30
+python3 scripts/herdr-jobs.py resume --run-dir RUN_DIR --wait-seconds 30
+python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 30
+```
+
+The helper performs no runtime installation, registration, automatic cleanup,
+or successor handoff. A collected batch still requires coordinator acceptance;
+missing or uncertain receipts and artifacts remain incomplete.
+
 ## Coordinate
 
 1. **Reconcile.** Read preferences and the compact active task records. For a new
@@ -41,9 +75,11 @@ linked artifacts.
    [worker contract](references/workers.md) for the brief and return record.
    Finish with a bounded assignment and a selected runtime, not an open-ended
    instruction to manage the whole queue.
-3. **Launch.** Choose execution through [runtime operations](references/runtime.md).
-   Inside Herdr, use a new worker pane in its own workspace. Allocate an isolated
-   worktree before repository changes; other work uses an ordinary task folder.
+3. **Launch.** For independent ordinary-agent or omp-train jobs in an authorized
+   Herdr host session, use **Managed Herdr Jobs** above. Otherwise choose
+   execution through [runtime operations](references/runtime.md). Inside Herdr,
+   use a new worker pane in its own workspace. Allocate an isolated worktree
+   before repository changes; other work uses an ordinary task folder.
    Retain the returned identities and observe startup before marking the task
    running. Preserve the user's focus.
 4. **Supervise.** Wait through the backend's event/wait surface, inspect an actual
