@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "default_concurrency": 4,
+  "max_concurrency": 4,
+  "topology": "new-workspace",
+  "routes": {
+    "ordinary": {"mode": "agent", "runtime": null},
+    "deep_research": {"mode": "jail", "runtime": "codex"},
+    "shopping": {"mode": "jail", "runtime": "codex"}
+  },
+  "runtime_kinds": {
+    "claude-code": "claude",
+    "codex": "codex",
+    "pi": "pi",
+    "omp": "omp",
+    "copilot": "copilot",
+    "grok": "grok"
+  }
+}

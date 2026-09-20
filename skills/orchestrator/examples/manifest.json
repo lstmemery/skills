@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "request_id": "example-review",
+  "jobs": [
+    {
+      "job_id": "inspect",
+      "name": "Inspect supplied fixture",
+      "task_kind": "ordinary",
+      "task_file": "task.md",
+      "cwd": ".",
+      "output_expectation": "A short report identifying any contradictions in the supplied fixture.",
+      "override": {
+        "runtime": "codex",
+        "instruction": "Example user request: use Codex for this fixture inspection."
+      }
+    }
+  ]
+}
