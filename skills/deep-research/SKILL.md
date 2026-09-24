@@ -10,9 +10,10 @@ Finish when the scoped questions are supported or explicitly unresolved,
 claims pass the shared evidence check, and the finished report is delivered
 through the active runtime's output and delivery contract.
 
-Single facts and document lookups belong to `research`. Within this recipe,
-execute all slices in the current thread. Workers do not spawn subagents;
-any authorized delegation is a coordinator decision outside this recipe.
+Single facts and document lookups belong to `research`. Executing workers is a
+coordinator function: this thread owns scoping, synthesis, and release, and may
+dispatch slices to workers. Fanout is bounded and depth-one — a worker executes
+its slice in its own thread and never spawns further workers.
 
 ## Scope and decompose
 
@@ -24,11 +25,26 @@ gathering or checking claims.
 
 Choose the execution shape from the question:
 
-- **Wide:** independent items or slices with comparable outputs, processed
-  one at a time in the current thread.
+- **Wide:** independent items or slices with comparable outputs. Execute
+  sequentially when the set is small or the slices are cheap; dispatch one
+  worker per slice when the slices are independent and each is large enough to
+  amortize its own context. Dispatch shape is a cost decision, not a correctness
+  one — the slice contract is identical either way.
 - **Deep:** a dependent source/causal chain, investigated in rounds with a
   replan after each round.
 - **Mixed:** enumerate candidates, then investigate a shortlist deeply.
+
+Fan-out is authorized only when all of these hold; otherwise stay sequential:
+
+- slices are independent — no slice consumes another's output;
+- each slice carries its own objective, source classes, boundary, acceptance
+  condition, and artifact path, so a worker can finish without asking;
+- the count is bounded by the budget recorded during scoping, not by how many
+  items happen to be enumerable;
+- depth is one. A worker returns its artifact; it does not dispatch.
+
+Retain the coordinator's own thread for synthesis. Reading worker artifacts
+directly is preferred to a prose relay.
 
 For a large or difficult decomposition, read
 [execution shapes](REFERENCE.md#execution-shapes). Give each slice one objective,

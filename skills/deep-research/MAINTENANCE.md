@@ -3,14 +3,16 @@
 Read when maintaining or evaluating [SKILL.md](SKILL.md). The table below is
 inherited historical rationale, not evidence verified by this revision. Its
 source labels and measurements describe the earlier document's assertions;
-reopen the originals before relying on them for a current claim. The active
-single-thread execution constraint is a policy, not a new performance finding.
+reopen the originals before relying on them for a current claim. The
+single-thread execution constraint active between 2026-09-20 and 2026-09-24 was
+withdrawn on 2026-09-24; the measurement it rested on forbids nested fanout, not
+orchestrated delegation.
 
 ## 1. Why each rule exists
 
 | Rule in SKILL.md | Evidence | Source |
 |---|---|---|
-| No parallel subagent threads inside a worker (cost rule) | Orchestrator-worker delegation beat single-agent Opus 4 by **90.2%** on Anthropic's internal research eval — that pattern (separate workers, one per slice, orchestrated) is unaffected. What was measured 2026-09-16 on deployed harnesses: a SINGLE worker spawning its own parallel subagent threads multiplied raw token use several times per job and hid that cost from the caller's visible counter. In-worker fan-out is forbidden; delegation of slices to separate workers at the orchestrator level stays available. | [PRIMARY] https://www.anthropic.com/engineering/multi-agent-research-system + [MEASURED] 2026-09-16 per-session token audit |
+| No nested fanout (depth-one rule) | Orchestrator-worker delegation beat single-agent Opus 4 by **90.2%** on Anthropic's internal research eval — that pattern (separate workers, one per slice, orchestrated) is unaffected. What was measured 2026-09-16 on deployed harnesses: a SINGLE worker spawning its own parallel subagent threads multiplied raw token use several times per job and hid that cost from the caller's visible counter. In-worker fan-out is forbidden; delegation of slices to separate workers at the orchestrator level stays available. | [PRIMARY] https://www.anthropic.com/engineering/multi-agent-research-system + [MEASURED] 2026-09-16 per-session token audit |
 | Shape- and effort-scaled execution | Anthropic's shipped heuristics scale calls and workers with question complexity; early agents spawned 50 subagents for simple queries until these rules were added | [PRIMARY] Anthropic engineering blog (same URL) |
 | Spend is the lever, but bounded | Token usage alone explains **~80%** of BrowseComp performance variance; multi-agent costs ~15x chat tokens — worth it only for high-value parallelizable work | [PRIMARY] Anthropic engineering blog |
 | Test-time compute genuinely scales | BrowseComp accuracy scales smoothly with browsing effort; best-of-N confidence voting over 64 samples adds **15-25%** | [PRIMARY] https://arxiv.org/abs/2504.12516 |
