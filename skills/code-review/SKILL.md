@@ -56,6 +56,9 @@ missing-spec procedure, perform Standards inline; one axis needs no worker.
 - **Standards:** the reviewer reads [STANDARDS.md](STANDARDS.md) and the repository
   standards. Pass the reference path when accessible, otherwise its full content.
   The coordinator need not load this reference unless performing that axis itself.
+  When the change is Python and skill `python-expert-best-practices-code-review`
+  is installed, this axis also applies its rules; where a rule restates a
+  tooling check, the tooling result decides and the rule is not re-reported.
 - **Spec:** give only the review inputs and spec for this brief: “Report missing
   or partial requirements, unrequested behavior, and requirements implemented
   incorrectly. Quote the spec support for each finding and locate the file/hunk.”

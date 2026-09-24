@@ -59,7 +59,8 @@ rebate and a discount must not subtract the same benefit twice.
 1. **Scope and gather.** Record inputs and an effort/stop rule. Separate retailer,
    identity, cost/return, and promotion questions only when useful; bounded work
    stays inline. Delegation must earn its overhead and follow the calling
-   workflow; deep-research workers keep their own single-thread constraint.
+   workflow; delegated research follows the deep-research worker contract,
+   including its fanout bounds.
 2. **Normalize.** Match identifiers (GTIN/UPC/EAN/ISBN or brand plus MPN), then
    exact attributes; label fuzzy matches. Preserve pack count, condition,
    seller, fulfillment, and quantity distinctions. Load

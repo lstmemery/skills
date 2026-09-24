@@ -9,6 +9,8 @@ from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fie
 from .transport import BudgetExpired, EffectUnknown
 
 
+JAIL_WORKER_ROOT = "/work/out"  # the jail profile's output root; see docs/agents/runtime-profile.md
+
 PHASES = {"pending", "split", "moved", "ready", "submitted"}
 
 
@@ -31,7 +33,7 @@ class Engine:
         for spec in request["jobs"]:
             attempt = "0" * 32
             if spec["route"]["mode"] == "jail":
-                output = Path("/work/out") / f"c9-{digest(request['request_id'].encode())[:12]}" / f"{spec['job_id']}-{attempt}"
+                output = Path(JAIL_WORKER_ROOT) / f"c9-{digest(request['request_id'].encode())[:12]}" / f"{spec['job_id']}-{attempt}"
             else:
                 output = self.root / "workers" / spec["job_id"] / attempt
             job = {"spec": spec, "attempt_id": attempt, "worker_output": str(output)}
@@ -136,6 +138,9 @@ class Engine:
             instructions = "Load and follow skill shopping.\n"
         elif spec["task_kind"] == "deep_research":
             instructions = "Load and follow skill deep-research and its worker contract. Execute this job in your own thread.\n"
+        current = (spec.get("override") or {}).get("instruction")
+        if current:
+            instructions = f"Current user instruction (highest precedence):\n{current}\n\n{instructions}"
         return (f"{instructions}{spec['task']}\n\nManaged-job output contract:\n"
                 f"Expected result: {spec['output_expectation']}\n"
                 f"Output directory: {job['worker_output']}\n"

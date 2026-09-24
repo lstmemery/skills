@@ -6,7 +6,8 @@ source labels and measurements describe the earlier document's assertions;
 reopen the originals before relying on them for a current claim. The
 single-thread execution constraint active between 2026-09-20 and 2026-09-24 was
 withdrawn on 2026-09-24; the measurement it rested on forbids nested fanout, not
-orchestrated delegation.
+orchestrated delegation. Model and vendor names below are dated evidence about
+what each study measured, not a description of any runtime this skill runs on.
 
 ## 1. Why each rule exists
 

@@ -7,7 +7,7 @@ record the applicable quote in the run before relying on it.
 
 ## Shipping
 
-## Carrier and retailer rules traced to claim rows
+### Carrier and retailer rules traced to claim rows
 
 - **Best Buy [C-BBY-BASIS, C-BBY-THRESHOLD].** Shipping can be per order, per item, or per pound; marketplace sellers set rates. The $35 free-shipping threshold is after coupons and before tax, with product and marketplace exclusions.
 - **Target [C-TGT-THRESHOLD].** The $35 merchandise subtotal is after discounts and excludes tax/shipping; geography and item exclusions apply.
@@ -18,7 +18,7 @@ record the applicable quote in the run before relying on it.
 - **Returns [C-AMZ-RETURN, C-EBAY-RETURN, C-TGT-RETURN].** Amazon may deduct return shipping and varies heavy/bulky fees; eBay assigns postage by return reason and policy; Target may withhold original shipping when the return is not due to retailer error.
 - **FTC [C-FTC-DRIP].** Mandatory fees belong in the presented total because omission late in checkout is the drip-pricing harm identified in the rulemaking.
 
-## Claim-row index
+### Claim-row index
 
 These IDs point to the research worker rows (retrieved 2026-09-15); retain the URL and quote in each run artifact.
 
@@ -36,14 +36,14 @@ These IDs point to the research worker rows (retrieved 2026-09-15); retain the U
 
 ## Promotions
 
-## Retailer rules traced to claim rows
+### Retailer rules traced to claim rows
 
 - **Target [C-TGT-STACK, C-TGT-EXACT, C-TGT-LIMIT].** One manufacturer, one category, and one item offer may combine per item; exact brand/size/quantity/color/flavor matching and master-file validation apply; expired/copied/altered coupons fail; identical coupons are limited to four per household/day and one storewide offer per transaction.
 - **Walgreens [C-WAL-EXPIRY, C-WAL-STACK, C-WAL-DIGITAL].** Expiry is 11:59 p.m. local in stores and 11:59 p.m. CST online; one manufacturer plus applicable Walgreens coupons may apply to one item, with no coupon against a free BOGO item; digital offers must be attached before purchase and cannot be added at pickup/delivery.
 - **Rakuten [C-RAK-ATTR, C-RAK-NET, C-RAK-EXCL].** Start from the portal link, stay in the same session, and use approved codes; other-site visits or unlisted codes can void attribution. Net eligible spend excludes taxes, fees, shipping, discounts, returns, cancellations, and extended warranties; rates and exclusions vary. Cashback is a delayed, conditional rebate until confirmed.
 - **FTC [C-FTC-AFFILIATE].** A commission, free product, or discount is a material connection. Disclose it clearly and near the recommendation.
 
-## Claim-row index
+### Claim-row index
 
 These IDs point to the research worker rows (retrieved 2026-09-15); retain the URL and quote in each run artifact.
 

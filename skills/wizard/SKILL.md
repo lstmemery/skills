@@ -21,4 +21,4 @@ Open the relevant URL before asking for its value. Use hidden entry for secrets,
 
 Run `bash -n <script>` and `shellcheck` if available, then make the script executable. Trace it statically: every scoped value is captured and lands at its declared destination, every CI secret/variable name matches its workflow reference, stages are ordered/count correctly, secrets use hidden input, and irreversible actions have confirmation gates.
 
-Done when the concrete procedure is reviewable, static checks pass or limitations are explicit, and the user has the path and run command. For an authorized repeatable setup path, commit it and link it from README. Never validate by executing the human procedure yourself.
+Done when the concrete procedure is reviewable, static checks pass or each unrun check is named in the hand-off message with its reason, and the user has the path and run command. For an authorized repeatable setup path, commit it and link it from README. Never validate by executing the human procedure yourself.
