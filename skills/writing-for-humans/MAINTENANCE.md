@@ -20,10 +20,4 @@ Record input, output, user constraints, prompt/skill version, available model/sn
 
 ## Model notes
 
-Keep the copy-edit contract portable. The source skill included steering hints for Astra, Claude Opus, and Claude Fable; they were not verified by the static audits. Retain them as hypotheses for targeted evaluation, not claims about current product behavior:
-
-- **Astra:** a compact skill loaded for relevant prose tasks may avoid unnecessary context. Evaluate preservation and clarity directly instead of relying on a launch or template-adherence claim.
-- **Claude Opus:** an explicit requested visible length may be more useful than changing reasoning effort to control output length. Compare the resulting prose with the intended shape.
-- **Claude Fable:** specifying literal wording, density, complete sentences, and desired formatting may help when an observed output misses those requirements. Test only the dimensions that need correction.
-
-The user's voice, evidence, and format requirements govern every model. Recheck affected fixtures after a model, prompt, or skill change; do not add a model-specific branch to ordinary copy editing without an observed need.
+The copy-edit contract is model-neutral. The user's voice, evidence, and format requirements govern every model. Recheck affected fixtures after a model, prompt, or skill change; do not add a model-specific branch to ordinary copy editing without an observed need.

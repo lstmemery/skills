@@ -158,7 +158,12 @@ def prepare(manifest_path, policy_path):
             fields(override, ["instruction"], ["runtime", "model"], "override")
             text(override["instruction"], "override instruction", 10000)
             if "runtime" in override:
-                route = {"mode": "agent", "runtime": identifier(override["runtime"], "override runtime")}
+                named = identifier(override["runtime"], "override runtime")
+                if route["mode"] == "jail" and named != route["runtime"]:
+                    raise JobError("decision_needed",
+                                   f"{job_id}: override runtime {named} would leave the {job['task_kind']} jail route; "
+                                   "re-issue the job as task_kind ordinary to run it outside the jail")
+                route = {"mode": route["mode"], "runtime": named}
             if "model" in override:
                 model = text(override["model"], "model", 200)
         runtime = route["runtime"]

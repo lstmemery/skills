@@ -1,6 +1,6 @@
 # ADR Format
 
-ADRs live beside the `CONTEXT.md` whose vocabulary the decision uses, in `docs/adr/`, with sequential names such as `0001-event-sourced-orders.md`. Create the directory lazily. A single-context repository keeps it at the root; a multi-context repository may also have system-wide ADRs for cross-context decisions.
+ADRs live beside the `CONTEXT.md` whose vocabulary the decision uses, in `docs/adr/`, with sequential names such as `0001-event-sourced-orders.md`. Create the directory lazily. A single-context repository keeps it at the root; a multi-context repository keeps system-wide and cross-context decisions in the root `docs/adr/` and context-scoped decisions beside that context's `CONTEXT.md`.
 
 ## Required record
 

@@ -12,3 +12,7 @@ Finish when the interview's shared-understanding check is complete and the
 records reflect the accepted decisions, with unresolved proposals labeled.
 When the requested outcome is a revised artifact, prepare that reviewable
 artifact alongside the records; the documentation is not a substitute for it.
+
+If skill `domain-modeling` is not installed in the active profile, say so, run
+`grilling` alone, and record the missing skill as the reason the glossary and
+ADRs were not updated.

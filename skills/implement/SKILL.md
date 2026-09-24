@@ -19,8 +19,10 @@ For local Markdown tickets, read the [local-ticket command](../setup-matt-pocock
    green; keep refactoring outside its red → green cycles.
 2. **Verify.** Run typechecking and affected test files during implementation.
    Complete the repository's required checks and full suite at final verification.
-3. **Review.** Load and follow `code-review` against the completed change. Preserve
-   its Standards/Spec separation and explicit missing-spec procedure.
+3. **Review.** Load and follow `code-review` against the completed change (on a
+   Python change its Standards axis brings in the Python rules skill when
+   installed). Preserve its Standards/Spec separation and explicit missing-spec
+   procedure.
 4. **Refactor and resolve.** With tests green, clean up structure. Accept and fix
    each applicable finding or record why it was rejected; leave no accepted
    finding unresolved. Rerun affected checks after changes, refreshing review

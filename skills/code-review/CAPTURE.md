@@ -70,15 +70,17 @@ content lies outside its reviewed version. Scope changes require a new capture;
 never edit the existing manifest to turn partial coverage into complete coverage.
 
 Exit 0 means capture/preview/read/verification succeeded; exit 2 means invalid
-input or a Git failure; exit 3 means conflict/drift; exit 4 means corrupt capture;
-exit 5 means unsupported/unavailable input or I/O. Missing refs, an unborn HEAD,
+input, an unrecognized or malformed manifest, or a Git failure; exit 3 means
+conflict/drift; exit 4 means a well-formed capture whose stored content no longer
+matches its recorded digests or completion marker; exit 5 means
+unsupported/unavailable input or I/O. Missing refs, an unborn HEAD,
 unmerged WIP, or multiple merge bases are explicit failures. The helper observes
 twice and rejects changed inputs; it does not lock developers out of editing, and
 cannot prove the absence of an external change-and-revert between observations.
 
 This first version snapshots the full before/after tracked trees for context.
 Bounds are 8 MiB per source file, 256 MiB unique source bytes, and 20,000 tree
-entries. It favors reliable local evidence over minimal disk use; no latency or
-weaker-model reliability improvement is claimed without measurement. Authorities
+entries. It favors reliable local evidence over minimal disk use; it claims correctness of
+the recorded evidence only, not review speed. Authorities
 are explicit local paths; spec discovery and missing-spec handling remain in the
 calling skill.

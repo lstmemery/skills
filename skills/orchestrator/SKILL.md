@@ -95,7 +95,10 @@ operations](references/runtime.md) for live Herdr/model inspection, and the
    atomically activates the acknowledged generation and successor, then the
    successor records supervision acceptance and reconciles adopted handles. If no
    retiring owner can perform an unambiguous transfer, do not self-authorize;
-   preserve work and report the ownership gap. Preserve existing uncommitted
+   preserve work and record the ownership gap as the run's terminal state in a
+   `SUCCESSOR-GAP.md` beside `STATE.md`: the unacknowledged generation, the live
+   workers observed but not adopted, and the exact command that would resume.
+   That file, not a message, is this branch's completion evidence. Preserve existing uncommitted
    changes. Do not launch pending work or a replacement worker until its recorded
    dependency and authorization are satisfied. Keep the successor Herdr pane
    alive for future waits.

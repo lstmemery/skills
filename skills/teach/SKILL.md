@@ -52,7 +52,9 @@ and the next lesson. Reuse existing assets before creating new ones.
 
 1. **Load state.** Read mission, notes, prior learning records, resources, and
    available assets. Before the first lesson, read `SEMINAR-PREFERENCES.md` from
-   the context root if supplied; otherwise use teaching preferences in notes.
+   the workspace root that holds the seminar directories, if present; otherwise
+   use preferences in the seminar's `NOTES.md` and ask once for a missing
+   convention rather than inventing one.
    If the mission is missing or its Why is vague, ask one compact question about
    the concrete outcome and wait before writing dependent content.
 2. **Prepare the branch.** A new seminar needs its directory, mission, resources

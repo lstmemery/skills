@@ -301,7 +301,7 @@ def observe(repo, mode, base, authorities):
                 'diff_sha256': digest(diff), 'history_sha256': digest(history)}
     fingerprint = digest(encoded(manifest))
     manifest.update(capture_id=fingerprint, commands=git.commands,
-                    worktree_notice=status if mode != 'wip' else None)
+                    worktree_notice='; '.join(filter(None, status.split('\0'))) if mode != 'wip' else None)
     return manifest, collector.blobs, diff, history
 
 

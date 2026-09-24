@@ -18,8 +18,9 @@ acceptance of worker output.
 - Delegate as much execution as possible. Use the coordinator for routing,
   task state, and user communication; delegate substantive reasoning and review.
   Fast models are preferred for coordinators. No exact model is pinned here.
-- Inside Herdr, place each worker in a new pane in its own new workspace.
-  Preserve the user's focus. Support different harnesses across workers.
+- Inside Herdr, place each worker in a new pane in its own new workspace; the
+  managed path's topology is set and validated in
+  [launch-policy.json](launch-policy.json). Preserve the user's focus. Support different harnesses across workers.
 - Use isolated worktrees for repository changes, including small fixes. Prefer
   standalone Treehouse for their lifecycle. Research and other work that does
   not change a repository uses an ordinary task output folder.
@@ -45,6 +46,8 @@ acceptance of worker output.
   `pi`; register a missing process adapter when permitted, rather than substitute.
 - Deep research and shopping use jailed Codex workers via
   `omp-train --harness codex exec` unless the user names another runtime.
+  A named runtime is honoured by re-issuing the job as `task_kind: ordinary`;
+  a runtime override on the jail route itself is refused, never converted.
   On a host Herdr session, launch that as a pane command in its own workspace,
   preserving the jail boundary. Shopping workers load skill `shopping`; deep
   research workers follow their worker contract. Inside a jail, use only an

@@ -8,7 +8,7 @@ Apply [SKILL.md](SKILL.md)'s map rules and session limit.
 
 ## Record and update
 
-Post the answer as a resolution comment, close the ticket, and append its linked title and gist to Decisions so far. For local files, use the shared helper’s `resolve` operation with the accepted answer, gist, and evidence; it updates the answer, status, and map together with recoverable steps. Preserve the claim ID returned when taking the ticket. Link any result assets and evidence.
+Post the answer as a resolution comment, close the ticket, and append its linked title and gist to Decisions so far. For local files, use the `resolve` operation of the local-ticket helper ([LOCAL-TICKETS.md](../setup-matt-pocock-skills/LOCAL-TICKETS.md)) with the accepted answer, gist, and evidence; if the helper is unavailable, apply the repository's manual sequence and record that the helper was skipped. The helper updates the answer, status, and map together with recoverable steps. Preserve the claim ID returned when taking the ticket. Link any result assets and evidence.
 
 Refresh current tracker state before edits. Create newly precise tickets and then wire their dependencies; remove graduated fog patches. If the answer exposes work beyond the destination, close the affected ticket with an explanation in Out of scope instead of resolving it on the route. Update or retire invalidated tickets while preserving evidence of their disposition and concurrent sessions' edits.
 

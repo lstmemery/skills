@@ -250,6 +250,24 @@ class JobsTest(unittest.TestCase):
         code, result = self.call(preview=True)
         self.assertEqual((code, result["error"]), (5, "decision_needed"))
 
+    def test_override_instruction_leads_the_worker_prompt(self):
+        self.call()
+        prompt = (self.root / "prompt-job0.txt").read_text()
+        self.assertTrue(prompt.startswith("Current user instruction (highest precedence):\nUse Codex for this fixture."))
+
+    def test_override_cannot_move_a_jail_job_out_of_its_route(self):
+        self.write_jobs(1, ["deep_research"])
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["override"] = {"runtime": "claude-code", "instruction": "Use Claude Code."}
+        self.manifest.write_text(json.dumps(manifest))
+        code, result = self.call(preview=True)
+        self.assertEqual((code, result["error"]), (5, "decision_needed"))
+        manifest["jobs"][0]["override"]["runtime"] = "codex"
+        self.manifest.write_text(json.dumps(manifest))
+        code, result = self.call(preview=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["jobs"][0]["route"], {"mode": "jail", "runtime": "codex"})
+
     def test_shell_metacharacters_remain_task_data(self):
         self.call()
         self.assertFalse((self.root / "SHOULD_NOT_EXIST").exists())
