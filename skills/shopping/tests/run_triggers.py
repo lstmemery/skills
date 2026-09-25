@@ -21,6 +21,7 @@ SKILL_DIR = TESTS_DIR.parent
 CASES_FILE = TESTS_DIR / "trigger-cases.json"
 HARNESS_NAMES = ("claude", "omp", "pi")
 CLAUDE_PLUGIN_NAME = "shopping-trigger-test"
+RUNNER_VERSION = 2
 TIMEOUT_SECONDS = 75
 CLAUDE_MAX_BUDGET_USD = "0.25"
 ROUTER_SYSTEM_PROMPT = (
@@ -229,6 +230,7 @@ def command_for(harness: str, binary: str, prompt: str, temp_root: Path) -> tupl
         command = [
             binary,
             "-p",
+            "--bare",
             "--output-format",
             "stream-json",
             "--verbose",
@@ -332,10 +334,17 @@ def run_case(
             command[1:1] = ["--model", model]
 
     try:
+        environment = os.environ.copy()
+        if harness == "claude":
+            isolated_home = temp_root / "home"
+            isolated_home.mkdir()
+            environment["HOME"] = str(isolated_home)
+            environment["CLAUDE_CONFIG_DIR"] = str(temp_root / "claude-config")
+
         completed = subprocess.run(
             command,
             cwd=temp_root,
-            env=os.environ.copy(),
+            env=environment,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -388,12 +397,25 @@ def run_case(
 
 
 def cli_version(binary: str) -> str:
+    temporary_directory: Any = None
+    environment = os.environ.copy()
+    if Path(binary).name == "claude":
+        temporary_directory = tempfile.TemporaryDirectory(prefix="shopping-trigger-version-")
+        isolated_root = Path(temporary_directory.name)
+        isolated_home = isolated_root / "home"
+        isolated_home.mkdir()
+        environment["HOME"] = str(isolated_home)
+        environment["CLAUDE_CONFIG_DIR"] = str(isolated_root / "claude-config")
     try:
         result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
+    finally:
+        if temporary_directory is not None:
+            temporary_directory.cleanup()
     if result.returncode != 0:
         return "unknown"
     return (result.stdout or result.stderr).strip().splitlines()[0][:160]
@@ -417,7 +439,7 @@ def result_summary(
     return {
         "harness": harness,
         "cli_version": version,
-        "runner_version": 1,
+        "runner_version": RUNNER_VERSION,
         "test_system_prompt": "isolated-skill-router-v1",
         "model_override": model,
         "status": status,
