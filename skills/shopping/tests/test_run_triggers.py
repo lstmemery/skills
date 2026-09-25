@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import run_triggers
 from run_triggers import (
     activation_evidence,
     claude_skill_events,
@@ -22,6 +26,31 @@ class TriggerFixtureTests(unittest.TestCase):
         self.assertEqual(len(cases), 13)
         self.assertEqual(sum(case["activation"] == "yes" for case in cases), 8)
         self.assertEqual(sum(case["activation"] == "no" for case in cases), 5)
+
+    def assert_validate_only_rejects(self, payload: object) -> str:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture = Path(temp_dir) / "invalid-trigger-cases.json"
+            fixture.write_text(json.dumps(payload), encoding="utf-8")
+            error_output = io.StringIO()
+            with patch.object(run_triggers, "CASES_FILE", fixture):
+                with patch("sys.argv", ["run_triggers", "--validate-only"]):
+                    with redirect_stderr(error_output):
+                        self.assertEqual(run_triggers.main(), 2)
+        return error_output.getvalue()
+
+    def test_validate_only_reports_non_object_fixture_root(self) -> None:
+        error = self.assert_validate_only_rejects([])
+        self.assertIn("trigger-cases.json must be a JSON object", error)
+        self.assertNotIn("Traceback", error)
+
+    def test_validate_only_reports_unhashable_activation(self) -> None:
+        payload = {
+            "version": 1,
+            "cases": [{"id": "bad-activation", "activation": [], "prompt": "Example"}],
+        }
+        error = self.assert_validate_only_rejects(payload)
+        self.assertIn("activation must be 'yes' or 'no'", error)
+        self.assertNotIn("Traceback", error)
 
 
 class ActivationEvidenceTests(unittest.TestCase):

@@ -34,6 +34,8 @@ ROUTER_SYSTEM_PROMPT = (
 
 def load_cases() -> list[dict[str, Any]]:
     payload = json.loads(CASES_FILE.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("trigger-cases.json must be a JSON object")
     if payload.get("version") != 1 or not isinstance(payload.get("cases"), list):
         raise ValueError("trigger-cases.json must have version 1 and a cases array")
 
@@ -52,7 +54,7 @@ def load_cases() -> list[dict[str, Any]]:
         if case_id in ids:
             raise ValueError(f"duplicate case id: {case_id}")
         ids.add(case_id)
-        if activation not in counts:
+        if not isinstance(activation, str) or activation not in counts:
             raise ValueError(f"{case_id}: activation must be 'yes' or 'no'")
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError(f"{case_id}: prompt must be non-empty text")
