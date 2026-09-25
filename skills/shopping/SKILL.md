@@ -1,6 +1,6 @@
 ---
 name: shopping
-description: Find exact product variants and compare destination-specific totals, delivery, coupons, and cashback; also answer focused offer questions.
+description: Compare exact product variants by delivered total, shipping, coupons, and cashback; research current purchase offers and answer “which should I buy?” or ticket/pass price comparisons.
 ---
 
 # Shopping

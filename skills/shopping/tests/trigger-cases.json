@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "delivered-total-exact-variants",
+      "activation": "yes",
+      "prompt": "Compare these exact 1 TB SSD models from two retailers. Which has the lower delivered total to postal code K1A 0B1 after shipping and tax?"
+    },
+    {
+      "id": "seller-and-unknown-fees",
+      "activation": "yes",
+      "prompt": "I found two sellers for the same blender model. Compare the purchase cost and delivery, and flag fees that are still unknown."
+    },
+    {
+      "id": "coupon-terms",
+      "activation": "yes",
+      "prompt": "Find a current coupon for a USB-C dock at a Canadian retailer and tell me its terms and whether it can be combined with the sale price."
+    },
+    {
+      "id": "cashback-eligibility",
+      "activation": "yes",
+      "prompt": "Check the cashback offers on these listings and separate guaranteed discounts from conditional cashback."
+    },
+    {
+      "id": "which-should-i-buy",
+      "activation": "yes",
+      "prompt": "Which should I buy, Model A or Model B? Compare the exact variants, purchase cost, delivery, and return fit."
+    },
+    {
+      "id": "event-ticket-fees",
+      "activation": "yes",
+      "prompt": "I'm choosing between two event ticket listings. Compare the total including service fees and delivery, and flag restricted ticket terms."
+    },
+    {
+      "id": "youth-pass-offer",
+      "activation": "yes",
+      "prompt": "Does a youth transit pass currently have a discount or promo code? Compare the price and eligibility rules with the standard fare."
+    },
+    {
+      "id": "pass-comparison",
+      "activation": "yes",
+      "prompt": "Compare two ski passes for the same dates and resort. Show the price after fees and any applicable coupon or cashback."
+    },
+    {
+      "id": "book-recommendations",
+      "activation": "no",
+      "prompt": "Name a few mystery novels that could spark a good book club discussion."
+    },
+    {
+      "id": "recipe-request",
+      "activation": "no",
+      "prompt": "Give me a vegetarian weeknight recipe using chickpeas, rice, and tomatoes."
+    },
+    {
+      "id": "restaurant-recommendation",
+      "activation": "no",
+      "prompt": "Where would you suggest for a birthday dinner near a convention center?"
+    },
+    {
+      "id": "weekend-activities",
+      "activation": "no",
+      "prompt": "What are some fun weekend activities for visiting family?"
+    },
+    {
+      "id": "informational-product-comparison",
+      "activation": "no",
+      "prompt": "Explain the chemistry tradeoffs between LFP and NMC batteries in a general-interest way."
+    }
+  ]
+}
