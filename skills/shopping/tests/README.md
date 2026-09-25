@@ -26,13 +26,15 @@ configuration. Every harness receives the same routing-only system prompt: use
 listed skill metadata to decide whether a skill directly applies, load it if so,
 then stop without doing the underlying task. This prevents unrelated global
 assistant instructions from changing the routing result. Claude receives a
-temporary plugin and limits settings to project/local sources so user-installed
-skills cannot shadow it; Pi receives an explicit skill path with other
-discovered skills disabled; omp receives a temporary custom skill directory
-overlay. Claude uses its configured authentication, but session persistence is
-off and each Claude prompt has a `$0.25` budget ceiling. Tool access is limited
-to Claude's `Skill` tool or the harness's read tool. The fixture does not
-request a purchase.
+temporary plugin and runs in bare mode with temporary home/config directories
+and project/local settings, so its user profile, installed skills, and stored
+credentials stay out of the run. It can authenticate only through
+environment-provided credentials; if none are available, the run records that
+error. Pi receives an explicit skill path
+with other discovered skills disabled; omp receives a temporary custom skill
+directory overlay. Claude session persistence is off and each prompt has a
+`$0.25` budget ceiling. Tool access is limited to Claude's `Skill` tool or the
+harness's read tool. The fixture does not request a purchase.
 
 The result records these activation signals:
 
@@ -45,6 +47,7 @@ A positive prompt passes only with a matching event; a negative prompt passes
 only without one. If a harness exits unsuccessfully or emits no structured
 event stream, the runner records an error or an unobservable result instead of
 guessing from the answer. Result records identify the controlled prompt as
-`isolated-skill-router-v1`. Repeat the same fixture after a description change
-to track missed positive routes and negative over-triggering. Keep the harness
-version and `skill_source_sha256` with each result so runs can be compared.
+`isolated-skill-router-v1` and include `runner_version` for comparison.
+Repeat the same fixture after a description change to track missed positive
+routes and negative over-triggering. Keep the harness version and
+`skill_source_sha256` with each result so runs can be compared.
