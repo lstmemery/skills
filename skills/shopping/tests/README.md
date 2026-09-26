@@ -11,12 +11,12 @@ Run the offline fixture check with:
 python3 skills/shopping/tests/run_triggers.py --validate-only
 ```
 
-Run a harness from the repository root with:
+Run a harness from the repository root with results under the ignored test-artifact folder:
 
 ```sh
-python3 skills/shopping/tests/run_triggers.py --harness claude --output-dir /tmp/shopping-trigger-results
-python3 skills/shopping/tests/run_triggers.py --harness omp --output-dir /tmp/shopping-trigger-results
-python3 skills/shopping/tests/run_triggers.py --harness pi --output-dir /tmp/shopping-trigger-results
+python3 skills/shopping/tests/run_triggers.py --harness claude --output-dir skills/shopping/tests/.artifacts/trigger-results
+python3 skills/shopping/tests/run_triggers.py --harness omp --output-dir skills/shopping/tests/.artifacts/trigger-results
+python3 skills/shopping/tests/run_triggers.py --harness pi --output-dir skills/shopping/tests/.artifacts/trigger-results
 ```
 
 Each run starts a fresh, non-interactive process for each prompt. It makes a

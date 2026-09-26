@@ -1,7 +1,7 @@
 """Narrow host CLI adapter; all live access is gated before discovery."""
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import selectors
 import shlex
 import shutil
@@ -161,8 +161,10 @@ class NativeTransport:
         if export is None:
             raise JobError("unavailable_capability", "jail artifact export has not been bound")
         fields(export, ["verified", "host_root", "worker_root"], label="jail_export")
-        if export["verified"] is not True or export["worker_root"] != "/work/out":
-            raise JobError("unavailable_capability", "jail export needs a verified /work/out mapping")
+        worker_root = PurePosixPath(text(export["worker_root"], "export worker_root", 4096))
+        if (export["verified"] is not True or not worker_root.is_absolute()
+                or len(worker_root.parts) < 2 or ".." in worker_root.parts):
+            raise JobError("unavailable_capability", "jail export needs a verified absolute worker workspace root")
         root = Path(text(export["host_root"], "export host_root", 4096))
         if not root.is_absolute() or not root.is_dir() or root.is_symlink():
             raise JobError("unavailable_capability", "jail export root must be an existing absolute directory")
