@@ -1,6 +1,6 @@
 ---
 name: shopping
-description: Find exact product variants and compare destination-specific totals, delivery, coupons, and cashback; also answer focused offer questions.
+description: "Research a real purchase or current offer for a specific product, event ticket, or pass. Use for exact variant and delivered-cost comparisons, service fees, coupons or promo codes, cashback, eligibility, and “which should I buy?” choices. Includes one-item coupon checks and ticket or pass price comparisons. Exclude recipes, activity or restaurant recommendations, and educational product comparisons without a buying decision."
 ---
 
 # Shopping
@@ -12,6 +12,15 @@ The skill never places an order or submits payment. Account access requires
 explicit authorization; a research request alone does not grant it.
 
 ## Scope and route
+
+Route here only when the user is researching a concrete purchase or current
+offer: for example, comparing exact retail listings after delivery costs,
+checking a coupon or cashback offer, or comparing actual event tickets or
+passes. “Which should I buy?” applies when the user is choosing a real purchase.
+Do not route recipe requests, ideas for activities or places to visit, or
+educational comparisons that do not ask what to buy. For example, route a
+comparison of two ticket listings with service fees; do not route a request for
+weekend activity ideas or an explanation of LFP and NMC battery chemistry.
 
 Capture only inputs that affect the answer: product/variant, destination
 (country and postal code or a user-approved coarse location), currency,
