@@ -26,7 +26,7 @@ class FakeHost:
             raise JobError("unavailable_capability", self.fixture["preflight_error"])
         return {"session_id": self.fixture.get("session_id", "fixture-session"),
                 "models": {job["job_id"]: job["model"] for job in request["jobs"] if job["model"]},
-                "binding": {"jail_export": {"host_root": str(self.path.parent / "export"), "worker_root": "/work/out"}}}
+                "binding": {"jail_export": {"host_root": str(self.path.parent / "export"), "worker_root": "/worker-workspace"}}}
 
     def receipt(self, job, mode):
         output = Path(job["host_output"])
