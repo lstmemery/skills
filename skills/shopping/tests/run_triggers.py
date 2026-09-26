@@ -459,7 +459,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, help="run only the first N selected cases")
     parser.add_argument("--model", help="optional model override supported by the selected harness")
     parser.add_argument("--timeout", type=int, default=TIMEOUT_SECONDS, help="seconds per prompt (default: %(default)s)")
-    parser.add_argument("--output-dir", type=Path, help="write structured results outside the repo")
+    parser.add_argument("--output-dir", type=Path, help="write structured results to the requested directory")
     parser.add_argument("--validate-only", action="store_true", help="validate the prompt fixture without invoking a model")
     parser.add_argument("--dry-run", action="store_true", help="show the selected case and harness counts only")
     args = parser.parse_args()

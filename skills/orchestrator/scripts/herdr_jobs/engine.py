@@ -9,8 +9,6 @@ from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fie
 from .transport import BudgetExpired, EffectUnknown
 
 
-JAIL_WORKER_ROOT = "/work/out"  # the jail profile's output root; see docs/agents/runtime-profile.md
-
 PHASES = {"pending", "split", "moved", "ready", "submitted"}
 
 
@@ -33,7 +31,9 @@ class Engine:
         for spec in request["jobs"]:
             attempt = "0" * 32
             if spec["route"]["mode"] == "jail":
-                output = Path(JAIL_WORKER_ROOT) / f"c9-{digest(request['request_id'].encode())[:12]}" / f"{spec['job_id']}-{attempt}"
+                # Preview only checks prompt size; the verified host binding
+                # supplies the worker root for a real jail job.
+                output = Path("workspace-root") / f"c9-{digest(request['request_id'].encode())[:12]}" / f"{spec['job_id']}-{attempt}"
             else:
                 output = self.root / "workers" / spec["job_id"] / attempt
             job = {"spec": spec, "attempt_id": attempt, "worker_output": str(output)}
