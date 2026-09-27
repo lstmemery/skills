@@ -339,16 +339,47 @@ def line_at(text, offset):
     return text.count('\n', 0, offset) + 1
 
 
-def rule_findings(label, text):
+def load_secret_allowlist(payloads):
+    """Load exact-value SHA-256 exceptions from the captured repository tree."""
+    entry = next((data for label, _, data in payloads
+                  if label == 'after:.code-review-secrets-allow'), None)
+    if entry is None:
+        return frozenset()
+    fingerprints = set()
+    try:
+        rows = entry.decode('utf-8').splitlines()
+    except UnicodeError:
+        invalid('Secret allowlist must be UTF-8 text', path='.code-review-secrets-allow')
+    for number, row in enumerate(rows, 1):
+        if not row.strip() or row.lstrip().startswith('#'):
+            continue
+        parts = row.split('\t', 1)
+        if len(parts) != 2 or not re.fullmatch(r'[0-9a-fA-F]{64}', parts[0]) or not parts[1].strip():
+            invalid('Invalid secret allowlist entry (want full SHA-256, tab, and reason)',
+                    path='.code-review-secrets-allow', line=number)
+        fingerprints.add(parts[0].lower())
+    return frozenset(fingerprints)
+
+
+def is_allowed_fingerprint(value, allowed_fingerprints):
+    return digest(value) in allowed_fingerprints
+
+
+def rule_findings(label, text, allowed_fingerprints=frozenset()):
     findings = []
     for name, pattern in SECRET_TOKEN_RULES:
         for match in pattern.finditer(text):
-            findings.append(finding(label, line_at(text, match.start()), name, match.group(0)))
+            value = match.group(0)
+            if not is_allowed_fingerprint(value.encode('latin-1'), allowed_fingerprints):
+                findings.append(finding(label, line_at(text, match.start()), name, value))
     for match in PRIVATE_KEY_BLOCK.finditer(text):
-        findings.append(finding(label, line_at(text, match.start()), 'private-key-block', match.group(0)))
+        value = match.group(0)
+        if not is_allowed_fingerprint(value.encode('latin-1'), allowed_fingerprints):
+            findings.append(finding(label, line_at(text, match.start()), 'private-key-block', value))
     for match in SECRET_ASSIGNMENT.finditer(text):
         value = match.group('value')
-        if assignment_value_is_secret(value):
+        if assignment_value_is_secret(value) and not is_allowed_fingerprint(
+                value.encode('latin-1'), allowed_fingerprints):
             findings.append(finding(label, line_at(text, match.start()), 'high-entropy-assignment', value))
     return findings
 
@@ -392,27 +423,34 @@ def payload_inventory(manifest, blobs, diff, history):
     return payloads
 
 
-def reported_match_is_hex_shaped(staging, relative, report_row):
-    """True when a reported generic-rule match is hex-digest shaped, not a secret.
-
-    Reads only the staged bytes in memory; the value is never reported onward.
-    Match spans include the assignment's left-hand side, so this asks whether a
-    hex run is present rather than whether the span is entirely hex.
-    """
-    line_number = int(report_row.get('StartLine') or 0)
-    start_column = report_row.get('StartColumn')
-    end_column = report_row.get('EndColumn')
-    if not (line_number > 0 and start_column and end_column and end_column > start_column):
-        return False
+def reported_match_span(staging, relative, report_row):
+    """Return exact scanner-matched bytes, or None for invalid staged coordinates."""
+    start_line = report_row['StartLine']
+    end_line = report_row['EndLine']
+    start_column = report_row['StartColumn']
+    end_column = report_row['EndColumn']
     try:
-        line = (staging / relative).read_bytes().splitlines()[line_number - 1]
-    except (OSError, IndexError):
-        return False
-    span = line[max(start_column - 1, 0):end_column].decode('latin-1')
-    return hex_shaped(span, within=True)
+        raw = (staging / relative).read_bytes()
+    except OSError:
+        return None
+    lines = raw.splitlines(keepends=True)
+    if not lines or start_line > len(lines) or end_line > len(lines):
+        return None
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    start_bytes = lines[start_line - 1].rstrip(b'\r\n')
+    end_bytes = lines[end_line - 1]
+    if start_column > len(start_bytes) or end_column > len(end_bytes) + 1:
+        return None
+    if start_line == end_line and end_column < start_column:
+        return None
+    start = offsets[start_line - 1] + start_column - 1
+    end = offsets[end_line - 1] + end_column
+    return raw[start:end] if end > start else None
 
 
-def gitleaks_scan(staging, labels):
+def gitleaks_scan(staging, labels, allowed_fingerprints=frozenset()):
     """Redacted directory-mode scan of staged payloads; report operational failures."""
     scanner_mode = os.environ.get(SECRETS_SCANNER_ENV)
     if scanner_mode not in (None, 'stdlib-only'):
@@ -438,13 +476,14 @@ def gitleaks_scan(staging, labels):
             raise ValueError('report is not a list of findings')
         if result.returncode == GITLEAKS_EXIT and not rows:
             raise ValueError('finding exit status has no findings')
-        required_fields = ('File', 'RuleID', 'StartLine', 'StartColumn', 'EndColumn')
+        required_fields = ('File', 'RuleID', 'StartLine', 'EndLine', 'StartColumn', 'EndColumn')
         if any(any(field not in row for field in required_fields) or
                not isinstance(row['File'], str) or not row['File'] or
                not isinstance(row['RuleID'], str) or not row['RuleID'] or
                any(type(row[field]) is not int or row[field] <= 0 or row[field] > MAX_FILE
                    for field in required_fields[2:]) or
-               row['EndColumn'] <= row['StartColumn']
+               row['EndLine'] < row['StartLine'] or
+               (row['EndLine'] == row['StartLine'] and row['EndColumn'] < row['StartColumn'])
                for row in rows):
             raise ValueError('malformed finding')
     except (UnicodeError, ValueError, TypeError):
@@ -457,7 +496,12 @@ def gitleaks_scan(staging, labels):
         except ValueError:
             relative = reported if not reported.is_absolute() else Path(*reported.parts[-3:])
         key = '/'.join(relative.parts)
-        if row.get('RuleID') == 'generic-api-key' and reported_match_is_hex_shaped(staging, relative, row):
+        span = reported_match_span(staging, relative, row)
+        if span is None:
+            return [], 'failed'
+        if is_allowed_fingerprint(span, allowed_fingerprints):
+            continue
+        if row['RuleID'] == 'generic-api-key' and hex_shaped(span.decode('latin-1'), within=True):
             continue
         findings.append(finding(labels.get(key, key or str(reported)), row['StartLine'],
                                 f"gitleaks:{row['RuleID']}"))
@@ -467,10 +511,11 @@ def gitleaks_scan(staging, labels):
 def secrets_gate(payloads):
     """Fail closed, before any payload file is written, on secret-shaped content."""
     prefixes = load_fingerprint_prefixes()
+    allowed_fingerprints = load_secret_allowlist(payloads)
     findings = []
     for label, _, data in payloads:
         text = data.decode('latin-1')
-        findings.extend(rule_findings(label, text))
+        findings.extend(rule_findings(label, text, allowed_fingerprints))
         findings.extend(denylist_findings(label, text, prefixes))
     scan_state = 'unavailable'
     with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
@@ -479,7 +524,8 @@ def secrets_gate(payloads):
             target = staging / relative
             target.parent.mkdir(exist_ok=True)
             target.write_bytes(data)
-        staged, scan_state = gitleaks_scan(staging, {relative: label for label, relative, _ in payloads})
+        staged, scan_state = gitleaks_scan(
+            staging, {relative: label for label, relative, _ in payloads}, allowed_fingerprints)
         findings.extend(staged)
     if scan_state == 'failed':
         raise Failure('secret_detected', 'Capture refused: secrets scanner failed',
