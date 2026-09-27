@@ -19,6 +19,7 @@ MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 MAX_FILES = 20000
 FINGERPRINT_ENV = 'CODE_REVIEW_SECRET_FINGERPRINTS'
+SECRETS_SCANNER_ENV = 'CODE_REVIEW_SECRETS_SCANNER'
 GITLEAKS_EXIT = 7
 GITLEAKS_TIMEOUT = 600
 GITLEAKS_MAX_TARGET_MB = 512
@@ -412,7 +413,12 @@ def reported_match_is_hex_shaped(staging, relative, report_row):
 
 
 def gitleaks_scan(staging, labels):
-    """Redacted directory-mode scan of the staged payloads. Returns (findings, state)."""
+    """Redacted directory-mode scan of staged payloads; report operational failures."""
+    scanner_mode = os.environ.get(SECRETS_SCANNER_ENV)
+    if scanner_mode not in (None, 'stdlib-only'):
+        invalid(f'Unsupported {SECRETS_SCANNER_ENV} value')
+    if scanner_mode == 'stdlib-only':
+        return [], 'stdlib-only'
     binary = shutil.which('gitleaks')
     if not binary:
         return [], 'unavailable'
@@ -423,21 +429,29 @@ def gitleaks_scan(staging, labels):
     try:
         result = subprocess.run(argv, env=environment, capture_output=True, timeout=GITLEAKS_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired):
-        return [], 'unavailable'
-    if result.returncode == 0:
-        return [], 'used'
-    if result.returncode != GITLEAKS_EXIT or len(result.stdout) > MAX_TOTAL:
+        return [], 'failed'
+    if result.returncode not in (0, GITLEAKS_EXIT) or len(result.stdout) > MAX_TOTAL:
         return [], 'failed'
     try:
         rows = json.loads(result.stdout.decode('utf-8'))
-        if not isinstance(rows, list):
-            raise ValueError('report is not a list')
-    except (UnicodeError, ValueError):
-        # gitleaks saw findings; refusing to proceed is the safe reading.
-        return [{'file': 'gitleaks-report', 'line': 0, 'rule': 'gitleaks-unreadable-report'}], 'used'
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError('report is not a list of findings')
+        if result.returncode == GITLEAKS_EXIT and not rows:
+            raise ValueError('finding exit status has no findings')
+        required_fields = ('File', 'RuleID', 'StartLine', 'StartColumn', 'EndColumn')
+        if any(any(field not in row for field in required_fields) or
+               not isinstance(row['File'], str) or not row['File'] or
+               not isinstance(row['RuleID'], str) or not row['RuleID'] or
+               any(type(row[field]) is not int or row[field] <= 0 or row[field] > MAX_FILE
+                   for field in required_fields[2:]) or
+               row['EndColumn'] <= row['StartColumn']
+               for row in rows):
+            raise ValueError('malformed finding')
+    except (UnicodeError, ValueError, TypeError):
+        return [], 'failed'
     findings = []
     for row in rows:
-        reported = Path(str(row.get('File', '')))
+        reported = Path(row['File'])
         try:
             relative = reported.relative_to(staging)
         except ValueError:
@@ -445,8 +459,8 @@ def gitleaks_scan(staging, labels):
         key = '/'.join(relative.parts)
         if row.get('RuleID') == 'generic-api-key' and reported_match_is_hex_shaped(staging, relative, row):
             continue
-        findings.append(finding(labels.get(key, key or str(reported)), int(row.get('StartLine') or 0),
-                                f"gitleaks:{row.get('RuleID', 'unknown')}"))
+        findings.append(finding(labels.get(key, key or str(reported)), row['StartLine'],
+                                f"gitleaks:{row['RuleID']}"))
     return findings, 'used'
 
 
@@ -458,22 +472,25 @@ def secrets_gate(payloads):
         text = data.decode('latin-1')
         findings.extend(rule_findings(label, text))
         findings.extend(denylist_findings(label, text, prefixes))
-    state = 'unavailable'
+    scan_state = 'unavailable'
     with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
         staging = Path(area)
         for _, relative, data in payloads:
             target = staging / relative
             target.parent.mkdir(exist_ok=True)
             target.write_bytes(data)
-        staged, state = gitleaks_scan(staging, {relative: label for label, relative, _ in payloads})
+        staged, scan_state = gitleaks_scan(staging, {relative: label for label, relative, _ in payloads})
         findings.extend(staged)
+    if scan_state == 'failed':
+        raise Failure('secret_detected', 'Capture refused: secrets scanner failed',
+                      secret_scan={'gitleaks': scan_state})
     if not findings:
-        return {'gitleaks': state}
+        return {'gitleaks': scan_state}
     ordered = sorted(findings, key=lambda row: (row['file'], row['line'], row['rule']))
     raise Failure('secret_detected',
                   'Capture refused: a payload matches a secret rule; remove the value or replace it with a fake and capture again',
                   findings=ordered[:MAX_FINDINGS], total_findings=len(ordered),
-                  secret_scan={'gitleaks': state})
+                  secret_scan={'gitleaks': scan_state})
 
 
 def observe(repo, mode, base, authorities):

@@ -74,8 +74,13 @@ alongside it: private-key PEM blocks, common token prefixes (`ghp_`,
 `github_pat_`, `sk-`, `xox…`, `AKIA…`, `glpat-`, `tk_`), and high-entropy
 assignments to names containing password/passwd/secret/token/api-key/access-key.
 Hex-shaped values and placeholders are not flagged by the built-in rules. If
-gitleaks is missing or fails, the built-in rules still apply and the capture
-result says so under `secret_scan`.
+gitleaks is missing, the built-in rules still apply and the capture result says
+`unavailable` under `secret_scan`. If gitleaks is present but cannot run, times
+out, returns an unexpected status, or produces malformed output, capture fails
+closed with `secret_detected` and `secrets scanner failed`; no payload is
+written. Operators who deliberately accept the reduced coverage can set
+`CODE_REVIEW_SECRETS_SCANNER=stdlib-only` to skip gitleaks and use only the
+built-in rules. This opt-in is not a fallback after a scanner failure.
 
 A private deployment can block known live values without publishing them: point
 the environment variable `CODE_REVIEW_SECRET_FINGERPRINTS` at a file of sha256

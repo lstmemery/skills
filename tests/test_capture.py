@@ -319,6 +319,49 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result['secret_scan']['gitleaks'], 'unavailable')
         self.assertIn('github-token', [row['rule'] for row in result['findings']])
 
+    def test_scanner_operational_failures_refuse_capture_without_writing(self):
+        data = b'ordinary content\n'
+        blobs = {CAPTURE.digest(data): data}
+        manifest = {'before': {}, 'after': {}, 'authorities': [], 'capture_id': 'fixture'}
+        failures = (
+            OSError('scanner launch failed'),
+            subprocess.TimeoutExpired('gitleaks', CAPTURE.GITLEAKS_TIMEOUT),
+            subprocess.CompletedProcess(['gitleaks'], 2, b'', b''),
+            subprocess.CompletedProcess(['gitleaks'], 0, b'not-json', b''),
+            subprocess.CompletedProcess(
+                ['gitleaks'], 7,
+                json.dumps([{'File': 'payload.txt', 'RuleID': 'generic-api-key',
+                             'StartLine': 1, 'StartColumn': 1.5, 'EndColumn': 4.5}]).encode(), b''),
+            subprocess.CompletedProcess(
+                ['gitleaks'], 7,
+                json.dumps([{'File': 'payload.txt', 'RuleID': 'generic-api-key',
+                             'StartLine': 1, 'StartColumn': 1,
+                             'EndColumn': CAPTURE.MAX_FILE + 1}]).encode(), b''),
+        )
+        for index, failure in enumerate(failures):
+            with self.subTest(failure=type(failure).__name__):
+                out = self.root / f'scanner-failure-{index}'
+                process_patch = {'side_effect': failure} if isinstance(failure, BaseException) else {'return_value': failure}
+                with (patch.object(CAPTURE.shutil, 'which', return_value='/fake/gitleaks'),
+                      patch.object(CAPTURE.subprocess, 'run', **process_patch)):
+                    with self.assertRaises(CAPTURE.Failure) as raised:
+                        CAPTURE.write_capture(out, manifest, blobs, b'', b'')
+                self.assertEqual(raised.exception.result['outcome'], 'secret_detected')
+                self.assertEqual(raised.exception.result['message'], 'Capture refused: secrets scanner failed')
+                self.assertEqual(raised.exception.result['secret_scan']['gitleaks'], 'failed')
+                self.assertFalse(out.exists())
+
+    def test_stdlib_only_opt_in_skips_gitleaks_and_writes_capture(self):
+        data = b'ordinary content\n'
+        blobs = {CAPTURE.digest(data): data}
+        manifest = {'before': {}, 'after': {}, 'authorities': [], 'capture_id': 'fixture'}
+        out = self.root / 'stdlib-only-capture'
+        with (patch.dict(os.environ, {CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'}),
+              patch.object(CAPTURE.shutil, 'which', side_effect=AssertionError('must skip discovery'))):
+            result = CAPTURE.write_capture(out, manifest, blobs, b'', b'')
+        self.assertEqual(result['gitleaks'], 'stdlib-only')
+        self.assertTrue((out / 'COMPLETE').exists())
+
 
 if __name__ == '__main__':
     unittest.main()
