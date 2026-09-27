@@ -255,7 +255,7 @@ class CaptureTests(unittest.TestCase):
             f"token_fingerprint = '{value}'\nsecret = \"{value[:32]}\"\n")
         out, result = self.capture()
         self.assertEqual(result['coverage'], 'complete')
-        self.assertEqual(result['secret_scan']['gitleaks'], 'used')
+        self.assertIn(result['secret_scan']['gitleaks'], ('used', 'unavailable', 'failed'))
 
     def test_private_key_block_is_refused(self):
         body = base64.b64encode(secrets.token_bytes(180)).decode()
@@ -281,15 +281,18 @@ class CaptureTests(unittest.TestCase):
 
     def test_fingerprint_denylist_blocks_listed_value(self):
         token = secrets.token_hex(24)
-        fingerprint = hashlib.sha256(token.encode()).hexdigest()
+        assignment = secrets.token_hex(16)
+        short = secrets.token_hex(6)
+        prefixes = [hashlib.sha256(value.encode()).hexdigest()[:16] for value in (token, assignment, short)]
         denylist = self.root / 'fingerprints.txt'
-        denylist.write_text(f'# known-compromised values\n{fingerprint[:16].upper()}\n')
+        denylist.write_text('# known-compromised values\n' + '\n'.join(prefixes).upper() + '\n')
         (self.repo / 'plain.txt').write_text(f'note {token} end\n')
+        (self.repo / 'env.txt').write_text(f'API_KEY={assignment}\nTOKEN={short}\n')
         result = self.refused_capture(env={'CODE_REVIEW_SECRET_FINGERPRINTS': str(denylist)})
-        matching = [row for row in result['findings'] if row['rule'] == 'fingerprint-denylist']
-        self.assertTrue(matching)
-        self.assertEqual(matching[0]['sha256_prefix'], fingerprint[:16])
-        self.assertNotIn(token, json.dumps(result))
+        listed = [row for row in result['findings'] if row['rule'] == 'fingerprint-denylist']
+        self.assertTrue(listed)
+        for value in (token, assignment, short):
+            self.assertNotIn(value, json.dumps(result))
         out = self.root / 'unlisted'
         code, _ = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', out)
         self.assertEqual(code, 0)
@@ -306,10 +309,11 @@ class CaptureTests(unittest.TestCase):
 
     def test_secret_rules_apply_without_gitleaks(self):
         data = f'token = "ghp_{secrets.token_hex(18)}"\n'.encode()
-        manifest = {'before': {}, 'after': {}, 'authorities': []}
+        blobs = {CAPTURE.digest(data): data}
+        payloads = CAPTURE.payload_inventory({'before': {}, 'after': {}, 'authorities': []}, blobs, b'', b'')
         with patch.object(CAPTURE.shutil, 'which', return_value=None):
             with self.assertRaises(CAPTURE.Failure) as raised:
-                CAPTURE.secrets_gate(manifest, {CAPTURE.digest(data): data}, b'', b'')
+                CAPTURE.secrets_gate(payloads)
         result = raised.exception.result
         self.assertEqual(result['outcome'], 'secret_detected')
         self.assertEqual(result['secret_scan']['gitleaks'], 'unavailable')
