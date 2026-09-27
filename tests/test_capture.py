@@ -52,13 +52,13 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(result.stdout, result.stderr)
         return result.returncode, json.loads(result.stdout)
 
-    def capture(self, mode='wip', base=None, extra=()):
+    def capture(self, mode='wip', base=None, extra=(), env=None):
         self.number += 1
         out = self.root / f'capture-{self.number}'
         args = ['--repo', self.repo, '--mode', mode, '--out', out]
         if base:
             args += ['--base', base]
-        code, result = self.invoke('capture', *args, *extra)
+        code, result = self.invoke('capture', *args, *extra, env=env)
         self.assertEqual(code, 0, result)
         return out, result
 
@@ -279,6 +279,80 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result['outcome'], 'secret_detected')
         self.assertTrue(any(row['file'] == 'commits.txt' for row in result['findings']))
 
+    def test_repository_allowlist_suppresses_only_exact_builtin_fingerprint(self):
+        value = secrets.token_urlsafe(24)
+        (self.repo / 'config.py').write_text(f'API_KEY = "{value}"\n')
+        fingerprint = hashlib.sha256(value.encode()).hexdigest()
+        (self.repo / '.code-review-secrets-allow').write_text(
+            f'# reviewed test fixture\n{fingerprint}\tsynthetic fixture, not a credential\n')
+        self.git('add', '.code-review-secrets-allow')
+        out, result = self.capture(env={'CODE_REVIEW_SECRETS_SCANNER': 'stdlib-only'})
+        self.assertTrue((out / 'COMPLETE').exists())
+        self.assertEqual(result['secret_scan']['gitleaks'], 'stdlib-only')
+
+        changed = secrets.token_urlsafe(24)
+        (self.repo / 'config.py').write_text(f'API_KEY = "{changed}"\n')
+        result = self.refused_capture(out='changed-fingerprint', env={
+            'CODE_REVIEW_SECRETS_SCANNER': 'stdlib-only'})
+        self.assertIn('high-entropy-assignment', [row['rule'] for row in result['findings']])
+        self.assertNotIn(changed, json.dumps(result))
+
+    def test_repository_allowlist_matches_exact_gitleaks_span(self):
+        with tempfile.TemporaryDirectory() as area:
+            staging = Path(area)
+            line = b'API_KEY = fixture'
+            (staging / 'payload.txt').write_bytes(line + b'\n')
+            row = {'File': str(staging / 'payload.txt'), 'RuleID': 'fixture-rule',
+                   'StartLine': 1, 'EndLine': 1, 'StartColumn': 1, 'EndColumn': len(line)}
+            result = subprocess.CompletedProcess(
+                ['gitleaks'], 7, json.dumps([row]).encode(), b'')
+            with (patch.object(CAPTURE.shutil, 'which', return_value='/fake/gitleaks'),
+                  patch.object(CAPTURE.subprocess, 'run', return_value=result)):
+                allowed = {hashlib.sha256(line).hexdigest()}
+                findings, state = CAPTURE.gitleaks_scan(staging, {'payload.txt': 'after:payload.txt'}, allowed)
+                self.assertEqual((findings, state), ([], 'used'))
+                findings, state = CAPTURE.gitleaks_scan(
+                    staging, {'payload.txt': 'after:payload.txt'}, {'0' * 64})
+            self.assertEqual(state, 'used')
+            self.assertEqual(findings[0]['rule'], 'gitleaks:fixture-rule')
+
+    def test_repository_allowlist_matches_multiline_gitleaks_span(self):
+        with tempfile.TemporaryDirectory() as area:
+            staging = Path(area)
+            first = b'API_KEY = fixture'
+            second = b'continued'
+            (staging / 'payload.txt').write_bytes(first + b'\n' + second + b'\n')
+            span = first[len(b'API_KEY = '):] + b'\n' + second
+            row = {'File': str(staging / 'payload.txt'), 'RuleID': 'fixture-rule',
+                   'StartLine': 1, 'EndLine': 2, 'StartColumn': len(b'API_KEY = ') + 1,
+                   'EndColumn': len(second)}
+            result = subprocess.CompletedProcess(['gitleaks'], 7, json.dumps([row]).encode(), b'')
+            with (patch.object(CAPTURE.shutil, 'which', return_value='/fake/gitleaks'),
+                  patch.object(CAPTURE.subprocess, 'run', return_value=result)):
+                findings, state = CAPTURE.gitleaks_scan(
+                    staging, {'payload.txt': 'after:payload.txt'}, {hashlib.sha256(span).hexdigest()})
+            self.assertEqual((findings, state), ([], 'used'))
+
+    def test_gitleaks_out_of_line_coordinates_fail_closed(self):
+        with tempfile.TemporaryDirectory() as area:
+            staging = Path(area)
+            (staging / 'payload.txt').write_bytes(b'short\n')
+            row = {'File': str(staging / 'payload.txt'), 'RuleID': 'fixture-rule',
+                   'StartLine': 1, 'EndLine': 1, 'StartColumn': 1, 'EndColumn': 100}
+            result = subprocess.CompletedProcess(['gitleaks'], 7, json.dumps([row]).encode(), b'')
+            with (patch.object(CAPTURE.shutil, 'which', return_value='/fake/gitleaks'),
+                  patch.object(CAPTURE.subprocess, 'run', return_value=result)):
+                findings, state = CAPTURE.gitleaks_scan(staging, {'payload.txt': 'after:payload.txt'})
+            self.assertEqual((findings, state), ([], 'failed'))
+
+    def test_invalid_repository_allowlist_entry_is_explicit(self):
+        (self.repo / '.code-review-secrets-allow').write_text('not-a-fingerprint\tmissing value\n')
+        code, result = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', self.root / 'sealed',
+                                   env={'CODE_REVIEW_SECRETS_SCANNER': 'stdlib-only'})
+        self.assertEqual(code, 2, result)
+        self.assertEqual(result['outcome'], 'invalid_input')
+        self.assertIn('allowlist', result['message'])
+
     def test_fingerprint_denylist_blocks_listed_value(self):
         token = secrets.token_hex(24)
         assignment = secrets.token_hex(16)
@@ -294,7 +368,8 @@ class CaptureTests(unittest.TestCase):
         for value in (token, assignment, short):
             self.assertNotIn(value, json.dumps(result))
         out = self.root / 'unlisted'
-        code, _ = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', out)
+        code, _ = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', out,
+                              env={'CODE_REVIEW_SECRETS_SCANNER': 'stdlib-only'})
         self.assertEqual(code, 0)
         self.assertTrue((out / 'COMPLETE').exists())
 
