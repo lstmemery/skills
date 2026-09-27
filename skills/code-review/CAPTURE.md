@@ -63,7 +63,8 @@ sides (including unchanged context files), authorities, `diff.patch`,
 `commits.txt`, and `manifest.json` — is scanned for secrets. A capture with a
 match fails closed with outcome `secret_detected` (exit 6) and nothing is
 written to the destination. Findings name the payload, line, and rule; values
-are never reported, only a length and a sha256 prefix per finding.
+are never reported — built-in-rule findings carry only a length and a sha256
+prefix (gitleaks reports stay redacted end to end).
 
 Two layers run. When the gitleaks binary is installed it scans the payloads in
 redacted directory mode; its own configuration and ignore files are deliberately
@@ -79,8 +80,8 @@ result says so under `secret_scan`.
 A private deployment can block known live values without publishing them: point
 the environment variable `CODE_REVIEW_SECRET_FINGERPRINTS` at a file of sha256
 prefixes (one per line, 8–64 hex characters, `#` comments). Any payload token of
-8+ characters — or the value side of a `KEY=value` token — whose sha256 starts
-with a listed prefix fails the capture. An unreadable or
+8+ characters — or the value side of a `KEY=value` or `KEY:value` token — whose
+sha256 starts with a listed prefix fails the capture. An unreadable or
 malformed denylist file is an explicit input error.
 
 ## Freshness and errors
