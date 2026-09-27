@@ -89,6 +89,14 @@ prefixes (one per line, 8–64 hex characters, `#` comments). Any payload token 
 sha256 starts with a listed prefix fails the capture. An unreadable or
 malformed denylist file is an explicit input error.
 
+A repository with a reviewed false positive may track `.code-review-secrets-allow`
+with one full SHA-256 fingerprint and a tab-separated reason per line. Blank and
+`#` comment lines are ignored; malformed entries fail capture. The fingerprint
+must match the exact value reported by a built-in rule or the exact byte span
+reported by gitleaks. Changing the matched bytes invalidates the exception. The
+allowlist does not suppress the private fingerprint denylist. Never add a real
+credential; replace it instead.
+
 ## Freshness and errors
 
 ```sh
