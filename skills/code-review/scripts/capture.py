@@ -1,20 +1,53 @@
 #!/usr/bin/env python3
-"""Capture immutable review inputs and check whether their source has drifted."""
+"""Capture immutable review inputs, refuse secret-looking payloads, and check drift."""
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 
 VERSION = 1
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 256 * 1024 * 1024
 MAX_FILES = 20000
+FINGERPRINT_ENV = 'CODE_REVIEW_SECRET_FINGERPRINTS'
+GITLEAKS_EXIT = 7
+GITLEAKS_TIMEOUT = 600
+GITLEAKS_MAX_TARGET_MB = 512
+MAX_FINDINGS = 20
+
+# Prefix rules are written with character classes so this source file never
+# contains a scannable secret shape of its own.
+SECRET_TOKEN_RULES = tuple((name, re.compile(pattern)) for name, pattern in (
+    ('github-token', r'(?<![A-Za-z0-9])gh[posur]_[A-Za-z0-9]{20,}'),
+    ('github-fine-grained-token', r'(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}'),
+    ('openai-token', r'(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}'),
+    ('slack-token', r'(?<![A-Za-z0-9])xox[abprse]-[A-Za-z0-9-]{10,}'),
+    ('aws-access-key', r'(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}'),
+    ('gitlab-token', r'(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}'),
+    ('ntfy-token', r'(?<![A-Za-z0-9])tk_[A-Za-z0-9]{15,}'),
+))
+# Assembled from fragments so neither literal alone forms a key block.
+PRIVATE_KEY_BLOCK = re.compile('-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' + r'[\s\S]{0,8000}?' + '-----END [A-Z0-9 ]*PRIVATE KEY-----')
+SECRET_ASSIGNMENT = re.compile(
+    r'(?i)(?<![A-Za-z0-9_])'
+    r'(?P<name>[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)'
+    r'["\']?\s*(?::=|[:=])\s*["\']?'
+    r'(?P<value>[^\s"\'`<>{}()]{16,})')
+PLACEHOLDER_VALUES = frozenset((
+    'changeme', 'change_me', 'example', 'fixme', 'n/a', 'nil', 'none', 'not_set',
+    'notset', 'null', 'passwd', 'password', 'placeholder', 'redacted', 'sample',
+    'secret', 'setme', 'todo', 'token', 'unset', 'xxx', 'xxxx', 'xxxxx'))
+PLACEHOLDER_PREFIXES = ('xxx', 'your', 'example', 'sample', 'dummy', 'fake',
+                        'insert', 'replace', 'placeholder', 'test', 'changeme')
 
 
 class Failure(ValueError):
@@ -232,6 +265,200 @@ def authority_records(paths, collector):
     return result
 
 
+def entropy(text):
+    total = len(text)
+    return -sum((count / total) * math.log2(count / total) for count in Counter(text).values())
+
+
+def character_classes(value):
+    return sum(bool(re.search(pattern, value)) for pattern in (r'[a-z]', r'[A-Z]', r'[0-9]', r'[^A-Za-z0-9]'))
+
+
+def assignment_value_is_secret(value):
+    lowered = value.lower()
+    if lowered in PLACEHOLDER_VALUES or lowered.startswith(PLACEHOLDER_PREFIXES):
+        return False
+    if value[0] in '$%' or '${' in value or '{{' in value:
+        return False
+    if re.fullmatch(r'[0-9a-fA-F]+', value.replace('-', '').replace('_', '')):
+        return False  # hex-shaped: digests, UUIDs, commit SHAs
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+', value):
+        return False  # attribute chains, not values
+    if value.startswith(('/', './', '../')):
+        return False  # filesystem paths, not values
+    classes = character_classes(value)
+    if classes < 2:
+        return False
+    return entropy(value) >= (3.5 if classes == 2 else 3.0)
+
+
+def load_fingerprint_prefixes():
+    location = os.environ.get(FINGERPRINT_ENV)
+    if not location:
+        return ()
+    try:
+        raw = bounded_file(Path(location)).decode('utf-8')
+    except Failure as error:
+        invalid('Fingerprint denylist cannot be read', path=location, detail=error.result['message'])
+    except (OSError, UnicodeError, ValueError) as error:
+        invalid('Fingerprint denylist cannot be read', path=location, detail=str(error))
+    prefixes = set()
+    for number, line in enumerate(raw.splitlines(), 1):
+        entry = line.strip()
+        if not entry or entry.startswith('#'):
+            continue
+        if not re.fullmatch(r'[0-9a-fA-F]{8,64}', entry):
+            invalid('Invalid fingerprint denylist entry (want 8-64 hex characters per line)', path=location, line=number)
+        prefixes.add(entry.lower())
+    return tuple(sorted(prefixes))
+
+
+def line_at(text, offset):
+    return text.count('\n', 0, offset) + 1
+
+
+def finding_fingerprint(value):
+    return digest(value.encode('latin-1'))[:16]
+
+
+def rule_findings(label, text):
+    findings = []
+    for name, pattern in SECRET_TOKEN_RULES:
+        for match in pattern.finditer(text):
+            findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': name,
+                             'length': len(match.group(0)), 'sha256_prefix': finding_fingerprint(match.group(0))})
+    for match in PRIVATE_KEY_BLOCK.finditer(text):
+        findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': 'private-key-block',
+                         'length': len(match.group(0)), 'sha256_prefix': finding_fingerprint(match.group(0))})
+    for match in SECRET_ASSIGNMENT.finditer(text):
+        value = match.group('value')
+        if assignment_value_is_secret(value):
+            findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': 'high-entropy-assignment',
+                             'length': len(value), 'sha256_prefix': finding_fingerprint(value)})
+    return findings
+
+
+def denylist_findings(label, text, prefixes):
+    if not prefixes:
+        return []
+    findings = []
+    for match in re.finditer(r'\S{16,}', text):
+        token = match.group(0).strip('\'"()[]{},;:')
+        if len(token) < 16:
+            continue
+        fingerprint = digest(token.encode('latin-1'))
+        if any(fingerprint.startswith(prefix) for prefix in prefixes):
+            findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': 'fingerprint-denylist',
+                             'length': len(token), 'sha256_prefix': fingerprint[:16]})
+    return findings
+
+
+def payload_inventory(manifest, blobs, diff, history):
+    """Every byte about to be written, labelled for reporting."""
+    labels = {}
+    for side in ('after', 'before'):
+        for name in sorted(manifest[side]):
+            sha = manifest[side][name].get('sha256')
+            if sha in blobs:
+                labels.setdefault(sha, f'{side}:{name}')
+    for row in manifest['authorities']:
+        sha = row.get('sha256')
+        if sha in blobs:
+            labels.setdefault(sha, f"authority:{row['path']}")
+    payloads = [(labels.get(sha, f'blob:{sha[:16]}'), f'blobs/{sha}', data) for sha, data in sorted(blobs.items())]
+    payloads.append(('diff.patch', 'meta/diff.patch', diff))
+    if history:
+        payloads.append(('commits.txt', 'meta/commits.txt', history))
+    payloads.append(('manifest.json', 'meta/manifest.json', encoded(manifest)))
+    return [row for row in payloads if row[2]]
+
+
+def staged_match_is_hex_shaped(staging, relative, line_number, start_column, end_column):
+    """True when a generic-rule match span is a hex digest shape, not a secret.
+
+    Reads only the staged bytes in memory; the value is never reported onward.
+    The sweep's known false-positive class: digests, UUIDs, commit SHAs.
+    """
+    if not (line_number > 0 and start_column and end_column and end_column > start_column):
+        return False
+    try:
+        line = (staging / relative).read_bytes().splitlines()[line_number - 1]
+    except (OSError, IndexError):
+        return False
+    span = line[max(start_column - 1, 0):end_column].translate(None, b'-_')
+    return bool(re.search(rb'[0-9a-fA-F]{16,}', span))
+
+
+def gitleaks_scan(staging, labels):
+    """Redacted directory-mode scan of the staged payloads. Returns (findings, state)."""
+    binary = shutil.which('gitleaks')
+    if not binary:
+        return [], 'unavailable'
+    environment = {key: value for key, value in os.environ.items() if not key.startswith('GITLEAKS_')}
+    argv = [binary, 'dir', str(staging), '--report-format', 'json', '--report-path', '-',
+            '--redact', '--exit-code', str(GITLEAKS_EXIT), '--no-banner', '--no-color', '-l', 'error',
+            '--max-target-megabytes', str(GITLEAKS_MAX_TARGET_MB), '--gitleaks-ignore-path', str(staging)]
+    try:
+        result = subprocess.run(argv, env=environment, capture_output=True, timeout=GITLEAKS_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return [], 'unavailable'
+    if result.returncode == 0:
+        return [], 'used'
+    if result.returncode != GITLEAKS_EXIT or len(result.stdout) > MAX_TOTAL:
+        return [], 'failed'
+    try:
+        rows = json.loads(result.stdout.decode('utf-8'))
+        if not isinstance(rows, list):
+            raise ValueError('report is not a list')
+    except (UnicodeError, ValueError):
+        # gitleaks saw findings; refusing to proceed is the safe reading.
+        return [{'file': 'gitleaks-report', 'line': 0, 'rule': 'gitleaks-unreadable-report'}], 'used'
+    findings = []
+    for row in rows:
+        reported = Path(str(row.get('File', '')))
+        try:
+            relative = reported.relative_to(staging)
+        except ValueError:
+            relative = reported if not reported.is_absolute() else Path(*reported.parts[-3:])
+        key = '/'.join(relative.parts)
+        if row.get('RuleID') == 'generic-api-key' and staged_match_is_hex_shaped(
+                staging, relative, int(row.get('StartLine') or 0), row.get('StartColumn'), row.get('EndColumn')):
+            continue  # hex digests, UUIDs, and commit SHAs are the sweep's known false-positive class
+        findings.append({'file': labels.get(key, key or str(reported)), 'line': int(row.get('StartLine') or 0),
+                         'rule': f"gitleaks:{row.get('RuleID', 'unknown')}"})
+    return findings, 'used'
+
+
+def secrets_gate(manifest, blobs, diff, history):
+    """Fail closed, before any payload file is written, on secret-shaped content."""
+    prefixes = load_fingerprint_prefixes()
+    payloads = payload_inventory(manifest, blobs, diff, history)
+    findings = []
+    for label, _, data in payloads:
+        text = data.decode('latin-1')
+        findings.extend(rule_findings(label, text))
+        findings.extend(denylist_findings(label, text, prefixes))
+    state = 'skipped' if not payloads else 'unavailable'
+    if payloads:
+        with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
+            root = Path(area)
+            staging = root / 'payloads'
+            (staging / 'meta').mkdir(parents=True)
+            for _, relative, data in payloads:
+                target = staging / relative
+                target.parent.mkdir(exist_ok=True)
+                target.write_bytes(data)
+            staged, state = gitleaks_scan(staging, {relative: label for label, relative, _ in payloads})
+            findings.extend(staged)
+    if not findings:
+        return {'gitleaks': state}
+    ordered = sorted(findings, key=lambda row: (row['file'], row['line'], row['rule']))
+    raise Failure('secret_detected',
+                  'Capture refused: a payload matches a secret rule; remove the value or replace it with a fake and capture again',
+                  findings=ordered[:MAX_FINDINGS], total_findings=len(ordered),
+                  secret_scan={'gitleaks': state})
+
+
 def observe(repo, mode, base, authorities):
     git = Git(repo)
     top = Path(os.fsdecode(git.call('rev-parse', '--show-toplevel')).strip()).resolve()
@@ -319,6 +546,7 @@ def write_capture(out, manifest, blobs, diff, history):
         raise Failure('conflict', 'Capture destination already exists', path=str(out))
     if not out.parent.is_dir() or any(parent.is_symlink() for parent in [out.parent, *out.parent.parents]):
         invalid('Capture parent must be an existing directory without symlinks')
+    scan = secrets_gate(manifest, blobs, diff, history)
     stage = Path(tempfile.mkdtemp(prefix='.review-', dir=out.parent))
     try:
         (stage / 'blobs').mkdir()
@@ -334,6 +562,7 @@ def write_capture(out, manifest, blobs, diff, history):
         (out / 'COMPLETE').write_text(manifest['capture_id'] + '\n')
     finally:
         shutil.rmtree(stage)
+    return scan
 
 
 def validate_capture(directory):
@@ -417,10 +646,10 @@ def run(args):
                 'changed': [os.fsdecode(p) for p in paths.split(b'\x00') if p], 'untracked': untracked,
                 'authorities': [str(p.absolute()) for p in args.authority], 'out': str(out), 'effects': 'none'}
     manifest, blobs, diff, history = verified_observation(repo, args.mode, args.base, args.authority)
-    write_capture(out, manifest, blobs, diff, history)
+    scan = write_capture(out, manifest, blobs, diff, history)
     return {'outcome': 'captured', 'capture': str(out), 'capture_id': manifest['capture_id'],
             'coverage': manifest['coverage'], 'gaps': manifest['gaps'], 'empty': manifest['empty'],
-            'worktree_notice': manifest['worktree_notice'], 'semantic_review': 'required'}
+            'worktree_notice': manifest['worktree_notice'], 'secret_scan': scan, 'semantic_review': 'required'}
 
 
 def main():
@@ -442,7 +671,7 @@ def main():
         return 3 if result['outcome'] == 'drift' else 0
     except Failure as error:
         print(json.dumps(error.result, sort_keys=True))
-        return {'conflict': 3, 'corrupt': 4, 'unsupported': 5}.get(error.result['outcome'], 2)
+        return {'conflict': 3, 'corrupt': 4, 'unsupported': 5, 'secret_detected': 6}.get(error.result['outcome'], 2)
     except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
         print(json.dumps({'outcome': 'unavailable', 'message': str(error)}))
         return 5
