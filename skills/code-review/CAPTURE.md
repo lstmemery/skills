@@ -78,8 +78,9 @@ result says so under `secret_scan`.
 
 A private deployment can block known live values without publishing them: point
 the environment variable `CODE_REVIEW_SECRET_FINGERPRINTS` at a file of sha256
-prefixes (one per line, 8–64 hex characters, `#` comments). Any payload token
-whose sha256 starts with a listed prefix fails the capture. An unreadable or
+prefixes (one per line, 8–64 hex characters, `#` comments). Any payload token of
+8+ characters — or the value side of a `KEY=value` token — whose sha256 starts
+with a listed prefix fails the capture. An unreadable or
 malformed denylist file is an explicit input error.
 
 ## Freshness and errors

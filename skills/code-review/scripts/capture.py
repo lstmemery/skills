@@ -48,6 +48,7 @@ PLACEHOLDER_VALUES = frozenset((
     'secret', 'setme', 'todo', 'token', 'unset', 'xxx', 'xxxx', 'xxxxx'))
 PLACEHOLDER_PREFIXES = ('xxx', 'your', 'example', 'sample', 'dummy', 'fake',
                         'insert', 'replace', 'placeholder', 'test', 'changeme')
+HEX_SHAPE = re.compile(r'[0-9a-fA-F]{16,}')
 
 
 class Failure(ValueError):
@@ -274,14 +275,34 @@ def character_classes(value):
     return sum(bool(re.search(pattern, value)) for pattern in (r'[a-z]', r'[A-Z]', r'[0-9]', r'[^A-Za-z0-9]'))
 
 
+def finding(label, line, rule, value=None):
+    row = {'file': label, 'line': line, 'rule': rule}
+    if value is not None:
+        row.update(length=len(value), sha256_prefix=digest(value.encode('latin-1'))[:16])
+    return row
+
+
+def hex_shaped(text, within=False):
+    """Hex digest shape — digests, UUIDs, commit SHAs, the sweep's false-positive class.
+
+    `within` asks whether the text contains a hex run; gitleaks match spans
+    include the assignment's left-hand side, while the built-in rules see the
+    exact value, so the two call sites legitimately ask different questions of
+    the same shared shape definition.
+    """
+    normalized = text.replace('-', '').replace('_', '')
+    match = HEX_SHAPE.search(normalized) if within else HEX_SHAPE.fullmatch(normalized)
+    return bool(match)
+
+
 def assignment_value_is_secret(value):
     lowered = value.lower()
     if lowered in PLACEHOLDER_VALUES or lowered.startswith(PLACEHOLDER_PREFIXES):
         return False
     if value[0] in '$%' or '${' in value or '{{' in value:
         return False
-    if re.fullmatch(r'[0-9a-fA-F]+', value.replace('-', '').replace('_', '')):
-        return False  # hex-shaped: digests, UUIDs, commit SHAs
+    if hex_shaped(value):
+        return False
     if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+', value):
         return False  # attribute chains, not values
     if value.startswith(('/', './', '../')):
@@ -300,7 +321,7 @@ def load_fingerprint_prefixes():
         raw = bounded_file(Path(location)).decode('utf-8')
     except Failure as error:
         invalid('Fingerprint denylist cannot be read', path=location, detail=error.result['message'])
-    except (OSError, UnicodeError, ValueError) as error:
+    except (OSError, UnicodeError) as error:
         invalid('Fingerprint denylist cannot be read', path=location, detail=str(error))
     prefixes = set()
     for number, line in enumerate(raw.splitlines(), 1):
@@ -317,24 +338,17 @@ def line_at(text, offset):
     return text.count('\n', 0, offset) + 1
 
 
-def finding_fingerprint(value):
-    return digest(value.encode('latin-1'))[:16]
-
-
 def rule_findings(label, text):
     findings = []
     for name, pattern in SECRET_TOKEN_RULES:
         for match in pattern.finditer(text):
-            findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': name,
-                             'length': len(match.group(0)), 'sha256_prefix': finding_fingerprint(match.group(0))})
+            findings.append(finding(label, line_at(text, match.start()), name, match.group(0)))
     for match in PRIVATE_KEY_BLOCK.finditer(text):
-        findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': 'private-key-block',
-                         'length': len(match.group(0)), 'sha256_prefix': finding_fingerprint(match.group(0))})
+        findings.append(finding(label, line_at(text, match.start()), 'private-key-block', match.group(0)))
     for match in SECRET_ASSIGNMENT.finditer(text):
         value = match.group('value')
         if assignment_value_is_secret(value):
-            findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': 'high-entropy-assignment',
-                             'length': len(value), 'sha256_prefix': finding_fingerprint(value)})
+            findings.append(finding(label, line_at(text, match.start()), 'high-entropy-assignment', value))
     return findings
 
 
@@ -342,14 +356,19 @@ def denylist_findings(label, text, prefixes):
     if not prefixes:
         return []
     findings = []
-    for match in re.finditer(r'\S{16,}', text):
-        token = match.group(0).strip('\'"()[]{},;:')
-        if len(token) < 16:
-            continue
-        fingerprint = digest(token.encode('latin-1'))
-        if any(fingerprint.startswith(prefix) for prefix in prefixes):
-            findings.append({'file': label, 'line': line_at(text, match.start()), 'rule': 'fingerprint-denylist',
-                             'length': len(token), 'sha256_prefix': fingerprint[:16]})
+    for match in re.finditer(r'\S{8,}', text):
+        chunk = match.group(0)
+        candidates = [chunk.strip('\'"()[]{},;:')]
+        for separator in ('=', ':'):
+            if separator in chunk:
+                candidates.append(chunk.split(separator, 1)[1].strip('\'"()[]{},;:'))
+        for candidate in candidates:
+            if len(candidate) < 8:
+                continue
+            fingerprint = digest(candidate.encode('latin-1'))
+            if any(fingerprint.startswith(prefix) for prefix in prefixes):
+                findings.append(finding(label, line_at(text, match.start()), 'fingerprint-denylist', candidate))
+                break
     return findings
 
 
@@ -366,27 +385,30 @@ def payload_inventory(manifest, blobs, diff, history):
         if sha in blobs:
             labels.setdefault(sha, f"authority:{row['path']}")
     payloads = [(labels.get(sha, f'blob:{sha[:16]}'), f'blobs/{sha}', data) for sha, data in sorted(blobs.items())]
-    payloads.append(('diff.patch', 'meta/diff.patch', diff))
-    if history:
-        payloads.append(('commits.txt', 'meta/commits.txt', history))
-    payloads.append(('manifest.json', 'meta/manifest.json', encoded(manifest)))
-    return [row for row in payloads if row[2]]
+    payloads.append(('diff.patch', 'diff.patch', diff))
+    payloads.append(('commits.txt', 'commits.txt', history))
+    payloads.append(('manifest.json', 'manifest.json', encoded(manifest) + b'\n'))
+    return payloads
 
 
-def staged_match_is_hex_shaped(staging, relative, line_number, start_column, end_column):
-    """True when a generic-rule match span is a hex digest shape, not a secret.
+def reported_match_is_hex_shaped(staging, relative, report_row):
+    """True when a reported generic-rule match is hex-digest shaped, not a secret.
 
     Reads only the staged bytes in memory; the value is never reported onward.
-    The sweep's known false-positive class: digests, UUIDs, commit SHAs.
+    Match spans include the assignment's left-hand side, so this asks whether a
+    hex run is present rather than whether the span is entirely hex.
     """
+    line_number = int(report_row.get('StartLine') or 0)
+    start_column = report_row.get('StartColumn')
+    end_column = report_row.get('EndColumn')
     if not (line_number > 0 and start_column and end_column and end_column > start_column):
         return False
     try:
         line = (staging / relative).read_bytes().splitlines()[line_number - 1]
     except (OSError, IndexError):
         return False
-    span = line[max(start_column - 1, 0):end_column].translate(None, b'-_')
-    return bool(re.search(rb'[0-9a-fA-F]{16,}', span))
+    span = line[max(start_column - 1, 0):end_column].decode('latin-1')
+    return hex_shaped(span, within=True)
 
 
 def gitleaks_scan(staging, labels):
@@ -421,29 +443,25 @@ def gitleaks_scan(staging, labels):
         except ValueError:
             relative = reported if not reported.is_absolute() else Path(*reported.parts[-3:])
         key = '/'.join(relative.parts)
-        if row.get('RuleID') == 'generic-api-key' and staged_match_is_hex_shaped(
-                staging, relative, int(row.get('StartLine') or 0), row.get('StartColumn'), row.get('EndColumn')):
-            continue  # hex digests, UUIDs, and commit SHAs are the sweep's known false-positive class
-        findings.append({'file': labels.get(key, key or str(reported)), 'line': int(row.get('StartLine') or 0),
-                         'rule': f"gitleaks:{row.get('RuleID', 'unknown')}"})
+        if row.get('RuleID') == 'generic-api-key' and reported_match_is_hex_shaped(staging, relative, row):
+            continue
+        findings.append(finding(labels.get(key, key or str(reported)), int(row.get('StartLine') or 0),
+                                f"gitleaks:{row.get('RuleID', 'unknown')}"))
     return findings, 'used'
 
 
-def secrets_gate(manifest, blobs, diff, history):
+def secrets_gate(payloads):
     """Fail closed, before any payload file is written, on secret-shaped content."""
     prefixes = load_fingerprint_prefixes()
-    payloads = payload_inventory(manifest, blobs, diff, history)
     findings = []
     for label, _, data in payloads:
         text = data.decode('latin-1')
         findings.extend(rule_findings(label, text))
         findings.extend(denylist_findings(label, text, prefixes))
-    state = 'skipped' if not payloads else 'unavailable'
+    state = 'unavailable'
     if payloads:
         with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
-            root = Path(area)
-            staging = root / 'payloads'
-            (staging / 'meta').mkdir(parents=True)
+            staging = Path(area)
             for _, relative, data in payloads:
                 target = staging / relative
                 target.parent.mkdir(exist_ok=True)
@@ -546,23 +564,26 @@ def write_capture(out, manifest, blobs, diff, history):
         raise Failure('conflict', 'Capture destination already exists', path=str(out))
     if not out.parent.is_dir() or any(parent.is_symlink() for parent in [out.parent, *out.parent.parents]):
         invalid('Capture parent must be an existing directory without symlinks')
-    scan = secrets_gate(manifest, blobs, diff, history)
+    # One enumeration feeds both the secrets gate and the writer, so every
+    # written byte is scanned and the two lists cannot drift apart.
+    payloads = payload_inventory(manifest, blobs, diff, history)
+    secret_scan = secrets_gate(payloads)
     stage = Path(tempfile.mkdtemp(prefix='.review-', dir=out.parent))
     try:
-        (stage / 'blobs').mkdir()
-        for sha, data in blobs.items():
-            (stage / 'blobs' / sha).write_bytes(data)
-        (stage / 'diff.patch').write_bytes(diff)
-        (stage / 'commits.txt').write_bytes(history)
-        (stage / 'manifest.json').write_bytes(encoded(manifest) + b'\n')
+        for _, relative, data in payloads:
+            target = stage / relative
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(data)
         # Reserve destination without replacing another caller's capture.
         out.mkdir()
-        for name in ['blobs', 'diff.patch', 'commits.txt', 'manifest.json']:
-            os.replace(stage / name, out / name)
+        for _, relative, _ in payloads:
+            target = out / relative
+            target.parent.mkdir(exist_ok=True)
+            os.replace(stage / relative, target)
         (out / 'COMPLETE').write_text(manifest['capture_id'] + '\n')
     finally:
         shutil.rmtree(stage)
-    return scan
+    return secret_scan
 
 
 def validate_capture(directory):
@@ -646,10 +667,10 @@ def run(args):
                 'changed': [os.fsdecode(p) for p in paths.split(b'\x00') if p], 'untracked': untracked,
                 'authorities': [str(p.absolute()) for p in args.authority], 'out': str(out), 'effects': 'none'}
     manifest, blobs, diff, history = verified_observation(repo, args.mode, args.base, args.authority)
-    scan = write_capture(out, manifest, blobs, diff, history)
+    secret_scan = write_capture(out, manifest, blobs, diff, history)
     return {'outcome': 'captured', 'capture': str(out), 'capture_id': manifest['capture_id'],
             'coverage': manifest['coverage'], 'gaps': manifest['gaps'], 'empty': manifest['empty'],
-            'worktree_notice': manifest['worktree_notice'], 'secret_scan': scan, 'semantic_review': 'required'}
+            'worktree_notice': manifest['worktree_notice'], 'secret_scan': secret_scan, 'semantic_review': 'required'}
 
 
 def main():
