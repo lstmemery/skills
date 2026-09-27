@@ -18,7 +18,9 @@ Choose the mode matching the request. Ask if the target is absent or ambiguous
 Use [CAPTURE.md](CAPTURE.md) and `scripts/capture.py` for the selected branch,
 exact-base-to-HEAD, or WIP mode. Preview names refs and paths; capture pins them
 and includes regular non-ignored untracked files in WIP. Save the capture outside
-the repo. Both axes receive the same capture ID and read surrounding source from
+the repo. Captures refuse to write payloads that match secret rules (see
+CAPTURE.md); fix a refusal by removing the value or replacing it with a fake,
+then recapture. Both axes receive the same capture ID and read surrounding source from
 its saved inventories. Review judgment stays with the reviewers.
 
 Find the authorities below before final capture so their versions can be included
