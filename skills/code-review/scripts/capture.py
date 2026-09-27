@@ -459,15 +459,14 @@ def secrets_gate(payloads):
         findings.extend(rule_findings(label, text))
         findings.extend(denylist_findings(label, text, prefixes))
     state = 'unavailable'
-    if payloads:
-        with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
-            staging = Path(area)
-            for _, relative, data in payloads:
-                target = staging / relative
-                target.parent.mkdir(exist_ok=True)
-                target.write_bytes(data)
-            staged, state = gitleaks_scan(staging, {relative: label for label, relative, _ in payloads})
-            findings.extend(staged)
+    with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
+        staging = Path(area)
+        for _, relative, data in payloads:
+            target = staging / relative
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(data)
+        staged, state = gitleaks_scan(staging, {relative: label for label, relative, _ in payloads})
+        findings.extend(staged)
     if not findings:
         return {'gitleaks': state}
     ordered = sorted(findings, key=lambda row: (row['file'], row['line'], row['rule']))
