@@ -35,6 +35,12 @@ acceptance of worker output.
   skill's explicit missing-spec procedure when a spec cannot be found.
 - Continue supervision and routine authorized follow-ups while the user is away.
   Queue decisions that require the user and continue independent work.
+- When the queued decisions are ready for the user, write one decision doc
+  (quick answer sheet first, then per item: what is ready, the recommendation,
+  exact commands, and a one-line reply format) and upload it with the
+  `research-delivery` skill's PrivateBin step. Give the user the link and the
+  reply format; do not wait to be asked. The doc must contain no secrets or
+  account numbers.
 - Maintain a compact task ledger and hand over to a fresh coordinator at safe
   boundaries before context gets large. Do not depend on a universal 200k trigger.
 - Keep personal orchestration policy in this skill and standalone tool settings;
