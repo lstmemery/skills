@@ -1,11 +1,15 @@
+import base64
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import secrets
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 BASE = Path(__file__).resolve().parents[1]
@@ -42,8 +46,9 @@ class CaptureTests(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-m', message)
 
-    def invoke(self, command, *args):
-        result = subprocess.run([sys.executable, str(SCRIPT), command, *map(str, args)], capture_output=True, text=True)
+    def invoke(self, command, *args, env=None):
+        result = subprocess.run([sys.executable, str(SCRIPT), command, *map(str, args)],
+                                capture_output=True, text=True, env=os.environ | (env or {}))
         self.assertTrue(result.stdout, result.stderr)
         return result.returncode, json.loads(result.stdout)
 
@@ -224,6 +229,138 @@ class CaptureTests(unittest.TestCase):
         _, result = self.capture()
         self.assertEqual(result['coverage'], 'incomplete')
         self.assertEqual(result['gaps'][0]['path'], 'large')
+
+    def refused_capture(self, out='sealed', env=None):
+        code, result = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', self.root / out, env=env)
+        self.assertEqual(code, 6, result)
+        self.assertEqual(result['outcome'], 'secret_detected')
+        self.assertFalse((self.root / out).exists())
+        return result
+
+    def test_capture_refuses_secret_in_payload(self):
+        token = 'ghp_' + secrets.token_hex(18)
+        (self.repo / 'leak.txt').write_text(f'token = "{token}"\n')
+        result = self.refused_capture()
+        matching = [row for row in result['findings'] if row['rule'] == 'github-token']
+        self.assertTrue(matching)
+        self.assertTrue(matching[0]['file'].endswith('leak.txt'))
+        self.assertEqual(matching[0]['line'], 1)
+        self.assertEqual(matching[0]['length'], len(token))
+        self.assertNotIn(token, json.dumps(result))
+
+    def test_hex_digests_uuids_and_shas_are_not_flagged(self):
+        value = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+        (self.repo / 'digests.txt').write_text(
+            f'checksum = {value}\nrequest_id = {uuid.uuid4()}\nhead = {value[:40]}\n'
+            f"token_fingerprint = '{value}'\nsecret = \"{value[:32]}\"\n")
+        out, result = self.capture()
+        self.assertEqual(result['coverage'], 'complete')
+        self.assertIn(result['secret_scan']['gitleaks'], ('used', 'unavailable', 'failed'))
+
+    def test_private_key_block_is_refused(self):
+        body = base64.b64encode(secrets.token_bytes(180)).decode()
+        (self.repo / 'id.key').write_text('\n'.join(['-----BEGIN PRIVATE KEY' + '-----', body, '-----END PRIVATE KEY' + '-----', '']))
+        result = self.refused_capture()
+        self.assertIn('private-key-block', [row['rule'] for row in result['findings']])
+
+    def test_high_entropy_assignment_refused_but_placeholders_pass(self):
+        (self.repo / 'config.py').write_text(f'API_KEY = "{secrets.token_urlsafe(24)}"\n')
+        result = self.refused_capture()
+        self.assertIn('high-entropy-assignment', [row['rule'] for row in result['findings']])
+        (self.repo / 'config.py').write_text('API_KEY = "${ENV_API_KEY}"\npassword = "changeme"\napi_key = \n')
+        self.capture()
+
+    def test_commit_message_secret_refused(self):
+        token = 'ghp_' + secrets.token_hex(18)
+        self.git('commit', '--allow-empty', '-m', f'rotate {token}')
+        code, result = self.invoke('capture', '--repo', self.repo, '--mode', 'since', '--base', self.initial,
+                                   '--out', self.root / 'sealed')
+        self.assertEqual(code, 6, result)
+        self.assertEqual(result['outcome'], 'secret_detected')
+        self.assertTrue(any(row['file'] == 'commits.txt' for row in result['findings']))
+
+    def test_fingerprint_denylist_blocks_listed_value(self):
+        token = secrets.token_hex(24)
+        assignment = secrets.token_hex(16)
+        short = secrets.token_hex(6)
+        prefixes = [hashlib.sha256(value.encode()).hexdigest()[:16] for value in (token, assignment, short)]
+        denylist = self.root / 'fingerprints.txt'
+        denylist.write_text('# known-compromised values\n' + '\n'.join(prefixes).upper() + '\n')
+        (self.repo / 'plain.txt').write_text(f'note {token} end\n')
+        (self.repo / 'env.txt').write_text(f'API_KEY={assignment}\nTOKEN={short}\n')
+        result = self.refused_capture(env={'CODE_REVIEW_SECRET_FINGERPRINTS': str(denylist)})
+        listed = [row for row in result['findings'] if row['rule'] == 'fingerprint-denylist']
+        self.assertTrue(listed)
+        for value in (token, assignment, short):
+            self.assertNotIn(value, json.dumps(result))
+        out = self.root / 'unlisted'
+        code, _ = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', out)
+        self.assertEqual(code, 0)
+        self.assertTrue((out / 'COMPLETE').exists())
+
+    def test_invalid_denylist_entry_is_explicit(self):
+        denylist = self.root / 'fingerprints.txt'
+        denylist.write_text('zzz-not-hex\n')
+        code, result = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', self.root / 'sealed',
+                                   env={'CODE_REVIEW_SECRET_FINGERPRINTS': str(denylist)})
+        self.assertEqual(code, 2, result)
+        self.assertEqual(result['outcome'], 'invalid_input')
+        self.assertIn('denylist', result['message'])
+
+    def test_secret_rules_apply_without_gitleaks(self):
+        data = f'token = "ghp_{secrets.token_hex(18)}"\n'.encode()
+        blobs = {CAPTURE.digest(data): data}
+        payloads = CAPTURE.payload_inventory({'before': {}, 'after': {}, 'authorities': []}, blobs, b'', b'')
+        with patch.object(CAPTURE.shutil, 'which', return_value=None):
+            with self.assertRaises(CAPTURE.Failure) as raised:
+                CAPTURE.secrets_gate(payloads)
+        result = raised.exception.result
+        self.assertEqual(result['outcome'], 'secret_detected')
+        self.assertEqual(result['secret_scan']['gitleaks'], 'unavailable')
+        self.assertIn('github-token', [row['rule'] for row in result['findings']])
+
+    def test_scanner_operational_failures_refuse_capture_without_writing(self):
+        data = b'ordinary content\n'
+        blobs = {CAPTURE.digest(data): data}
+        manifest = {'before': {}, 'after': {}, 'authorities': [], 'capture_id': 'fixture'}
+        failures = (
+            OSError('scanner launch failed'),
+            subprocess.TimeoutExpired('gitleaks', CAPTURE.GITLEAKS_TIMEOUT),
+            subprocess.CompletedProcess(['gitleaks'], 2, b'', b''),
+            subprocess.CompletedProcess(['gitleaks'], 0, b'not-json', b''),
+            subprocess.CompletedProcess(
+                ['gitleaks'], 7,
+                json.dumps([{'File': 'payload.txt', 'RuleID': 'generic-api-key',
+                             'StartLine': 1, 'StartColumn': 1.5, 'EndColumn': 4.5}]).encode(), b''),
+            subprocess.CompletedProcess(
+                ['gitleaks'], 7,
+                json.dumps([{'File': 'payload.txt', 'RuleID': 'generic-api-key',
+                             'StartLine': 1, 'StartColumn': 1,
+                             'EndColumn': CAPTURE.MAX_FILE + 1}]).encode(), b''),
+        )
+        for index, failure in enumerate(failures):
+            with self.subTest(failure=type(failure).__name__):
+                out = self.root / f'scanner-failure-{index}'
+                process_patch = {'side_effect': failure} if isinstance(failure, BaseException) else {'return_value': failure}
+                with (patch.object(CAPTURE.shutil, 'which', return_value='/fake/gitleaks'),
+                      patch.object(CAPTURE.subprocess, 'run', **process_patch)):
+                    with self.assertRaises(CAPTURE.Failure) as raised:
+                        CAPTURE.write_capture(out, manifest, blobs, b'', b'')
+                self.assertEqual(raised.exception.result['outcome'], 'secret_detected')
+                self.assertEqual(raised.exception.result['message'], 'Capture refused: secrets scanner failed')
+                self.assertEqual(raised.exception.result['secret_scan']['gitleaks'], 'failed')
+                self.assertFalse(out.exists())
+
+    def test_stdlib_only_opt_in_skips_gitleaks_and_writes_capture(self):
+        data = b'ordinary content\n'
+        blobs = {CAPTURE.digest(data): data}
+        manifest = {'before': {}, 'after': {}, 'authorities': [], 'capture_id': 'fixture'}
+        out = self.root / 'stdlib-only-capture'
+        with (patch.dict(os.environ, {CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'}),
+              patch.object(CAPTURE.shutil, 'which', side_effect=AssertionError('must skip discovery'))):
+            result = CAPTURE.write_capture(out, manifest, blobs, b'', b'')
+        self.assertEqual(result['gitleaks'], 'stdlib-only')
+        self.assertTrue((out / 'COMPLETE').exists())
 
 
 if __name__ == '__main__':

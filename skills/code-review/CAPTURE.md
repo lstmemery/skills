@@ -56,6 +56,39 @@ never means review passed. With gaps, perform useful partial review and label th
 findings partial. Full-scope review stays incomplete until gaps are covered or
 the scope is explicitly revised. Keep the revised scope and exclusions visible.
 
+## Secrets gate
+
+Before any payload is written, every captured byte — source blobs from both
+sides (including unchanged context files), authorities, `diff.patch`,
+`commits.txt`, and `manifest.json` — is scanned for secrets. A capture with a
+match fails closed with outcome `secret_detected` (exit 6) and nothing is
+written to the destination. Findings name the payload, line, and rule; values
+are never reported — built-in-rule findings carry only a length and a sha256
+prefix (gitleaks reports stay redacted end to end).
+
+Two layers run. When the gitleaks binary is installed it scans the payloads in
+redacted directory mode; its own configuration and ignore files are deliberately
+not consulted, and one false-positive class is suppressed: hex-shaped matches of
+its generic rule (digests, UUIDs, commit SHAs). A built-in rule set always runs
+alongside it: private-key PEM blocks, common token prefixes (`ghp_`,
+`github_pat_`, `sk-`, `xox…`, `AKIA…`, `glpat-`, `tk_`), and high-entropy
+assignments to names containing password/passwd/secret/token/api-key/access-key.
+Hex-shaped values and placeholders are not flagged by the built-in rules. If
+gitleaks is missing, the built-in rules still apply and the capture result says
+`unavailable` under `secret_scan`. If gitleaks is present but cannot run, times
+out, returns an unexpected status, or produces malformed output, capture fails
+closed with `secret_detected` and `secrets scanner failed`; no payload is
+written. Operators who deliberately accept the reduced coverage can set
+`CODE_REVIEW_SECRETS_SCANNER=stdlib-only` to skip gitleaks and use only the
+built-in rules. This opt-in is not a fallback after a scanner failure.
+
+A private deployment can block known live values without publishing them: point
+the environment variable `CODE_REVIEW_SECRET_FINGERPRINTS` at a file of sha256
+prefixes (one per line, 8–64 hex characters, `#` comments). Any payload token of
+8+ characters — or the value side of a `KEY=value` or `KEY:value` token — whose
+sha256 starts with a listed prefix fails the capture. An unreadable or
+malformed denylist file is an explicit input error.
+
 ## Freshness and errors
 
 ```sh
@@ -73,7 +106,8 @@ Exit 0 means capture/preview/read/verification succeeded; exit 2 means invalid
 input, an unrecognized or malformed manifest, or a Git failure; exit 3 means
 conflict/drift; exit 4 means a well-formed capture whose stored content no longer
 matches its recorded digests or completion marker; exit 5 means
-unsupported/unavailable input or I/O. Missing refs, an unborn HEAD,
+unsupported/unavailable input or I/O; exit 6 means the secrets gate refused the
+capture. Missing refs, an unborn HEAD,
 unmerged WIP, or multiple merge bases are explicit failures. The helper observes
 twice and rejects changed inputs; it does not lock developers out of editing, and
 cannot prove the absence of an external change-and-revert between observations.
