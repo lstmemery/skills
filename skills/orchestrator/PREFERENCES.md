@@ -65,7 +65,7 @@ acceptance of worker output.
   research workers follow their worker contract. Inside a jail, use only an
   available in-jail route; never reach outward to a host Herdr session.
 - "Luna agents" (or "luna workers") means the **Codex** harness running
-  `gpt-6-luna` at high effort (`codex -m gpt-6-luna -c
-  model_reasoning_effort=high`, Herdr kind `codex`), not pi. Use pi with
+  `gpt-6-luna` at **max** effort (`codex -m gpt-6-luna -c
+  model_reasoning_effort=max`, Herdr kind `codex`), not pi. Use pi with
   `openai-codex/gpt-6-luna` only as a fallback when Codex itself is broken,
   and say so. (User instruction 2026-09-28, after Codex was repaired.)
