@@ -96,6 +96,26 @@ process, exit/result, and supported lifecycle; do not assume a native agent API
 owns a wrapper-launched process. This branch is unavailable from a jail lacking
 the host launcher/session.
 
+Jailed `claude -p` workers (`omp-train --claude -p "…"`):
+
+- Put this in every brief: run sub-agents and shells in the foreground only
+  (parallel Agent calls in one message are fine), and write the report and
+  result JSON before the final message. Headless Claude ends when its turn
+  ends; before the jail policy set `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` it
+  also killed background tasks at 600 s. That lost two deep-research runs on
+  2026-09-30.
+- The first session starts the container; later concurrent sessions use
+  `--join`. Launch a join only after the primary pane prints `detached jail
+  started` and its `claude -p Task: …` process exists. A too-early join
+  exits with "no jail container to join".
+- Supervise by process and output, not by Herdr state: `-p` panes show
+  `idle` throughout. Wait on the worker process itself, e.g.
+  `while pgrep -f '^claude -p Task: <task-id>' >/dev/null; do sleep 60; done`.
+  Anchor the pattern (`^claude -p`) so it cannot match the watcher's own
+  shell command line; an unanchored `pgrep -f "<brief text>"` inside a
+  `bash -c`/`zsh -c` watcher matches itself and never exits. After exit,
+  treat a missing report/result as a failure and read the pane output.
+
 Label the coordinator `Orchestrator` where the backend supports naming, using
 a unique legal agent name. Preserve existing names owned by others. Names are
 presentation; actual IDs and recorded ownership determine control.
