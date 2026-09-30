@@ -12,7 +12,7 @@ The user asked for a retrospective: identify changes to the agent environment th
 
 1. Load and follow skill `writing-for-agents` for the writing style. Follow the active runtime profile for readable sources and output location.
 2. Read the session the user names. If they name none, use only the current session. For orchestrated work, also read that run's state, brief revisions, worker results, and review files. See [SOURCES.md](SOURCES.md) for Matt's host locations and safe-reading rules. Report inaccessible or missing sources as gaps; do not substitute unrelated sessions.
-3. Inspect the relevant steering surfaces and existing checks in [STEERING-SURFACES.md](STEERING-SURFACES.md). Keep the upstream implementation-versus-review principle: implementation has more context pressure; use deterministic checks for mechanical rules and reviewer guidance for judgment calls.
+3. Inspect the relevant steering surfaces and existing checks in [STEERING-SURFACES.md](STEERING-SURFACES.md), following its implementation-versus-review principle.
 4. Look for candidates in these categories. Use a category only when its trigger applies:
    - **Navigation** — use when finding relevant files or dependencies took avoidable time.
    - **Automated checks** — use when an error escaped a check, or an existing check is absent, unwired, or silently ineffective. Find the repo's current check before proposing another.
