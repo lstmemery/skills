@@ -10,7 +10,7 @@ Inspect only surfaces relevant to the observed issue. Paths are repo-relative un
 - **Memory:** `memory/MEMORY.md` as the index, relevant one-fact files, and feedback memories.
 - **Skills:** the public skills repository and `skills-local`; check `skills-lock.json` hashes and `localEdit` reasons before proposing skill changes.
 - **Orchestrator:** its `PREFERENCES.md` and relevant files under `references/`.
-- **Jail:** `tools/pii-jail/jail-config/`, `token-allowlist.txt`, `gate.sh`, and related verification scripts.
+- **Jail:** `tools/pii-jail/jail-config/`, `tools/pii-jail/token-allowlist.txt`, `tools/pii-jail/gate.sh`, and related verification scripts.
 - **Claude Code settings:** `~/.claude/settings.json`, especially `hooks` and `skillOverrides`. Read only the relevant keys and redact any credential values before showing output.
 
 Keep the implementation-versus-review boundary. The implementation agent has the most context pressure; review agents receive a diff. Prefer an automated check for fixed mechanical rules. Put judgment calls in the review guidance used by reviewers.
