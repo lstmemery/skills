@@ -52,6 +52,8 @@ mattpocock/skills with light harness adaptations).
 | code-review | adapted | three review modes (branch / fixed point / working tree) |
 | codebase-design | adapted | consumer-contract test doctrine |
 | prototype | adapted | capture rules for exploratory vs production asks |
+| pr | upstream | upstream — carried from mattpocock/skills @ d81f3a183412e71a5b1e84ca21bc1a35eea03a60 |
+| retro | adapted | adapted — from mattpocock/skills @ d81f3a183412e71a5b1e84ca21bc1a35eea03a60; harness-neutral session sources, Matt's steering surfaces, orchestration findings, and approval-gated routing |
 | grilling | adapted | interactive ask-facility routing |
 | grill-with-docs | upstream | wrapper pairing `grilling` + `domain-modeling` |
 | setup-matt-pocock-skills | upstream | carried verbatim |
