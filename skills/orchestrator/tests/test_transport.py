@@ -147,7 +147,7 @@ class TransportTest(unittest.TestCase):
         self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
         self.agent.update(state="done", kind="pi")
         self.job.update(provider="zai", admission_model="glm-4.5")
-        self.pane_output = "HTTP 429: rate limited\nRetry-After: 12"
+        self.pane_output = 'Error: 429: {"code":"1302","message":"Rate limit reached"}\nRetry-After: 12'
 
         observation = self.adapter.observe(self.job)
 
@@ -155,8 +155,18 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(observation["rate_limit"],
                          {"retry_after_seconds": 12.0, "source": "retry-after"})
 
+    def test_transcript_mentions_of_rate_limit_are_not_provider_errors(self):
+        self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
+        self.agent.update(state="done", kind="pi")
+        self.pane_output = "The report discusses HTTP 429 and rate limit backoff."
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "done")
+        self.assertNotIn("rate_limit", observation)
+
     def test_prompt_command_rate_limit_is_a_known_recoverable_result(self):
-        fake = FakeHerdr(prompt_error="HTTP 429\nRetry-After: 20")
+        fake = FakeHerdr(prompt_error="HTTP/1.1 429 Too Many Requests\nRetry-After: 20")
         with patch("herdr_jobs.transport.command", fake.command):
             with self.assertRaises(RateLimited) as caught:
                 self.adapter.effect("prompt", self.job, "Assigned work")

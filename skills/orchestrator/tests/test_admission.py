@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -12,8 +11,10 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[1]
 CLI = PACKAGE / "scripts/herdr-admission.py"
 sys.path.insert(0, str(PACKAGE / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.admission import AdmissionStore, backoff_delay, rate_limit_from_output
+from support import isolate_admission_state
 
 
 class AdmissionTest(unittest.TestCase):
@@ -21,16 +22,8 @@ class AdmissionTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        isolate_admission_state(self, self.root / "state")
         self.store = AdmissionStore(self.root / "state")
-        self.previous_state_dir = os.environ.get("ORCHESTRATOR_ADMISSION_DIR")
-        os.environ["ORCHESTRATOR_ADMISSION_DIR"] = str(self.root / "state")
-        self.addCleanup(self.restore_state_dir)
-
-    def restore_state_dir(self):
-        if self.previous_state_dir is None:
-            os.environ.pop("ORCHESTRATOR_ADMISSION_DIR", None)
-        else:
-            os.environ["ORCHESTRATOR_ADMISSION_DIR"] = self.previous_state_dir
 
     def call_cli(self, *arguments):
         result = subprocess.run([sys.executable, "-B", str(CLI), *arguments],
@@ -101,17 +94,44 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(stores[0].status("zai")["active_count"], 4)
 
     def test_rate_limit_metadata_and_bounded_default_are_parsed(self):
-        retry = rate_limit_from_output("HTTP 429\nRetry-After: 15", now=1000.0)
+        retry = rate_limit_from_output(
+            'Error: 429: {"code":"1302","message":"Rate limit reached"}\nRetry-After: 15',
+            now=1000.0, runtime="pi")
         dated_retry = rate_limit_from_output(
-            "HTTP 429\nRetry-After: Thu, 01 Jan 1970 00:16:45 GMT", now=1000.0)
-        reset = rate_limit_from_output("429 rate limited\nX-RateLimit-Reset: 1025", now=1000.0)
+            "HTTP/1.1 429 Too Many Requests\nRetry-After: Thu, 01 Jan 1970 00:16:45 GMT",
+            now=1000.0, source="harness_error", exit_code=1)
+        reset = rate_limit_from_output(
+            'Error: 429: {"code":"1302"}\nX-RateLimit-Reset: 1025', now=1000.0, runtime="pi")
         expired_reset = rate_limit_from_output(
-            '{"status":429,"x-ratelimit-reset":1699999999}', now=1700000000.0)
+            'Error: 429: {"code":"1302","x-ratelimit-reset":1699999999}',
+            now=1700000000.0, runtime="pi")
+        go_usage_limit = rate_limit_from_output(
+            'Error: 429: {"error":{"type":"GoUsageLimitError"}}', runtime="pi", now=1000.0)
+        codex_banner = rate_limit_from_output("API Error: Rate limit reached", runtime="codex", now=1000.0)
+
         self.assertEqual(retry, {"retry_after_seconds": 15.0, "source": "retry-after"})
         self.assertEqual(dated_retry, {"retry_after_seconds": 5.0, "source": "retry-after"})
         self.assertEqual(reset, {"retry_after_seconds": 25.0, "source": "reset"})
         self.assertEqual(expired_reset, {"retry_after_seconds": 0.0, "source": "reset"})
+        self.assertEqual(go_usage_limit, {"retry_after_seconds": None, "source": None})
+        self.assertEqual(codex_banner, {"retry_after_seconds": None, "source": None})
         self.assertEqual(backoff_delay(default_seconds=60, now=1000.0), (60.0, "default"))
+
+    def test_prompt_and_report_mentions_do_not_trigger_provider_backoff(self):
+        samples = (
+            ("pi", "Please explain HTTP 429 and rate limit responses in the prompt."),
+            ("codex", "The report mentions Error: 429 and says rate limit twice."),
+            ("pi", 'Example from a report: Error: 429: {"code":"1302"}'),
+        )
+        for runtime, transcript in samples:
+            with self.subTest(runtime=runtime, transcript=transcript):
+                self.assertIsNone(rate_limit_from_output(transcript, runtime=runtime))
+
+        self.assertIsNone(rate_limit_from_output(
+            "HTTP/1.1 429 Too Many Requests", source="harness_error", exit_code=0))
+        self.assertIsNone(rate_limit_from_output(
+            "The prompt discusses HTTP 429 and rate limit behavior.",
+            source="harness_error", exit_code=1, runtime="pi"))
 
     def test_cli_uses_bounded_default_when_rate_limit_has_no_metadata(self):
         before = time.time()

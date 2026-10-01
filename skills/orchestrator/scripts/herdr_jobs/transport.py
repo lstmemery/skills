@@ -237,7 +237,8 @@ class NativeTransport:
             # state from the pane before reporting the effect as delivered.
             code, output, error_output = command(argv, self.deadline)
             rate_limit = rate_limit_from_output(
-                (output + b"\n" + error_output).decode("utf-8", "replace"))
+                (error_output + b"\n" + output).decode("utf-8", "replace"),
+                source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
             if rate_limit is not None:
                 raise RateLimited(rate_limit)
             try:
@@ -255,7 +256,8 @@ class NativeTransport:
             if action in ("start", "prompt"):
                 code, output, error_output = command(argv, self.deadline)
                 rate_limit = rate_limit_from_output(
-                    (output + b"\n" + error_output).decode("utf-8", "replace"))
+                    (error_output + b"\n" + output).decode("utf-8", "replace"),
+                    source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
                 if rate_limit is not None:
                     raise RateLimited(rate_limit)
                 if code:
@@ -308,7 +310,8 @@ class NativeTransport:
         if state not in ("idle", "done", "working", "blocked", "unknown"):
             raise JobError("unavailable_capability", "unrecognized worker lifecycle state")
         observation = {"state": state, "identity_verified": True}
-        rate_limit = rate_limit_from_output(output) if output is not None else None
+        rate_limit = (rate_limit_from_output(output, runtime=job["spec"]["route"]["runtime"])
+                      if output is not None else None)
         if rate_limit is not None:
             observation["rate_limit"] = rate_limit
         if codex:

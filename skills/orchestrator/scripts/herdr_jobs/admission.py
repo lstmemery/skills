@@ -5,6 +5,7 @@ import contextlib
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import fcntl
+import json
 import math
 import os
 from pathlib import Path
@@ -84,15 +85,66 @@ def backoff_delay(retry_after=None, reset_at=None, default_seconds=60, now=None)
     return float(default_seconds), "default"
 
 
-def rate_limit_from_output(output, now=None):
-    """Return backoff metadata from a recognizable provider rate-limit response."""
+def _pi_provider_error(output):
+    marker = re.search(r"(?im)^\s*Error:\s*429\s*:\s*", output)
+    if marker is None:
+        return False
+    body = output[marker.end():]
+    start = body.find("{")
+    if start < 0:
+        return False
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(body[start:])
+    except json.JSONDecodeError:
+        return False
+
+    def has_marker(value):
+        if isinstance(value, dict):
+            if str(value.get("code", "")) == "1302":
+                return True
+            return any(has_marker(child) for child in value.values())
+        if isinstance(value, list):
+            return any(has_marker(child) for child in value)
+        return isinstance(value, str) and value == "GoUsageLimitError"
+
+    return has_marker(payload)
+
+
+def _codex_rate_limit_banner(output):
+    return bool(
+        re.search(
+            r"(?im)^\s*(?:⚠\s*)?API Error:\s*(?:Rate limit reached|429(?:\s+Too Many Requests)?|Too Many Requests)(?:\b|$)",
+            output,
+        )
+        or re.search(
+            r"(?im)^\s*(?:⚠\s*)?You(?:'ve| have) hit your (?:ChatGPT )?usage limit(?:\b|[.!])",
+            output,
+        )
+    )
+
+
+def _http_429_status_line(output):
+    return re.search(r"(?im)^\s*HTTP(?:/[0-9]+(?:\.[0-9]+)?)?\s+429(?:\s|$)", output) is not None
+
+
+def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exit_code=None):
+    """Return metadata only for known provider errors, never for generic transcript prose."""
     output = str(output)
-    lowered = output.casefold()
-    if not (re.search(r"\b429\b", lowered)
-            or re.search(r"\brate[ _-]?limit(?:ed|ing)?\b", lowered)
-            or "too many requests" in lowered
-            or re.search(r"\bcode\s*[:=]?\s*1302\b", lowered)):
+    if source == "harness_error":
+        explicit_error = exit_code not in (None, 0) and (
+            _http_429_status_line(output)
+            or _pi_provider_error(output)
+            or (runtime == "codex" and _codex_rate_limit_banner(output))
+        )
+    elif source == "pane" and runtime == "pi":
+        explicit_error = _pi_provider_error(output)
+    elif source == "pane" and runtime == "codex":
+        explicit_error = _codex_rate_limit_banner(output)
+    else:
+        explicit_error = False
+    if not explicit_error:
         return None
+
     retry_match = re.search(r"(?im)^\s*retry[-_ ]after\s*[:=]\s*([^\r\n]+)", output)
     if retry_match is None:
         retry_match = re.search(r"(?i)[\"']retry[-_ ]after[\"']\s*:\s*[\"']?([^\"',}\s]+)", output)
@@ -195,7 +247,7 @@ class AdmissionStore:
         state["backoffs"] = retained
         return changed
 
-    def acquire(self, provider, model, lease_id, cap, run_id=None, force=False):
+    def acquire(self, provider, model, lease_id, cap, run_id=None, bypass_admission=False):
         provider_key = normalize_provider(provider)
         model_key = normalize_model(model)
         lease_id = text(lease_id, "lease_id", 512)
@@ -212,7 +264,7 @@ class AdmissionStore:
                 backoff = next((item for item in state["backoffs"]
                                 if item["provider"].casefold() == provider_key
                                 and item["model"].casefold() == model_key and item["until"] > now), None)
-                if backoff and not force:
+                if backoff and not bypass_admission:
                     if pruned:
                         self._save(state)
                     return self._admission_result(state, provider_key, model_key, cap, admitted=False,
@@ -225,7 +277,7 @@ class AdmissionStore:
             backoff = next((item for item in state["backoffs"]
                             if item["provider"].casefold() == provider_key
                             and item["model"].casefold() == model_key and item["until"] > now), None)
-            if backoff and not force:
+            if backoff and not bypass_admission:
                 result = self._admission_result(state, provider_key, model_key, cap, admitted=False,
                                                 reason="backoff", retry_at=backoff["until"])
                 if pruned:
@@ -233,7 +285,7 @@ class AdmissionStore:
                 return result
 
             active = sum(item["provider"].casefold() == provider_key for item in state["leases"])
-            if active >= cap and not force:
+            if active >= cap and not bypass_admission:
                 result = self._admission_result(state, provider_key, model_key, cap, admitted=False,
                                                 reason="capacity")
                 if pruned:
