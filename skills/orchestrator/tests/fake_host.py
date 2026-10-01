@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 
 from herdr_jobs.records import JobError, load_json, save
-from herdr_jobs.transport import EffectUnknown
+from herdr_jobs.transport import EffectUnknown, RateLimited
 
 
 class FakeHost:
@@ -15,10 +15,13 @@ class FakeHost:
         self.fixture = load_json(self.path)
         self.events_path = self.path.with_name("events.json")
         self.events = load_json(self.events_path) if self.events_path.exists() else []
+        self.rate_limited_jobs = set()
+        self.rate_limited_attempts = set()
 
     def event(self, action, job):
         self.events.append({"action": action, "job_id": job["spec"]["job_id"],
-                            "pane_id": job["pane_id"], "attempt_id": job["attempt_id"]})
+                            "pane_id": job["pane_id"], "attempt_id": job["attempt_id"],
+                            "at": time.time()})
         save(self.events_path, self.events)
 
     def preflight(self, request, existing=None, status_only=False):
@@ -59,9 +62,25 @@ class FakeHost:
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
         codex_start = (action == "start" and job["spec"]["route"]["mode"] == "agent"
                        and job["spec"]["route"]["runtime"] == "codex")
+        if action == "start" and mode == "rate_limited_start_once" and job["spec"]["job_id"] not in self.rate_limited_jobs:
+            self.rate_limited_jobs.add(job["spec"]["job_id"])
+            self.rate_limited_attempts.add(job["attempt_id"])
+            output = Path(job["host_output"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "rate-limit-evidence.md").write_text("Provider rejected this attempt with HTTP 429.\n")
+            raise RateLimited({"retry_after_seconds": 0.2, "source": "retry-after"})
         if action in ("prompt", "jail") or codex_start:
             (self.path.parent / f"prompt-{job['spec']['job_id']}.txt").write_text(prompt)
-            self.receipt(job, mode)
+            rate_limited_first_attempt = (mode in ("rate_limited_once", "rate_limited_without_metadata_once")
+                                          and job["spec"]["job_id"] not in self.rate_limited_jobs)
+            if rate_limited_first_attempt:
+                self.rate_limited_jobs.add(job["spec"]["job_id"])
+                self.rate_limited_attempts.add(job["attempt_id"])
+                output = Path(job["host_output"])
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "rate-limit-evidence.md").write_text("Provider rejected this attempt with HTTP 429.\n")
+            else:
+                self.receipt(job, mode)
         crash = self.fixture.get("crash_after")
         if crash == action and not (self.path.parent / "crashed").exists():
             (self.path.parent / "crashed").write_text(action)
@@ -86,6 +105,13 @@ class FakeHost:
     def observe(self, job):
         self.event("observe", job)
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
+        if mode == "rate_limited_start_once" and job["attempt_id"] in self.rate_limited_attempts:
+            raise JobError("unavailable_capability", "worker was not registered after provider rejection")
+        if mode in ("rate_limited_once", "rate_limited_without_metadata_once") and job["attempt_id"] in self.rate_limited_attempts:
+            delay = None if mode == "rate_limited_without_metadata_once" else 0.2
+            source = None if delay is None else "retry-after"
+            return {"state": "done", "identity_verified": True,
+                    "rate_limit": {"retry_after_seconds": delay, "source": source}}
         if mode == "exited_jail":
             return {"state": "exited", "identity_verified": True, "exit_code": 0}
         lifecycle = "blocked" if mode == "blocked" else "working" if mode in ("working", "ambiguous") else "done"

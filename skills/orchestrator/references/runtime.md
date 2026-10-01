@@ -83,6 +83,41 @@ Preserve work rather than silently share the primary checkout. A read-only
 reviewer may inspect a pinned candidate without another worktree, with output
 elsewhere and any checkout-changing commands separately isolated.
 
+## Provider admission
+
+Before a direct or ad-hoc launch creates a pane, reserve a slot through the
+shared admission CLI shipped with this skill. Managed jobs use the same host
+state and configured provider caps:
+
+```sh
+python3 /path/to/orchestrator/scripts/herdr-admission.py acquire \
+  --provider zai --model glm-4.5 --lease-id TASK_ATTEMPT --run-id TASK_ID
+python3 /path/to/orchestrator/scripts/herdr-admission.py status --provider zai
+python3 /path/to/orchestrator/scripts/herdr-admission.py release --lease-id TASK_ATTEMPT
+```
+
+Only create the pane and start the worker when `acquire` returns
+`"admitted":true`. A denied acquisition reports whether the provider cap or a
+provider/model backoff blocked it. Keep the lease through the worker's active
+lifetime; release it after the owned worker is terminal. `status` reports the
+provider-wide active count used by both direct and managed launches.
+
+When a direct worker reports HTTP 429 or a rate-limit response, record its
+Retry-After or reset metadata before another start, then release the completed
+attempt's admission lease:
+
+```sh
+python3 /path/to/orchestrator/scripts/herdr-admission.py rate-limit \
+  --provider zai --model glm-4.5 --retry-after 30
+```
+
+Use `--reset-at` when the provider supplies reset metadata. If neither is
+available, the policy's bounded 60-second default applies. A new acquisition
+for that provider/model remains denied until the recorded time expires. The
+CLI reads provider caps from the adjacent `launch-policy.json`; set an explicit
+`provider` in a managed job override when its model ID does not identify the
+provider.
+
 ## Herdr launch
 
 Use current help to inspect supported kinds. For a normal recognized harness:

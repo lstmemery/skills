@@ -1,6 +1,5 @@
 import copy
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,8 +13,10 @@ SCRIPT = PACKAGE / "scripts/herdr-jobs.py"
 DRIVER = PACKAGE / "tests/driver.py"
 POLICY = PACKAGE / "launch-policy.json"
 sys.path.insert(0, str(PACKAGE / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
+from support import isolate_admission_state
 
 
 class JobsTest(unittest.TestCase):
@@ -23,6 +24,8 @@ class JobsTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.admission_dir = self.root / "shared-admission"
+        isolate_admission_state(self, self.admission_dir)
         self.run = self.root / "run"
         self.task = self.root / "task ' $(data).md"
         self.task.write_text("Inspect the assigned fixture. Literal `printf secret` and $(touch SHOULD_NOT_EXIST).\n")
@@ -33,7 +36,7 @@ class JobsTest(unittest.TestCase):
         self.write_jobs(1)
         self.configure()
 
-    def write_jobs(self, count, kinds=None):
+    def write_jobs(self, count, kinds=None, runtime="codex", concurrency=None, provider=None, model=None):
         jobs = []
         for index in range(count):
             kind = kinds[index] if kinds else "ordinary"
@@ -41,9 +44,17 @@ class JobsTest(unittest.TestCase):
                    "task_file": str(self.task), "cwd": str(self.root), "output_expectation": "A fixture report.",
                    "writes_repository": False}
             if kind == "ordinary":
-                job["override"] = {"runtime": "codex", "instruction": "Use Codex for this fixture."}
+                override = {"runtime": runtime, "instruction": f"Use {runtime.capitalize()} for this fixture."}
+                if provider is not None:
+                    override["provider"] = provider
+                if model is not None:
+                    override["model"] = model
+                job["override"] = override
             jobs.append(job)
-        self.manifest.write_text(json.dumps({"schema_version": 1, "request_id": "test-request", "jobs": jobs}))
+        manifest = {"schema_version": 1, "request_id": "test-request", "jobs": jobs}
+        if concurrency is not None:
+            manifest["concurrency"] = concurrency
+        self.manifest.write_text(json.dumps(manifest))
 
     def configure(self, **kwargs):
         self.fixture.write_text(json.dumps({"request_id": "test-request", **kwargs}))
@@ -128,20 +139,117 @@ class JobsTest(unittest.TestCase):
         self.assertFalse((self.root / "events.json").exists())
         self.assertFalse((self.run / "state.json").exists())
 
-    def test_mixed_batch_starts_four_before_observation_then_queued_work(self):
+    def test_mixed_batch_observes_each_launch_before_starting_the_next(self):
         self.write_jobs(5, ["ordinary", "shopping", "deep_research", "ordinary", "ordinary"])
         code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
         events = self.events()
         first_observe = next(i for i, event in enumerate(events) if event["action"] == "observe")
-        starts = [event for event in events[:first_observe] if event["action"] in ("start", "jail")]
-        self.assertEqual(len(starts), 4)
+        launches_before_first_observe = [event for event in events[:first_observe]
+                                         if event["action"] in ("start", "jail")]
+        self.assertEqual(len(launches_before_first_observe), 1)
+        self.assertEqual(sum(event["action"] in ("start", "jail") for event in events), 5)
         self.assertEqual([job["route"]["mode"] for job in result["jobs"]], ["agent", "jail", "jail", "agent", "agent"])
         self.assertTrue(all(job["settled"] for job in result["jobs"]))
         self.assertEqual(result["acceptance"], "pending")
         for event in events:
             if event["action"] in ("start", "prompt", "jail", "observe"):
                 self.assertTrue(event["pane_id"].startswith("moved:"))
+
+    def test_eight_pi_jobs_share_four_host_slots_with_direct_launches(self):
+        policy = json.loads(self.policy.read_text())
+        policy["provider_admission"]["provider_caps"]["zai"] = 4
+        self.policy.write_text(json.dumps(policy))
+        self.write_jobs(8, runtime="pi", concurrency=8, provider="zai", model="glm-4.5")
+        self.configure(jobs={f"job{index}": "working" for index in range(4)})
+
+        _, result = self.call(wait_seconds=0.5)
+        direct_status = subprocess.run(
+            [sys.executable, "-B", str(PACKAGE / "scripts/herdr-admission.py"),
+             "status", "--provider", "zai"],
+            capture_output=True, text=True, timeout=5,
+        )
+        direct_acquire = subprocess.run(
+            [sys.executable, "-B", str(PACKAGE / "scripts/herdr-admission.py"),
+             "acquire", "--provider", "zai", "--model", "glm-4.5", "--lease-id", "direct-extra",
+             "--policy", str(self.policy)],
+            capture_output=True, text=True, timeout=5,
+        )
+
+        self.assertEqual(direct_status.returncode, 0, direct_status.stderr)
+        self.assertEqual(direct_acquire.returncode, 0, direct_acquire.stderr)
+        self.assertEqual(sum(event["action"] == "split" for event in self.events()), 4)
+        self.assertEqual(sum(job["phase"] == "pending" for job in result["jobs"]), 4)
+        self.assertEqual(result["provider_active"]["zai"], 4)
+        self.assertEqual(json.loads(direct_status.stdout)["active_count"], 4)
+        self.assertFalse(json.loads(direct_acquire.stdout)["admitted"])
+
+    def test_rate_limited_assignment_retries_after_backoff_without_losing_lease_or_artifacts(self):
+        self.write_jobs(2, runtime="pi", provider="zai", model="glm-4.5")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["cwd"] = str(self.root)
+        manifest["jobs"][0]["writes_repository"] = True
+        lease = {"schema_version": 1, "path": str(self.root), "lease_id": "treehouse-lease-1",
+                 "lease_holder": "test-request", "repo_root": str(self.root),
+                 "git_common_dir": str(self.root / ".git"), "base_commit": "a" * 40}
+        manifest["jobs"][0]["repository_worktree"] = lease
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "rate_limited_once"})
+
+        code, result = self.call(wait_seconds=1.2)
+        state = self.state()
+        job = state["jobs"][0]
+        retries = [item for item in job["history"] if item["action"] == "rate_limit_retry"]
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        self.assertEqual(len(retries), 1)
+        if not retries:
+            return
+        retry = retries[0]
+        self.assertNotEqual(retry["attempt_id"], job["attempt_id"])
+        self.assertTrue(retry["pane_id"].startswith("moved:"))
+        self.assertTrue(Path(retry["host_output"], "rate-limit-evidence.md").is_file())
+        self.assertEqual(job["spec"]["repository_worktree"], lease)
+        self.assertTrue(job["settled"])
+        self.assertTrue(state["jobs"][1]["settled"])
+        second_job_splits = [event for event in self.events()
+                             if event["job_id"] == "job1" and event["action"] == "split"]
+        self.assertTrue(second_job_splits)
+        self.assertGreaterEqual(second_job_splits[0]["at"], retry["retry_at"])
+
+    def test_explicit_start_rate_limit_retries_even_without_a_registered_worker(self):
+        self.write_jobs(1, runtime="pi", provider="zai", model="glm-4.5")
+        self.configure(jobs={"job0": "rate_limited_start_once"})
+
+        code, result = self.call(wait_seconds=1.2)
+        job = self.state()["jobs"][0]
+        retries = [item for item in job["history"] if item["action"] == "rate_limit_retry"]
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        self.assertEqual(len(retries), 1)
+        if len(retries) != 1:
+            return
+        retry = retries[0]
+        self.assertTrue(retry["pane_id"].startswith("moved:"))
+        self.assertTrue(Path(retry["host_output"], "rate-limit-evidence.md").is_file())
+        self.assertNotEqual(retry["attempt_id"], job["attempt_id"])
+
+    def test_managed_rate_limit_uses_bounded_default_when_metadata_is_absent(self):
+        self.write_jobs(1, runtime="pi", provider="zai", model="glm-4.5")
+        self.configure(jobs={"job0": "rate_limited_without_metadata_once"})
+
+        before = time.time()
+        code, result = self.call(wait_seconds=0.3)
+        state = self.state()
+        job = state["jobs"][0]
+        limited = next(item for item in job["history"] if item["action"] == "provider_rate_limit")
+        retry = next(item for item in job["history"] if item["action"] == "rate_limit_retry")
+
+        self.assertEqual((code, result["batch_state"]), (0, "active"))
+        self.assertEqual(limited["source"], "default")
+        self.assertGreaterEqual(retry["retry_at"] - before, 59)
+        self.assertLessEqual(retry["retry_at"] - before, 61)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
 
     def test_repeat_and_resume_do_not_relaunch(self):
         self.call()
