@@ -57,7 +57,9 @@ class FakeHost:
     def effect(self, action, job, prompt):
         self.event(action, job)
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
-        if action in ("prompt", "jail"):
+        codex_start = (action == "start" and job["spec"]["route"]["mode"] == "agent"
+                       and job["spec"]["route"]["runtime"] == "codex")
+        if action in ("prompt", "jail") or codex_start:
             (self.path.parent / f"prompt-{job['spec']['job_id']}.txt").write_text(prompt)
             self.receipt(job, mode)
         crash = self.fixture.get("crash_after")
@@ -68,12 +70,17 @@ class FakeHost:
             time.sleep(0.5)
         if mode == "split_unknown" and action == "split":
             raise EffectUnknown("split response lost")
-        if mode in ("prompt_timeout", "ambiguous") and action in ("prompt", "jail"):
+        if mode == "blocked" and codex_start:
+            return {"launch_blocked": True, "issue": "Codex is showing a trust or resume dialog"}
+        if mode in ("prompt_timeout", "ambiguous") and (action in ("prompt", "jail") or codex_start):
             raise EffectUnknown("prompt response lost")
         if action == "split":
             return {"pane_id": f"old:{job['spec']['job_id']}"}
         if action == "move":
             return {"pane_id": f"moved:{job['spec']['job_id']}"}
+        if codex_start:
+            self.event("prompt_verified", job)
+            return {"prompt_submitted": True}
         return {}
 
     def observe(self, job):
@@ -82,4 +89,9 @@ class FakeHost:
         if mode == "exited_jail":
             return {"state": "exited", "identity_verified": True, "exit_code": 0}
         lifecycle = "blocked" if mode == "blocked" else "working" if mode in ("working", "ambiguous") else "done"
-        return {"state": lifecycle, "identity_verified": True}
+        observation = {"state": lifecycle, "identity_verified": True}
+        if job["spec"]["route"]["mode"] == "agent" and job["spec"]["route"]["runtime"] == "codex":
+            observation["prompt_verified"] = lifecycle == "working" and mode != "ambiguous"
+            if lifecycle == "blocked":
+                observation["launch_issue"] = "Codex is showing a trust or resume dialog"
+        return observation

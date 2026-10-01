@@ -119,7 +119,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
         events = self.events()
         first_observe = next(i for i, event in enumerate(events) if event["action"] == "observe")
-        starts = [event for event in events[:first_observe] if event["action"] in ("prompt", "jail")]
+        starts = [event for event in events[:first_observe] if event["action"] in ("start", "jail")]
         self.assertEqual(len(starts), 4)
         self.assertEqual([job["route"]["mode"] for job in result["jobs"]], ["agent", "jail", "jail", "agent", "agent"])
         self.assertTrue(all(job["settled"] for job in result["jobs"]))
@@ -132,15 +132,38 @@ class JobsTest(unittest.TestCase):
         self.call()
         self.call()
         self.call("resume")
-        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
         self.assertEqual(sum(event["action"] == "split" for event in self.events()), 1)
+
+    def test_codex_receives_the_managed_prompt_during_fresh_start(self):
+        self.call()
+        events = self.events()
+        self.assertEqual(sum(event["action"] == "start" for event in events), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in events), 0)
+        self.assertTrue((self.root / "prompt-job0.txt").is_file())
+        self.assertLess(next(i for i, event in enumerate(events) if event["action"] == "prompt_verified"),
+                        next(i for i, event in enumerate(events) if event["action"] == "observe"))
+
+    def test_codex_dialog_is_a_launch_failure_and_is_never_retried(self):
+        self.configure(jobs={"job0": "blocked"})
+        code, result = self.call()
+        self.assertEqual(code, 10)
+        self.assertEqual(result["jobs"][0]["observed"]["state"], "blocked")
+        self.assertIn("trust or resume dialog", result["jobs"][0]["issue"])
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
+        self.call("resume")
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
     def test_task_content_change_conflicts(self):
         self.call()
         self.task.write_text("Changed request content")
         code, result = self.call()
         self.assertEqual((code, result["error"]), (3, "conflict"))
-        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
 
     def test_changed_policy_conflicts(self):
         self.call()
@@ -154,14 +177,17 @@ class JobsTest(unittest.TestCase):
         code, result = self.call()
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
         self.call("resume")
-        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
         self.assertTrue(any(event.get("reconciled_by") == "matching receipt" for event in self.state()["jobs"][0]["history"]))
 
     def test_working_does_not_prove_ambiguous_prompt_delivery(self):
         self.configure(jobs={"job0": "ambiguous"})
         self.assertEqual(self.call()[0], 6)
+        self.assertEqual(sum(event["action"] == "observe" for event in self.events()), 1)
         self.assertEqual(self.call("resume")[0], 6)
-        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
     def test_ambiguous_split_is_not_replayed_and_other_job_finishes(self):
         self.write_jobs(2)
@@ -328,7 +354,7 @@ class JobsTest(unittest.TestCase):
         self.assertIsNotNone(result["jobs"][0]["collection_error"])
 
     def test_crash_after_each_effect_never_replays_uncertain_effect(self):
-        for action in ("split", "move", "start", "prompt", "jail"):
+        for action in ("split", "move", "start", "jail"):
             with self.subTest(action=action):
                 self.run = self.root / f"crash-{action}"
                 (self.root / "crashed").unlink(missing_ok=True)
