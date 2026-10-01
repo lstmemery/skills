@@ -25,6 +25,8 @@ class FakeHerdr:
         self.output = output
         self.start_code = start_code
         self.prompt_error = prompt_error
+        self.retry_environment = {}
+        self.retry_output = None
 
     def command(self, argv, deadline, cwd=None):
         self.calls.append(argv)
@@ -38,7 +40,20 @@ class FakeHerdr:
             agent = {"state": self.state, "pane": "moved:1", "kind": "codex", "name": "c9-fixture"}
             return 0, json.dumps(agent).encode(), b""
         if argv[:3] == ["herdr", "pane", "read"]:
-            return 0, json.dumps({"result": {"output": self.output}}).encode(), b""
+            output = self.retry_output if self.retry_output is not None else self.output
+            return 0, json.dumps({"result": {"output": output}}).encode(), b""
+        if argv[:3] == ["herdr", "pane", "run"]:
+            shell_command = argv[4]
+            if shell_command.startswith("export "):
+                for assignment in shlex.split(shell_command[len("export "):]):
+                    key, value = assignment.split("=", 1)
+                    self.retry_environment[key] = value
+            else:
+                format_string = shlex.split(shell_command)[1]
+                marker = format_string.split("%s", 1)[0].lstrip("\\n")
+                self.retry_output = (marker + self.retry_environment["PI_CODING_AGENT_DIR"] + "__"
+                                     + self.retry_environment["PI_CODING_AGENT_SESSION_DIR"])
+            return 0, b"", b""
         return 0, b'{"result":{}}', b""
 
 
@@ -196,6 +211,83 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "codex",
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
+
+    def test_codex_retry_override_is_scoped_to_the_fresh_launch_arguments(self):
+        fake = FakeHerdr(start_code=1)
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        self.job["retry_override"] = {
+            "provider_id": "vendor",
+            "request_max_retries": 8,
+            "stream_max_retries": 10,
+        }
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start[-5:], ["-c", "model_providers.vendor.request_max_retries=8",
+                                      "-c", "model_providers.vendor.stream_max_retries=10",
+                                      "Assigned work"])
+
+    def test_pi_retry_profile_environment_is_set_on_only_the_owned_pane(self):
+        self.job["retry_profile"] = {
+            "agent_dir": str(self.root / "run" / "pi-agent"),
+            "session_dir": str(self.root / "run" / "pi-sessions"),
+            "settings_sha256": "0" * 64,
+        }
+        fake = FakeHerdr()
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("retry_setup", self.job, "")
+
+        self.assertEqual(result["retry_environment_verified"], True)
+        self.assertEqual(fake.retry_environment, {
+            "PI_CODING_AGENT_DIR": str(self.root / "run" / "pi-agent"),
+            "PI_CODING_AGENT_SESSION_DIR": str(self.root / "run" / "pi-sessions"),
+        })
+        self.assertEqual(sum(call[:3] == ["herdr", "pane", "run"] for call in fake.calls), 2)
+
+    def test_codex_retry_override_rejects_the_builtin_provider_before_launch(self):
+        config_home = self.root / "codex-home"
+        config_home.mkdir()
+        (config_home / "config.toml").write_text('model_provider = "openai"\n')
+        request = {"jobs": [self.spec], "retry_override": {
+            "codex": {"provider_id": "openai", "request_max_retries": 8}}}
+
+        with patch.dict("os.environ", {"CODEX_HOME": str(config_home)}):
+            with self.assertRaisesRegex(JobError, "built-in provider"):
+                self.adapter.preflight(request)
+
+        self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in self.calls))
+
+    def test_codex_retry_override_accepts_only_the_already_selected_custom_provider(self):
+        config_home = self.root / "codex-home"
+        config_home.mkdir()
+        (config_home / "config.toml").write_text(
+            'model_provider = "vendor"\n[model_providers.vendor]\nname = "Fixture"\n'
+        )
+        request = {"jobs": [self.spec], "retry_override": {
+            "codex": {"provider_id": "vendor", "request_max_retries": 8}}}
+
+        with patch.dict("os.environ", {"CODEX_HOME": str(config_home)}):
+            capabilities = self.adapter.preflight(request)
+
+        self.assertEqual(capabilities["models"], {})
+
+    def test_pi_project_retry_settings_block_a_run_override_before_launch(self):
+        project = self.root / ".pi"
+        project.mkdir()
+        (project / "settings.json").write_text('{"retry": { /* project wins */ "maxRetries": 4, }}')
+        self.spec["route"]["runtime"] = "pi"
+        self.spec["kind"] = "pi"
+        self.adapter.binding["supported_kinds"].append("pi")
+        self.available.append("pi")
+        request = {"jobs": [self.spec], "retry_override": {"pi": {"max_retries": 10}}}
+
+        with self.assertRaisesRegex(JobError, "project pi settings override run retry values"):
+            self.adapter.preflight(request)
+
+        self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in self.calls))
 
     def test_trust_and_resume_dialogs_fail_launch_without_answering_the_dialog(self):
         cases = [

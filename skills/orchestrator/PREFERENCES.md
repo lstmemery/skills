@@ -69,3 +69,7 @@ acceptance of worker output.
   model_reasoning_effort=max`, Herdr kind `codex`), not pi. Use pi with
   `openai-codex/gpt-6-luna` only as a fallback when Codex itself is broken,
   and say so. (User instruction 2026-09-28, after Codex was repaired.)
+- Retry tuning is run-scoped. Prefer a supported per-run override and record it
+  in run state. Never edit shared pi/Codex settings for transient rate limits;
+  when a runtime has no supported per-run override, record the staged change and
+  wait for authorization before applying it or retrying work under it.

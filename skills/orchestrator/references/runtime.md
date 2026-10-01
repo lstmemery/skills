@@ -42,6 +42,34 @@ When preferences depend on usage, inspect `orchestrator limits --json --compact`
 or the provider's available read-only equivalent. Unknown limits are not exhausted.
 Apply only specified fallbacks; pause affected new work if policy requires it.
 
+## Run-scoped retry tuning
+
+Retry values belong to a worker run. In a managed-job manifest, set the optional
+run-level `retry_override`; the helper pins it in `state.json` and applies it
+only to matching workers. Pi uses a run-private `PI_CODING_AGENT_DIR` and
+`PI_CODING_AGENT_SESSION_DIR` selected in the owned pane. Codex receives native
+`-c model_providers.<id>.*` arguments only when the selected provider is already
+a configured custom provider. The built-in Codex providers and jail route have
+no supported per-run retry override; stop with a capability gap instead of
+editing a shared Codex or pi settings file.
+
+If a worker needs tuning and the requested harness has no supported per-run
+override, record a staged proposal and wait for authorization before applying a
+shared setting or restarting work. For the known pi retry change, the staged
+restore helper is dry-run by default:
+
+```sh
+python3 scripts/restore-pi-retry-settings.py
+python3 scripts/restore-pi-retry-settings.py --apply
+python3 scripts/restore-pi-retry-settings.py --rollback
+```
+
+The helper reads only `retry.maxRetries` and `retry.maxAgentDelayMs` from the
+live file and the `settings.json.bak-orch-retry-20260930` baseline. It prints a
+diff of those two keys, preserves all other settings, and keeps a private
+pre-apply snapshot for rollback. `--apply` and `--rollback` are separate
+authorized live actions; tests use temporary files.
+
 ## Prepare the location
 
 For repository changes, prefer Treehouse. Inspect installed `treehouse get --help`,

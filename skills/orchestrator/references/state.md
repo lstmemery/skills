@@ -37,6 +37,12 @@ beside the brief. A new queued task has no worker yet. Unknown values stay
 explicit. Backend storage owns live process state; the ledger owns the requested
 outcome and pending decisions. Reconcile the two before dependent mutations.
 
+Record retry overrides in the run's durable state and pin them to that run's
+workers. If retry tuning is needed but that runtime has no supported run-scoped
+override, record the proposed values, affected run and worker, staged command,
+and `awaiting authorization` in Decisions/steering. Do not change shared agent
+settings or retry a worker with new shared settings before authorization.
+
 ## Lifecycle and steering
 
 `queued` becomes `running` after an observed launch. A returned result becomes

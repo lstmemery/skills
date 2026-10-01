@@ -133,6 +133,35 @@ def validate_writer_intent(job, label="job"):
     return job["writes_repository"]
 
 
+def retry_override_record(value):
+    fields(value, [], ["pi", "codex"], "retry_override")
+    if not value:
+        invalid("retry_override must contain pi and/or codex settings")
+    result = {}
+    if "pi" in value:
+        pi = fields(value["pi"], [], ["max_retries", "max_agent_delay_ms"], "retry_override.pi")
+        if not pi:
+            invalid("retry_override.pi must set at least one retry value")
+        normalized = {}
+        if "max_retries" in pi:
+            normalized["max_retries"] = integer(pi["max_retries"], "pi max_retries", 0, 100)
+        if "max_agent_delay_ms" in pi:
+            normalized["max_agent_delay_ms"] = integer(pi["max_agent_delay_ms"],
+                                                        "pi max_agent_delay_ms", 0, 600000)
+        result["pi"] = normalized
+    if "codex" in value:
+        codex = fields(value["codex"], ["provider_id"],
+                       ["request_max_retries", "stream_max_retries"], "retry_override.codex")
+        if not any(key in codex for key in ("request_max_retries", "stream_max_retries")):
+            invalid("retry_override.codex must set request_max_retries and/or stream_max_retries")
+        normalized = {"provider_id": identifier(codex["provider_id"], "Codex provider_id")}
+        for key in ("request_max_retries", "stream_max_retries"):
+            if key in codex:
+                normalized[key] = integer(codex[key], f"Codex {key}", 0, 100)
+        result["codex"] = normalized
+    return result
+
+
 def absolute(value, base):
     return str((base / text(value, "path", 4096)).absolute())
 
@@ -186,9 +215,11 @@ def policy_record(value):
 def prepare(manifest_path, policy_path):
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
-    manifest = fields(load_json(manifest_path), ["schema_version", "request_id", "jobs"], ["concurrency"])
+    manifest = fields(load_json(manifest_path), ["schema_version", "request_id", "jobs"],
+                      ["concurrency", "retry_override"])
     version(manifest["schema_version"])
     identifier(manifest["request_id"], "request_id")
+    retry_override = retry_override_record(manifest["retry_override"]) if "retry_override" in manifest else None
     concurrency = integer(manifest.get("concurrency", policy["default_concurrency"]),
                           "concurrency", 1, policy["max_concurrency"])
     if not isinstance(manifest["jobs"], list) or not 1 <= len(manifest["jobs"]) <= 128:
@@ -252,8 +283,18 @@ def prepare(manifest_path, policy_path):
         jobs.append({**job, "task_file": task_path, "cwd": cwd,
                      "task": task, "route": route, "model": model,
                      "provider": provider, "kind": policy["runtime_kinds"][runtime]})
+    if retry_override:
+        for runtime in retry_override:
+            if not any(job["route"]["mode"] == "agent" and job["route"]["runtime"] == runtime
+                       for job in jobs):
+                invalid(f"retry_override for {runtime} has no {runtime} workers")
+            if runtime == "codex" and any(job["route"]["mode"] == "jail"
+                                           and job["route"]["runtime"] == "codex" for job in jobs):
+                invalid("Codex retry_override is unsupported for jail workers")
     prepared = {"schema_version": 1, "request_id": manifest["request_id"], "concurrency": concurrency,
                 "jobs": jobs, "policy": policy, "policy_digest": digest(encoded(policy))}
+    if retry_override is not None:
+        prepared["retry_override"] = retry_override
     if len(encoded(prepared)) > 8388608:
         invalid("expanded request exceeds 8 MiB")
     return prepared

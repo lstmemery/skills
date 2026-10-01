@@ -1,11 +1,13 @@
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -17,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
 from support import isolate_admission_state
+from herdr_jobs.records import digest
 
 
 class JobsTest(unittest.TestCase):
@@ -267,6 +270,70 @@ class JobsTest(unittest.TestCase):
         self.assertTrue((self.root / "prompt-job0.txt").is_file())
         self.assertLess(next(i for i, event in enumerate(events) if event["action"] == "prompt_verified"),
                         next(i for i, event in enumerate(events) if event["action"] == "observe"))
+
+    def test_pi_retry_override_is_private_to_the_run_and_recorded_in_state(self):
+        global_agent = self.root / "pi-global"
+        global_agent.mkdir()
+        global_settings = global_agent / "settings.json"
+        original_settings = ('{\n  // preserve unrelated pi configuration\n'
+                             '  "defaultModel": "fixture-model",\n'
+                             '  "retry": {"enabled": true, "maxRetries": 2, "keep": "existing",},\n}\n')
+        global_settings.write_text(original_settings)
+        (global_agent / "auth.json").write_text("{}")
+
+        policy = json.loads(self.policy.read_text())
+        policy["routes"]["ordinary"]["runtime"] = "pi"
+        policy["runtime_kinds"]["pi"] = "pi"
+        self.policy.write_text(json.dumps(policy))
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0].pop("override")
+        manifest["retry_override"] = {"pi": {"max_retries": 10, "max_agent_delay_ms": 120000}}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "rate_limited_start_once"})
+
+        with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
+            code, result = self.call(wait_seconds=1.2)
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        status_code, status = self.call("status")
+        self.assertEqual((status_code, status["batch_state"]), (0, "collected"))
+        state = self.state()
+        self.assertEqual(state["retry_override"], manifest["retry_override"])
+        job = state["jobs"][0]
+        retry = next(item for item in job["history"] if item["action"] == "rate_limit_retry")
+        self.assertNotEqual(retry["attempt_id"], job["attempt_id"])
+        self.assertEqual(job["retry_override"], manifest["retry_override"]["pi"])
+        profile = Path(job["retry_profile"]["agent_dir"])
+        self.assertIn(job["attempt_id"], str(profile))
+        self.assertNotEqual(str(profile), str(self.run / "runtime" / "pi" / "job0" / retry["attempt_id"] / "agent"))
+        run_settings = json.loads((profile / "settings.json").read_text())
+        self.assertEqual(run_settings, {
+            "defaultModel": "fixture-model",
+            "retry": {"enabled": True, "maxRetries": 10, "maxAgentDelayMs": 120000, "keep": "existing"},
+        })
+        self.assertEqual(global_settings.read_text(), original_settings)
+        self.assertEqual((profile / "auth.json").resolve(), (global_agent / "auth.json").resolve())
+        self.assertTrue(Path(job["retry_profile"]["session_dir"]).is_dir())
+        self.assertEqual(digest((profile / "settings.json").read_bytes()),
+                         job["retry_profile"]["settings_sha256"])
+        actions = [event["action"] for event in self.events()]
+        self.assertEqual(actions.count("retry_setup"), 2)
+        self.assertEqual(actions.count("start"), 2)
+        for attempt in {retry["attempt_id"], job["attempt_id"]}:
+            attempt_actions = [event["action"] for event in self.events() if event["attempt_id"] == attempt]
+            self.assertLess(attempt_actions.index("retry_setup"), attempt_actions.index("start"))
+
+    def test_unmatched_retry_override_is_rejected_before_any_worker_launch(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["retry_override"] = {"pi": {"max_retries": 10}}
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, result = self.call()
+
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("no pi workers", result["message"])
+        self.assertFalse((self.run / "state.json").exists())
+        self.assertFalse((self.root / "events.json").exists())
 
     def test_codex_dialog_is_a_launch_failure_and_is_never_retried(self):
         self.configure(jobs={"job0": "blocked"})

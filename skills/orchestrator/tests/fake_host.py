@@ -69,7 +69,9 @@ class FakeHost:
             output.mkdir(parents=True, exist_ok=True)
             (output / "rate-limit-evidence.md").write_text("Provider rejected this attempt with HTTP 429.\n")
             raise RateLimited({"retry_after_seconds": 0.2, "source": "retry-after"})
-        if action in ("prompt", "jail") or codex_start:
+        pi_retry_start = (action == "start" and job["spec"]["route"]["runtime"] == "pi"
+                          and job.get("retry_profile") is not None)
+        if action in ("prompt", "jail") or codex_start or pi_retry_start:
             (self.path.parent / f"prompt-{job['spec']['job_id']}.txt").write_text(prompt)
             rate_limited_first_attempt = (mode in ("rate_limited_once", "rate_limited_without_metadata_once")
                                           and job["spec"]["job_id"] not in self.rate_limited_jobs)
