@@ -156,16 +156,23 @@ repurpose retained work as fallback.
    For repository changes, follow [human code inspection](references/review.md):
    show the complete task diff and files in Herdr before the action requiring the
    user's decision. Apply the standing review boundary in preferences. Finish
-   with the candidate, evidence, and exact next action visible to the user.
+   with the candidate, evidence, and exact next action visible to the user. For
+   candidates proposed for integration or merge, run the [integration
+   preflight](references/review.md#prepare-an-inspectable-candidate) against the
+   intended target and include its report in the presented evidence.
 6. **Close or continue.** Before closing a run, execute the worker-contract
    `check-closeout` command against its run directory. It checks every rostered
    disposition and scans for unrostered worker-shaped directories. If any worker
    lacks a valid terminal disposition or roster entry, keep the run open and
-   reconcile it first. Then perform only the authorized next action and verify
-   its actual result. Record artifact retention and any pending decision before
-   cleanup. Stop only work owned by this task. Preserve unlanded changes and
-   pending review artifacts. A completed PR-creation task does not establish that
-   its code was merged or its worktree is disposable.
+   reconcile it first. Immediately before any authorized integration or merge,
+   rerun the [integration preflight](references/review.md#prepare-an-inspectable-candidate)
+   for the current target and candidate heads; proceed only when it returns
+   `outcome: ready`, and retain its report with the merge evidence. Then perform
+   only the authorized next action and verify its actual result. Record artifact
+   retention and any pending decision before cleanup. Stop only work owned by
+   this task. Preserve unlanded changes and pending review artifacts. A completed
+   PR-creation task does not establish that its code was merged or its worktree
+   is disposable.
 
 ## Keep the coordinator small
 
