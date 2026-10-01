@@ -42,7 +42,8 @@ SECRET_ASSIGNMENT = re.compile(
     r'(?i)(?<![A-Za-z0-9_])'
     r'(?P<name>[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)'
     r'["\']?\s*(?::=|[:=])\s*["\']?'
-    r'(?P<value>[^\s"\'`<>{}()]{16,})')
+    r'(?P<value>[^\s"\'`<>{}()]{16,})'
+    r'(?P<runtime_call>[ \t]*\()?')
 PLACEHOLDER_VALUES = frozenset((
     'changeme', 'change_me', 'example', 'fixme', 'n/a', 'nil', 'none', 'not_set',
     'notset', 'null', 'passwd', 'password', 'placeholder', 'redacted', 'sample',
@@ -378,6 +379,10 @@ def rule_findings(label, text, allowed_fingerprints=frozenset()):
             findings.append(finding(label, line_at(text, match.start()), 'private-key-block', value))
     for match in SECRET_ASSIGNMENT.finditer(text):
         value = match.group('value')
+        # A callable name is source code describing how the value is fetched,
+        # not the credential value being assigned.
+        if match.group('runtime_call'):
+            continue
         if assignment_value_is_secret(value) and not is_allowed_fingerprint(
                 value.encode('latin-1'), allowed_fingerprints):
             findings.append(finding(label, line_at(text, match.start()), 'high-entropy-assignment', value))
