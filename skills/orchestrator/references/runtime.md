@@ -100,6 +100,54 @@ Record workspace/pane/name before prompting. Pass native arguments only through
 the installed CLI's supported argument boundary. Do not turn a brief into shell
 code: use structured argv where possible and shell-quote any necessary command.
 
+For a managed Codex job, start a fresh Codex session with the complete managed
+prompt as the final native argument. Scope project trust to the assigned working
+directory and pass a resolved model only when one was requested:
+
+```python
+import json
+
+argv = [
+    "herdr", "agent", "start", name, "--kind", "codex", "--pane", pane,
+    "--timeout", "5000", "--", "-C", cwd,
+    "-c", f'projects.{json.dumps(cwd)}.trust_level="trusted"',
+]
+if resolved_model is not None:
+    argv += ["-m", resolved_model]
+argv.append(prompt)
+```
+
+Construct this as an argv array; the prompt is one argument. Do not follow this launch with
+`herdr agent prompt`, `pane send-text`, or text keystrokes. Herdr may time out
+while waiting for an argv-started Codex session to become idle. Treat that
+timeout as an ambiguous start until `herdr agent get` confirms the owned
+pane/name/kind and `herdr pane read <pane-id> --source visible --lines 200`
+shows `Working`.
+Only then mark the prompt submitted and begin normal observation. A blocked
+state, a trust/resume dialog, or output that does not prove `Working` is a
+launch failure or unresolved effect; do not answer the dialog or replay the
+prompt. Other harnesses continue to use the verified `agent start` then
+`agent prompt` sequence above.
+
+Some non-repository run folders may still trigger Codex's trust screen despite
+the scoped trust override. In that case the managed launch stops for inspection;
+it does not auto-accept the folder.
+
+Recovery for a blocked Codex launch:
+
+1. Inspect the owned pane and path with `herdr agent get <name>` and
+   `herdr pane read <pane-id> --source recent-unwrapped --lines 120`.
+2. Never choose **Use session directory**. If Codex shows a resume/session
+   picker, leave the existing session untouched. If it shows a trust dialog,
+   have the coordinator verify the exact assigned path before a human resolves
+   it interactively; the launcher does not press Enter or choose a trust option.
+3. Reconcile whether the managed prompt started or produced output. Do not
+   launch a duplicate while that attempt may still be working. Before an
+   authorized retry, confirm the old Codex process is gone, the pane is at a
+   shell prompt, and no result from the prior attempt needs collection. A
+   pending/blocked managed run is never replayed automatically; retry from a
+   fresh Codex session and a new run directory.
+
 The runtime id `claude-code` typically maps to Herdr kind `claude`; verify the
 installed mapping for every selected harness. Check startup readiness before
 submission. A prompt timeout or stalled response can occur after delivery;

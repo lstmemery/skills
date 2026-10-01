@@ -4,7 +4,7 @@
 
 Use `scripts/herdr-jobs.py` for independent ordinary-agent and omp-train Codex jobs in an authorized Herdr host session. It validates launch policy, starts up to the configured cap, journals effects, and collects artifacts. The coordinator supplies intent and judges the results. Current explicit instructions take precedence through an `override` record; its instruction must reflect real authorization.
 
-Success has separate layers: a helper operation returned; a worker settled; its receipt and artifacts were collected; and the coordinator accepted its work. A `collected` batch still has `acceptance: pending`. Missing files, malformed receipts, and uncertain effects remain visible. The helper never answers approval dialogs or blindly repeats a timed-out prompt.
+Success has separate layers: a helper operation returned; a worker settled; its receipt and artifacts were collected; and the coordinator accepted its work. A `collected` batch still has `acceptance: pending`. Missing files, malformed receipts, and uncertain effects remain visible. Managed Codex jobs pass the complete prompt as argv to a fresh `agent start`, then verify the owned identity and visible `Working` state before marking submission and observing it. A Herdr startup timeout is expected for this prompt-bearing launch, but is not delivery evidence by itself. The helper never answers approval dialogs or blindly repeats a timed-out prompt.
 
 The structured [launch policy](../launch-policy.json) owns executable routing/defaults. Existing CLI behavior is bound by a verified host-contract file. Read [host integration](host-integration.md) before first live use or when the installed CLI/server changes. Live control is unavailable in a jail. Offline preview and tests work there.
 
@@ -72,7 +72,17 @@ Ordinary runtime has no invented default: either set a settled default in policy
 
 The explicit run directory contains `state.json`, a per-run lock, worker output directories, immutable collection revisions, and (for jail work) launcher requests and exit records. Files are written through temporary files and atomic replacement. State retains request/policy digests, attempts, returned IDs, observations, and pending effects. The same request and run directory resume; altered content conflicts. Different directories are independent runs, even if the caller reuses a request ID. There is no global deduplication registry.
 
-Plan → act → observe → checkpoint: persist an effect intent, issue the command, validate the response, then persist its result. A pane move changes the ID; all later operations use the returned ID. A lost response can leave an effect ambiguous. A matching worker receipt proves prompt delivery; a verified worker identity can reconcile startup. An unidentified split or move stays unresolved. Inspect host resources under the original request's authority before deciding how to handle that case; creating a fresh run is not an automatic retry.
+Plan → act → observe → checkpoint: persist an effect intent, issue the command, validate the response, then persist its result. A pane move changes the ID; all later operations use the returned ID. A lost response can leave an effect ambiguous. A matching worker receipt proves prompt delivery. For Codex, identity alone cannot reconcile a prompt-bearing start: require a matching receipt or a visible `Working` state from the owned pane. Other agent kinds retain the verified startup then prompt sequence. An unidentified split or move stays unresolved. Inspect host resources under the original request's authority before deciding how to handle that case; creating a fresh run is not an automatic retry.
+
+If Codex shows a trust or resume/session dialog, or the pane cannot prove `Working`,
+the job is blocked or unresolved and the managed launcher sends no dialog input.
+Inspect the owned pane with `herdr agent get <name>` and
+`herdr pane read <pane-id> --source recent-unwrapped --lines 120`. Never choose
+**Use session directory**. A coordinator must verify the exact assigned path
+before a human resolves a trust prompt. Reconcile whether the prompt started or
+produced output before retrying. An authorized retry requires the old Codex
+process to have exited, the pane to be at a shell prompt, and any prior result
+to be collected; create a new run directory only for that fresh attempt.
 
 The cap applies to this run. Startup, working, blocked, and ambiguously active workers occupy slots. A worker with proven settled activity can release its slot while collection stays incomplete. Idle/done without observed activity or a valid receipt does not prove that the submitted job ran. Independent work continues within capacity; four blocked/uncertain jobs can fill all slots.
 

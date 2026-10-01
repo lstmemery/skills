@@ -6,13 +6,14 @@ This package has offline verification. Its host binding is intentionally unconfi
 
 Copy [host-contract.example.json](../examples/host-contract.example.json) to the host's chosen configuration location. The example contains no claims about installed response shapes.
 
-1. Run the read-only discovery commands `herdr --help`, `herdr agent`, `herdr status`, `orchestrator help --json --compact`, and `orchestrator doctor --json --compact`. Capture only the outputs needed for the binding.
-2. Hash the exact stdout bytes of the first, second, and fourth commands with SHA-256. Store those three digests. Future changes stop preflight for reverification.
+1. Run the read-only discovery commands `herdr --help`, `herdr agent`, `herdr pane`, `herdr status`, `orchestrator help --json --compact`, and `orchestrator doctor --json --compact`. Capture only the outputs needed for the binding.
+2. Hash the exact stdout bytes of the first, second, third, and fifth commands with SHA-256. Store those four digests. Future changes stop preflight for reverification.
 3. From `herdr status`, bind JSON key paths for a stable identity of this server/session and its server version. Bind the version value. The identity must distinguish different servers that might reuse pane IDs.
 4. From the installed agent command contract and a known owned worker, bind paths for lifecycle state, pane ID, kind, and name in `herdr agent get` output. Record only kinds verified as supported by this host. The adapter rejects an unrecognized state or mismatched worker identity.
-5. Verify the documented split and move response paths: `result.pane.pane_id` and `result.move_result.pane.pane_id`. If the installed API differs, adjust the narrow adapter and its response fixtures before use.
-6. For jail jobs, verify the actual launcher/export mechanism. This version supports a stable host directory that mirrors the worker workspace root and preserves job-specific relative paths. Bind `host_root` and `worker_root` only when that property has been demonstrated. Ensure the launcher returns after artifacts have been exported. If this host instead allocates dynamic per-container export paths, adapt `check_export` and the output binding before enabling jail work; do not invent a mapping or use publication markers as transport.
-7. Check that the internal Python launcher monitor is recognized appropriately during the finite `omp-train --harness codex exec` run. Its host-side exit record must survive agent exit. Confirm native model arguments for every ordinary runtime/model combination to be enabled.
+5. Verify `herdr pane read <pane-id> --source visible --lines 200` returns terminal text in a shape accepted by the adapter and that an owned Codex worker's active turn visibly reports `Working`. Verify the native-argument boundary of `herdr agent start ... -- <AGENT_ARG>...`; the Codex prompt is one argument, alongside `-C`, the scoped project trust setting, and any resolved `-m` value. The start command may exit with a readiness timeout while the Codex turn is working.
+6. Verify the documented split and move response paths: `result.pane.pane_id` and `result.move_result.pane.pane_id`. If the installed API differs, adjust the narrow adapter and its response fixtures before use.
+7. For jail jobs, verify the actual launcher/export mechanism. This version supports a stable host directory that mirrors the worker workspace root and preserves job-specific relative paths. Bind `host_root` and `worker_root` only when that property has been demonstrated. Ensure the launcher returns after artifacts have been exported. If this host instead allocates dynamic per-container export paths, adapt `check_export` and the output binding before enabling jail work; do not invent a mapping or use publication markers as transport.
+8. Check that the internal Python launcher monitor is recognized appropriately during the finite `omp-train --harness codex exec` run. Its host-side exit record must survive agent exit. Confirm native model arguments for every ordinary runtime/model combination to be enabled.
 
 Set `verified: true` only after those facts are established. It is an operator assertion about a verified contract, not a script-generated attestation. No keys or private configuration snapshots belong in this file. A changed session, server version, or help digest stops execution rather than silently retargeting an existing run.
 
@@ -22,6 +23,8 @@ Use a small authorized ordinary-agent job, a jail job, and then a mixed batch. V
 
 - retained pane IDs match actual moves;
 - provider/model/task choices match the request and policy;
+- a Codex start carries the prompt in argv, verifies owned identity plus visible `Working` before observation, and sends no separate prompt;
+- trust and resume/session dialogs fail closed, with no automated dialog input and no selection of **Use session directory**;
 - workers write the expected artifacts and attempt-bound receipts;
 - jail output is collected on the host after the launcher exits;
 - a prompt timeout followed by resume does not submit again;
