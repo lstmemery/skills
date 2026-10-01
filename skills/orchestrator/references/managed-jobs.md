@@ -32,12 +32,35 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation` | `override` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation` | `override`, `repository_worktree` |
 | Override | `instruction: string` | `runtime: string`, `model: string` |
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary`, `deep_research`, or `shopping`; the coordinator supplies it explicitly. Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
 
 Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–32 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
+
+Every repository-writing job must include `repository_worktree` and set `cwd` to
+its `path`. Produce the record with:
+
+```sh
+python3 scripts/lease-worktree.py acquire --repo <expected-repository> \
+  --lease-holder <run-task-id> --expected-base <full-commit-id>
+```
+
+Omit `--expected-base` only when the assignment does not pin a base. The record has
+`schema_version`, `path`, `lease_id`, `lease_holder`, `repo_root`,
+`git_common_dir`, and `base_commit`. A managed writer preflight confirms the
+current Treehouse lease ID and holder, then verifies that the canonical cwd is a
+registered linked worktree of the recorded repository and that `HEAD` still
+matches `base_commit`. It does this before the first pane is created. Preview
+checks the record's shape and cwd pairing offline; it does not claim that the
+live lease is valid. Jobs without `repository_worktree` are non-repository-writing
+jobs and do not receive this worktree check.
+
+Treehouse allocation can reserve a slot before later verification fails. If the
+allocator exits unsuccessfully after `get`, reconcile `treehouse status --json`
+before another allocation attempt. The helper never retries and emits a record
+only after allocation and verification succeed.
 
 Ordinary runtime has no invented default: either set a settled default in policy or supply an explicit current-request override. The override instruction leads the worker prompt as the current user instruction. A runtime override on an `ordinary` job selects that Herdr-agent runtime. On a `deep_research` or `shopping` job it may only restate the policy runtime; naming a different one is refused (`decision_needed`) rather than converting the job out of its isolation route. When the user explicitly names another runtime for research or shopping work, re-issue it as `task_kind: ordinary`. Exact unavailable runtimes/models produce an actionable failure, without substitution. Exact models are checked against discovery and pinned. Exact jail model selection is unsupported until its separate catalog is verified; omit the model for the jail runtime default.
 

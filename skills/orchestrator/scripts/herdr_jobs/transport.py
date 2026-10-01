@@ -10,6 +10,7 @@ import sys
 import time
 
 from .records import JobError, digest, fields, integer, load_json, parse_json, save, text, version
+from .worktrees import verify_repository_worktree
 
 
 class BudgetExpired(Exception):
@@ -32,12 +33,12 @@ class Deadline:
             raise BudgetExpired()
 
 
-def command(argv, deadline):
+def command(argv, deadline, cwd=None):
     deadline.check()
     chunks = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
+                                   stderr=subprocess.PIPE, cwd=cwd)
     except OSError as error:
         raise JobError("unavailable_capability", f"cannot execute {argv[0]}: {error.strerror}") from error
     try:
@@ -123,6 +124,20 @@ class NativeTransport:
         previous = {job["spec"]["job_id"]: job for job in existing["jobs"]} if existing else {}
         planned = [job for job in request["jobs"] if not status_only and
                    (job["job_id"] not in previous or previous[job["job_id"]]["phase"] in ("pending", "split", "moved"))]
+        writer_checks = []
+        if not status_only:
+            for job in request["jobs"]:
+                if "repository_worktree" not in job:
+                    continue
+                old = previous.get(job["job_id"])
+                if old is None or old["phase"] in ("pending", "split", "moved") or (
+                        old["phase"] == "ready" and old["pending_effect"] is None):
+                    writer_checks.append(job)
+        for job in writer_checks:
+            verify_repository_worktree(
+                job["repository_worktree"], job["cwd"],
+                lambda argv, cwd: command(argv, self.deadline, cwd=cwd),
+            )
         available = []
         if planned:
             doctor = self.read([self.orchestrator, "doctor", "--json", "--compact"])

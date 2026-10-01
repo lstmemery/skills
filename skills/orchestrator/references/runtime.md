@@ -46,16 +46,28 @@ Apply only specified fallbacks; pause affected new work if policy requires it.
 
 For repository changes, prefer Treehouse. Inspect installed `treehouse get --help`,
 `treehouse status --help`, and `treehouse return --help` before relying on flags.
-Its documented automation route is a durable lease:
+Use the checked allocator for repository writers; do not pass raw Treehouse output
+straight to Git or a launcher:
 
 ```sh
-treehouse get --lease --lease-holder <run-task-id> --json
+python3 scripts/lease-worktree.py acquire --repo <expected-repository> \
+  --lease-holder <run-task-id> --expected-base <full-commit-id>
 ```
 
-Select the task's intended base explicitly when it differs from the default.
-Retain returned path, lease identity, and actual Git base commit. Verify the
-path is an isolated linked worktree of the intended repository before launching
-a writer. Lease ownership persists through worker exit and human review.
+The helper calls `treehouse get --lease --lease-holder <run-task-id> --json`,
+rejects failed, empty, or unrecognized results before any Git command, confirms
+the active lease through `treehouse status --json`, then checks the canonical
+path, linked-worktree registration, repository identity, and base commit without
+changing branches. Include its complete JSON output as the job's
+`repository_worktree` record and set `cwd` to that record's `path`. Supply
+`--expected-base` whenever the assignment pins a base; otherwise the helper
+records the worktree's current `HEAD`.
+
+The managed launcher repeats the lease, repository, linked-worktree, and base
+checks before creating a pane for a repository writer. If allocation reports an
+error after Treehouse may have reserved a slot, inspect `treehouse status --json`
+and reconcile that lease before retrying; do not launch from an unverified path.
+Lease ownership persists through worker exit and human review.
 
 For research or other work with no repository writes, create an ordinary output
 folder and supply any read-only source paths. A Git repository is unnecessary.
@@ -63,6 +75,8 @@ If scope expands to repository writes, isolate them before proceeding.
 
 If Treehouse is unavailable, ordinary Git worktrees can meet the isolation
 contract when permitted; record their ownership and cleanup responsibility.
+They cannot be used as a managed repository-writer location until an equivalent
+lease record and verification adapter are available.
 Preserve work rather than silently share the primary checkout. A read-only
 reviewer may inspect a pinned candidate without another worktree, with output
 elsewhere and any checkout-changing commands separately isolated.
