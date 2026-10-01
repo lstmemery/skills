@@ -12,6 +12,7 @@ import time
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
                       validate_writer_intent, version)
+from .admission import rate_limit_from_output
 from .worktrees import verify_repository_worktree
 
 
@@ -21,6 +22,12 @@ class BudgetExpired(Exception):
 
 class EffectUnknown(Exception):
     pass
+
+
+class RateLimited(Exception):
+    def __init__(self, signal):
+        super().__init__("provider returned a rate-limit response")
+        self.signal = signal
 
 
 class Deadline:
@@ -228,7 +235,11 @@ class NativeTransport:
             # A prompt-bearing Codex invocation makes Herdr's startup timeout
             # expected. Trust only a verified worker identity and live Working
             # state from the pane before reporting the effect as delivered.
-            command(argv, self.deadline)
+            code, output, error_output = command(argv, self.deadline)
+            rate_limit = rate_limit_from_output(
+                (output + b"\n" + error_output).decode("utf-8", "replace"))
+            if rate_limit is not None:
+                raise RateLimited(rate_limit)
             try:
                 observation = self.observe(job)
             except (JobError, UnicodeError, BudgetExpired) as error:
@@ -241,7 +252,17 @@ class NativeTransport:
                 return {"prompt_submitted": True}
             raise EffectUnknown("Codex prompt delivery is unverified; inspect the owned pane before retrying")
         try:
-            result = self.read(argv)
+            if action in ("start", "prompt"):
+                code, output, error_output = command(argv, self.deadline)
+                rate_limit = rate_limit_from_output(
+                    (output + b"\n" + error_output).decode("utf-8", "replace"))
+                if rate_limit is not None:
+                    raise RateLimited(rate_limit)
+                if code:
+                    raise JobError("unavailable_capability", f"{Path(argv[0]).name} {argv[1]} exited {code}; inspect the host CLI")
+                result = parse_json(output)
+            else:
+                result = self.read(argv)
             if not isinstance(result, dict) or not isinstance(result.get("result"), dict) or result.get("ok") is False or result.get("success") is False:
                 raise JobError("unavailable_capability", "host rejected effect or returned malformed JSON")
             if action == "split":
@@ -249,6 +270,8 @@ class NativeTransport:
             if action == "move":
                 return {"pane_id": text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)}
             return {}
+        except RateLimited:
+            raise
         except (BudgetExpired, JobError, UnicodeError) as error:
             raise EffectUnknown(f"{action}: response unavailable or unverified; reconcile before repeating") from error
 
@@ -260,16 +283,18 @@ class NativeTransport:
                 raise JobError("conflict", "jail exit record does not match this job attempt")
             integer(record["exit_code"], "launcher exit code", -255, 255)
             return {"state": "exited", "identity_verified": True, "exit_code": record["exit_code"]}
-        codex = job["spec"]["route"]["mode"] == "agent" and job["spec"]["route"]["runtime"] == "codex"
+        agent_route = job["spec"]["route"]["mode"] == "agent"
+        codex = agent_route and job["spec"]["route"]["runtime"] == "codex"
         output = None
-        if codex:
+        if agent_route:
             terminal = self.read([self.herdr, "pane", "read", job["pane_id"],
                                   "--source", "visible", "--lines", "200"])
             output = self.terminal_output(terminal)
-            dialog = self.codex_dialog(output)
-            if dialog:
-                return {"state": "blocked", "identity_verified": False,
-                        "prompt_verified": False, "launch_issue": dialog}
+            if codex:
+                dialog = self.codex_dialog(output)
+                if dialog:
+                    return {"state": "blocked", "identity_verified": False,
+                            "prompt_verified": False, "launch_issue": dialog}
         result = self.read([self.herdr, "agent", "get", job["pane_id"]])
         paths = self.binding["paths"]
         pane = at(result, paths["agent_pane_id"])
@@ -283,6 +308,9 @@ class NativeTransport:
         if state not in ("idle", "done", "working", "blocked", "unknown"):
             raise JobError("unavailable_capability", "unrecognized worker lifecycle state")
         observation = {"state": state, "identity_verified": True}
+        rate_limit = rate_limit_from_output(output) if output is not None else None
+        if rate_limit is not None:
+            observation["rate_limit"] = rate_limit
         if codex:
             observation["prompt_verified"] = (observation["state"] == "working"
                                                and "working" in output.casefold())

@@ -1,7 +1,17 @@
 {
   "schema_version": 1,
   "default_concurrency": 4,
-  "max_concurrency": 4,
+  "max_concurrency": 8,
+  "provider_admission": {
+    "default_provider_cap": 4,
+    "provider_caps": {
+      "zai": 2,
+      "opencode-go": 2,
+      "codex": 8,
+      "openai-codex": 8
+    },
+    "default_backoff_seconds": 60
+  },
   "topology": "new-workspace",
   "routes": {
     "ordinary": {"mode": "agent", "runtime": null},

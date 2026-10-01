@@ -138,7 +138,8 @@ def absolute(value, base):
 
 
 def policy_record(value):
-    fields(value, ["schema_version", "default_concurrency", "max_concurrency", "topology", "routes", "runtime_kinds"])
+    fields(value, ["schema_version", "default_concurrency", "max_concurrency", "topology", "routes", "runtime_kinds"],
+           ["provider_admission"])
     version(value["schema_version"])
     if value["topology"] != "new-workspace":
         invalid("version 1 supports new-workspace topology only")
@@ -158,6 +159,27 @@ def policy_record(value):
     for runtime, kind in value["runtime_kinds"].items():
         identifier(runtime, "runtime")
         identifier(kind, "Herdr kind")
+    admission = value.get("provider_admission", {})
+    fields(admission, [], ["default_provider_cap", "provider_caps", "default_backoff_seconds"],
+           "provider_admission")
+    admission = {"default_provider_cap": integer(admission.get("default_provider_cap", 4),
+                                                "default_provider_cap", 1, 64),
+                 "provider_caps": admission.get("provider_caps", {}),
+                 "default_backoff_seconds": integer(admission.get("default_backoff_seconds", 60),
+                                                    "default_backoff_seconds", 1, 3600)}
+    if not isinstance(admission["provider_caps"], dict):
+        invalid("provider_caps must be an object")
+    normalized_caps = {}
+    for provider, cap in admission["provider_caps"].items():
+        text(provider, "provider cap key", 100)
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
+            invalid("provider cap keys must be simple provider identifiers")
+        normalized_provider = provider.casefold()
+        if normalized_provider in normalized_caps:
+            invalid(f"duplicate provider cap key after case normalization: {provider}")
+        normalized_caps[normalized_provider] = integer(cap, f"provider cap for {provider}", 1, 64)
+    admission["provider_caps"] = normalized_caps
+    value["provider_admission"] = admission
     return value
 
 
@@ -190,7 +212,7 @@ def prepare(manifest_path, policy_path):
         model = None
         override = job.get("override")
         if override is not None:
-            fields(override, ["instruction"], ["runtime", "model"], "override")
+            fields(override, ["instruction"], ["runtime", "model", "provider"], "override")
             text(override["instruction"], "override instruction", 10000)
             if "runtime" in override:
                 named = identifier(override["runtime"], "override runtime")
@@ -201,6 +223,14 @@ def prepare(manifest_path, policy_path):
                 route = {"mode": route["mode"], "runtime": named}
             if "model" in override:
                 model = text(override["model"], "model", 200)
+            if "provider" in override:
+                provider = text(override["provider"], "provider", 100)
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
+                    invalid("provider must be a simple provider identifier")
+            else:
+                provider = None
+        else:
+            provider = None
         runtime = route["runtime"]
         if runtime is None:
             raise JobError("decision_needed", f"{job_id}: choose an ordinary-job runtime in policy or a current-request override")
@@ -221,7 +251,7 @@ def prepare(manifest_path, policy_path):
                 invalid(f"{job_id}: cwd must equal repository_worktree.path")
         jobs.append({**job, "task_file": task_path, "cwd": cwd,
                      "task": task, "route": route, "model": model,
-                     "kind": policy["runtime_kinds"][runtime]})
+                     "provider": provider, "kind": policy["runtime_kinds"][runtime]})
     prepared = {"schema_version": 1, "request_id": manifest["request_id"], "concurrency": concurrency,
                 "jobs": jobs, "policy": policy, "policy_digest": digest(encoded(policy))}
     if len(encoded(prepared)) > 8388608:
