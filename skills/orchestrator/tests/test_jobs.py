@@ -1,6 +1,5 @@
 import copy
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,8 +13,10 @@ SCRIPT = PACKAGE / "scripts/herdr-jobs.py"
 DRIVER = PACKAGE / "tests/driver.py"
 POLICY = PACKAGE / "launch-policy.json"
 sys.path.insert(0, str(PACKAGE / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
+from support import isolate_admission_state
 
 
 class JobsTest(unittest.TestCase):
@@ -24,9 +25,7 @@ class JobsTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.admission_dir = self.root / "shared-admission"
-        self.previous_admission_dir = os.environ.get("ORCHESTRATOR_ADMISSION_DIR")
-        os.environ["ORCHESTRATOR_ADMISSION_DIR"] = str(self.admission_dir)
-        self.addCleanup(self.restore_admission_dir)
+        isolate_admission_state(self, self.admission_dir)
         self.run = self.root / "run"
         self.task = self.root / "task ' $(data).md"
         self.task.write_text("Inspect the assigned fixture. Literal `printf secret` and $(touch SHOULD_NOT_EXIST).\n")
@@ -36,12 +35,6 @@ class JobsTest(unittest.TestCase):
         self.fixture = self.root / "fixture.json"
         self.write_jobs(1)
         self.configure()
-
-    def restore_admission_dir(self):
-        if self.previous_admission_dir is None:
-            os.environ.pop("ORCHESTRATOR_ADMISSION_DIR", None)
-        else:
-            os.environ["ORCHESTRATOR_ADMISSION_DIR"] = self.previous_admission_dir
 
     def write_jobs(self, count, kinds=None, runtime="codex", concurrency=None, provider=None, model=None):
         jobs = []

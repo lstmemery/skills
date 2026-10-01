@@ -44,10 +44,11 @@ class Engine:
                             "job_id": job_id, "attempt_id": attempt_id})
         return "managed-" + digest(identity)[:40]
 
-    def acquire_admission(self, job, force=False):
+    def acquire_admission(self, job, bypass_admission=False):
         result = self.admission.acquire(job["provider"], job["admission_model"],
                                         job["admission_lease_id"], self.provider_cap(job["provider"]),
-                                        self.state["request"]["request_id"], force=force)
+                                        self.state["request"]["request_id"],
+                                        bypass_admission=bypass_admission)
         job["admission_acquired"] = result["lease_held"]
         if not result["admitted"] and result["reason"] == "backoff" and result["lease_held"]:
             self.release_admission(job)
@@ -203,7 +204,7 @@ class Engine:
                 text(job[name], f"stored {name}", 4096)
             if ((job["phase"] != "pending" or job["pending_effect"] is not None)
                     and not job["settled"] and not job["admission_acquired"]):
-                self.acquire_admission(job, force=True)
+                self.acquire_admission(job, bypass_admission=True)
         integer(state["request"]["concurrency"], "stored concurrency", 1, 64)
         self.state = state
 
