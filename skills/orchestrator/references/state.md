@@ -10,6 +10,13 @@ alone updates the ledger; workers write briefs' result locations and artifacts.
 Replace the ledger atomically. Read active rows and the records touched by an
 event; archive terminal rows with links to retained evidence.
 
+Before launching a worker, add it to the run-level `workers.json` roster described
+in [the worker contract](workers.md). The coordinator owns this roster and each
+worker's `disposition.json`; a run is not closed until the worker-contract
+`check-closeout` command accepts the roster and discovers no unrostered
+worker-shaped directory. A run with no workers may omit the roster; closeout
+treats it as empty but still scans the run tree.
+
 ```text
 Run: <id>; updated: <UTC>; owner: <harness + actual session/pane identity>
 Generation: <positive integer>; phase: <active|transferring>
