@@ -13,22 +13,25 @@ PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.records import JobError, digest, load_json, save
-from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport
+from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport, RateLimited
 
 
 class FakeHerdr:
     """Small offline stand-in for the external Herdr CLI boundary."""
 
-    def __init__(self, state="working", output="Working", start_code=0):
+    def __init__(self, state="working", output="Working", start_code=0, prompt_error=None):
         self.calls = []
         self.state = state
         self.output = output
         self.start_code = start_code
+        self.prompt_error = prompt_error
 
     def command(self, argv, deadline, cwd=None):
         self.calls.append(argv)
         if argv[:3] == ["herdr", "agent", "start"]:
             return self.start_code, b'{"result":{}}', b"agent_not_ready: timed out" if self.start_code else b""
+        if argv[:3] == ["herdr", "agent", "prompt"] and self.prompt_error:
+            return 1, b"{}", self.prompt_error.encode()
         if argv[:3] == ["herdr", "agent", "get"]:
             if self.state is None:
                 return 1, b'{"error":{"code":"agent_not_found","message":"not detected yet"}}', b""
@@ -61,6 +64,7 @@ class TransportTest(unittest.TestCase):
         self.available = ["codex", "omp"]
         self.agent = {"state": "done", "pane": "moved:1", "kind": "codex", "name": "c9-fixture"}
         self.catalog = {"models": [{"id": "native-id", "displayName": "Human label"}]}
+        self.pane_output = "Working"
         self.adapter.raw = self.raw
         self.spec = {"job_id": "j1", "cwd": str(self.root), "kind": "codex", "model": None,
                      "writes_repository": False,
@@ -88,7 +92,7 @@ class TransportTest(unittest.TestCase):
         if argv[:3] == ["herdr", "agent", "get"]:
             return json.dumps(self.agent).encode()
         if argv[:3] == ["herdr", "pane", "read"]:
-            return b'{"result":{"output":"Working"}}'
+            return json.dumps({"result": {"output": self.pane_output}}).encode()
         if argv[:3] == ["herdr", "pane", "split"]:
             return b'{"result":{"pane":{"pane_id":"old:1"}}}'
         if argv[:3] == ["herdr", "pane", "move"]:
@@ -139,12 +143,45 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(result["models"], {"j1": "pinned-id"})
         self.assertFalse(any(call[:2] in (["orchestrator", "doctor"], ["orchestrator", "models"]) for call in self.calls))
 
+    def test_pi_observation_exposes_retry_after_for_provider_rate_limit(self):
+        self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
+        self.agent.update(state="done", kind="pi")
+        self.job.update(provider="zai", admission_model="glm-4.5")
+        self.pane_output = 'Error: 429: {"code":"1302","message":"Rate limit reached"}\nRetry-After: 12'
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "done")
+        self.assertEqual(observation["rate_limit"],
+                         {"retry_after_seconds": 12.0, "source": "retry-after"})
+
+    def test_transcript_mentions_of_rate_limit_are_not_provider_errors(self):
+        self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
+        self.agent.update(state="done", kind="pi")
+        self.pane_output = "The report discusses HTTP 429 and rate limit backoff."
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "done")
+        self.assertNotIn("rate_limit", observation)
+
+    def test_prompt_command_rate_limit_is_a_known_recoverable_result(self):
+        fake = FakeHerdr(prompt_error="HTTP/1.1 429 Too Many Requests\nRetry-After: 20")
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaises(RateLimited) as caught:
+                self.adapter.effect("prompt", self.job, "Assigned work")
+
+        self.assertEqual(caught.exception.signal,
+                         {"retry_after_seconds": 20.0, "source": "retry-after"})
+
     def test_pane_ids_come_from_response_and_prompt_remains_one_argument(self):
         self.assertEqual(self.adapter.effect("split", self.job, ""), {"pane_id": "old:1"})
         self.assertEqual(self.adapter.effect("move", self.job, ""), {"pane_id": "moved:1"})
         prompt = "Literal 'quotes' and $(echo nope)\nNext line"
-        self.adapter.effect("prompt", self.job, prompt)
-        self.assertEqual(self.calls[-1], ["herdr", "agent", "prompt", "c9-fixture", prompt])
+        fake = FakeHerdr()
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("prompt", self.job, prompt)
+        self.assertEqual(fake.calls[-1], ["herdr", "agent", "prompt", "c9-fixture", prompt])
 
     def test_codex_start_opens_a_fresh_session_with_prompt_as_native_argv(self):
         fake = FakeHerdr(start_code=1)
