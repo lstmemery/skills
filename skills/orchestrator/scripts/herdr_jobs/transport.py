@@ -13,6 +13,7 @@ import time
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
                       validate_writer_intent, version)
 from .admission import rate_limit_from_output
+from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 
 
@@ -161,12 +162,17 @@ class NativeTransport:
         if not isinstance(available, list) or not all(isinstance(item, str) for item in available):
             raise JobError("unavailable_capability", "doctor returned an invalid availableIds list")
         models = {key: job["resolved_model"] for key, job in previous.items() if job["resolved_model"] is not None}
+        retry_override = request.get("retry_override", {})
         for job in planned:
             if job["kind"] not in kinds:
                 raise JobError("unavailable_capability", f"Herdr kind is not verified as installed: {job['kind']}")
             if not Path(job["cwd"]).is_dir():
                 raise JobError("unavailable_capability", f"{job['job_id']}: working directory is unavailable")
             runtime = job["route"]["runtime"]
+            if runtime == "pi" and "pi" in retry_override:
+                validate_pi_project_settings(job["cwd"], retry_override["pi"])
+            if runtime == "codex" and "codex" in retry_override:
+                validate_codex_retry_provider(retry_override["codex"])
             if job["route"]["mode"] == "jail":
                 self.check_export()
                 if not shutil.which("omp-train"):
@@ -203,6 +209,10 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        if action == "retry_setup":
+            profile = fields(job.get("retry_profile"), ["agent_dir", "session_dir", "settings_sha256"],
+                             label="run-scoped pi retry profile")
+            return self.configure_pi_retry_environment(job, profile)
         codex_prompt_start = (action == "start" and spec["route"]["mode"] == "agent"
                               and spec["route"]["runtime"] == "codex")
         if action == "split":
@@ -216,6 +226,8 @@ class NativeTransport:
                          f"projects.{json.dumps(spec['cwd'])}.trust_level=\"trusted\""]
                 if job["resolved_model"] is not None:
                     argv += ["-m", job["resolved_model"]]
+                if job.get("retry_override") and "provider_id" in job["retry_override"]:
+                    argv += codex_retry_cli_args(job["retry_override"])
                 argv.append(prompt)
             elif job["resolved_model"] is not None:
                 argv += ["--", "--model", job["resolved_model"]]
@@ -276,6 +288,31 @@ class NativeTransport:
             raise
         except (BudgetExpired, JobError, UnicodeError) as error:
             raise EffectUnknown(f"{action}: response unavailable or unverified; reconcile before repeating") from error
+
+    def configure_pi_retry_environment(self, job, profile):
+        pane = job["pane_id"]
+        assignments = ["PI_CODING_AGENT_DIR=" + profile["agent_dir"],
+                       "PI_CODING_AGENT_SESSION_DIR=" + profile["session_dir"]]
+        marker = f"__ORCH_PI_RETRY_ENV_{job['attempt_id']}__"
+        commands = [
+            "export " + " ".join(shlex.quote(item) for item in assignments),
+            f"printf '\\n{marker}%s__%s\\n' \"$PI_CODING_AGENT_DIR\" \"$PI_CODING_AGENT_SESSION_DIR\"",
+        ]
+        try:
+            for shell_command in commands:
+                code, _, _ = command([self.herdr, "pane", "run", pane, shell_command], self.deadline)
+                if code:
+                    raise EffectUnknown("Pi retry environment command was rejected; inspect the owned pane")
+            expected = marker + profile["agent_dir"] + "__" + profile["session_dir"]
+            while self.deadline.remaining():
+                terminal = self.read([self.herdr, "pane", "read", pane,
+                                      "--source", "recent-unwrapped", "--lines", "100"])
+                if expected in self.terminal_output(terminal):
+                    return {"retry_environment_verified": True}
+                time.sleep(min(0.1, self.deadline.remaining()))
+        except (BudgetExpired, JobError, UnicodeError) as error:
+            raise EffectUnknown("Pi retry environment could not be verified; inspect the owned pane") from error
+        raise EffectUnknown("Pi retry environment did not persist in the owned pane; inspect before retrying")
 
     def observe(self, job):
         if job["spec"]["route"]["mode"] == "jail" and Path(job["exit_record"]).exists():

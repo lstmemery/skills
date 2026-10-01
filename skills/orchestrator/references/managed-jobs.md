@@ -31,11 +31,40 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 
 | Record | Required fields | Optional fields |
 |---|---|---|
-| Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer` |
+| Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
 | Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string` |
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary`, `deep_research`, or `shopping`; the coordinator supplies it explicitly. Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
+
+`retry_override` is an optional run-level object, pinned in `state.json` and
+applied only to matching workers in that run. Pi accepts `max_retries` (0–100)
+and `max_agent_delay_ms` (0–600000). The helper creates a private pi settings
+and session directory under the run folder and selects them in the worker pane;
+it uses Pi's documented [`PI_CODING_AGENT_DIR` and
+`PI_CODING_AGENT_SESSION_DIR`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/environment-variables.md)
+variables. The shared `~/.pi/agent/settings.json` is read but never edited. A project
+`.pi/settings.json` that overrides the selected retry keys stops preflight.
+Codex accepts `provider_id` plus `request_max_retries` and/or
+`stream_max_retries` (0–100). It requires that provider to be the already
+selected, configured custom provider in `$CODEX_HOME/config.toml`; Codex's
+retry fields are provider-scoped ([provider implementation](https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs)).
+The built-in `openai`, `ollama`, and `lmstudio` provider IDs are reserved
+([validation source](https://github.com/openai/codex/blob/main/codex-rs/config/src/config_toml.rs)),
+so those providers and the jail route are refused.
+
+```json
+{
+  "retry_override": {
+    "pi": {"max_retries": 10, "max_agent_delay_ms": 120000}
+  }
+}
+```
+
+If retry tuning is needed and no supported run override exists, leave shared
+settings alone. Record the proposed settings change, affected run and worker,
+and exact staged command in the run's decision record; wait for authorization
+before applying it or retrying work under a new shared setting.
 
 Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–32 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
 
