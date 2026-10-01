@@ -13,6 +13,9 @@ PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / "scripts/herdr-jobs.py"
 DRIVER = PACKAGE / "tests/driver.py"
 POLICY = PACKAGE / "launch-policy.json"
+sys.path.insert(0, str(PACKAGE / "scripts"))
+
+from herdr_jobs.engine import Engine
 
 
 class JobsTest(unittest.TestCase):
@@ -67,6 +70,18 @@ class JobsTest(unittest.TestCase):
 
     def state(self):
         return json.loads((self.run / "state.json").read_text())
+
+    def test_codex_pending_start_predicate_matches_only_managed_codex_starts(self):
+        job = {"spec": {"route": {"mode": "agent", "runtime": "codex"}}}
+        pending = {"action": "start", "started_at": "fixture"}
+        self.assertTrue(Engine.is_codex_pending_start(job, pending))
+        self.assertFalse(Engine.is_codex_pending_start(job, None))
+        self.assertFalse(Engine.is_codex_pending_start(job, {"action": "prompt"}))
+        for route in ({"mode": "jail", "runtime": "codex"},
+                      {"mode": "agent", "runtime": "other"}):
+            with self.subTest(route=route):
+                non_codex_job = {"spec": {"route": route}}
+                self.assertFalse(Engine.is_codex_pending_start(non_codex_job, pending))
 
     def test_preview_has_no_writes_or_transport_calls(self):
         code, result = self.call(real=True, preview=True)
