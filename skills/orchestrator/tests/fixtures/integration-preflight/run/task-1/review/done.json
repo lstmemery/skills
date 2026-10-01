@@ -1,0 +1,7 @@
+{
+  "task_id": "task-1",
+  "capture_id": "synthetic-capture-1",
+  "standards_findings": 1,
+  "spec_findings": 1,
+  "worst": "synthetic minor finding"
+}
