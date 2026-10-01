@@ -9,6 +9,7 @@
       "task_file": "task.md",
       "cwd": ".",
       "output_expectation": "A short report identifying any contradictions in the supplied fixture.",
+      "writes_repository": false,
       "override": {
         "runtime": "codex",
         "instruction": "Example user request: use Codex for this fixture inspection."
