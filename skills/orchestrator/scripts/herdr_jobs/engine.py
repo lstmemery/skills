@@ -269,6 +269,12 @@ class Engine:
             pass
         atomic_bytes(path, expected)
 
+    @staticmethod
+    def is_codex_pending_start(job, pending):
+        return bool(pending and pending["action"] == "start"
+                    and job["spec"]["route"]["mode"] == "agent"
+                    and job["spec"]["route"]["runtime"] == "codex")
+
     def observe(self, job):
         if job["pane_id"] is None:
             if job["pending_effect"]:
@@ -283,9 +289,7 @@ class Engine:
             job["pending_effect"] = None
             job["issue"] = None
             job["history"].append({"action": pending["action"], "reconciled_by": "matching receipt", "observed_at": now()})
-        codex_start = (pending and pending["action"] == "start"
-                       and job["spec"]["route"]["mode"] == "agent"
-                       and job["spec"]["route"]["runtime"] == "codex")
+        codex_start = self.is_codex_pending_start(job, pending)
         if codex_start and job["collection"] and not job["collection_error"]:
             job["phase"] = "submitted"
             job["pending_effect"] = None
@@ -308,9 +312,7 @@ class Engine:
         if lifecycle == "working":
             job["activity_seen"] = True
         pending = job["pending_effect"]
-        codex_start = (pending and pending["action"] == "start"
-                       and job["spec"]["route"]["mode"] == "agent"
-                       and job["spec"]["route"]["runtime"] == "codex")
+        codex_start = self.is_codex_pending_start(job, pending)
         if codex_start and observation.get("prompt_verified"):
             job["phase"] = "submitted"
             job["pending_effect"] = None
@@ -357,9 +359,7 @@ class Engine:
         if not observation or observation["state"] != "working":
             return False
         pending = job["pending_effect"]
-        codex_start = (pending and pending["action"] == "start"
-                       and job["spec"]["route"]["mode"] == "agent"
-                       and job["spec"]["route"]["runtime"] == "codex")
+        codex_start = Engine.is_codex_pending_start(job, pending)
         return not codex_start or observation.get("prompt_verified") is True
 
     def drive(self, status_only=False):
