@@ -100,6 +100,22 @@ def version(value):
     integer(value, "schema_version", 1, 1)
 
 
+def repository_worktree_record(value):
+    fields(value, ["schema_version", "path", "lease_id", "lease_holder", "repo_root",
+                   "git_common_dir", "base_commit"], label="repository_worktree")
+    version(value["schema_version"])
+    for key in ("path", "repo_root", "git_common_dir"):
+        path = Path(text(value[key], f"repository_worktree.{key}", 4096))
+        if not path.is_absolute():
+            invalid(f"repository_worktree.{key} must be absolute")
+    text(value["lease_id"], "repository_worktree.lease_id", 4096)
+    text(value["lease_holder"], "repository_worktree.lease_holder", 4096)
+    if (not isinstance(value["base_commit"], str)
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value["base_commit"])):
+        invalid("repository_worktree.base_commit must be a full Git commit ID")
+    return value
+
+
 def absolute(value, base):
     return str((base / text(value, "path", 4096)).absolute())
 
@@ -142,7 +158,7 @@ def prepare(manifest_path, policy_path):
     seen = set()
     for job in manifest["jobs"]:
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation"],
-               ["override"], "job")
+               ["override", "repository_worktree"], "job")
         job_id = identifier(job["job_id"], "job_id")
         if job_id in seen:
             invalid(f"duplicate job_id: {job_id}")
@@ -174,7 +190,17 @@ def prepare(manifest_path, policy_path):
         task_path = absolute(job["task_file"], manifest_path.parent)
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")
-        jobs.append({**job, "task_file": task_path, "cwd": absolute(job["cwd"], manifest_path.parent),
+        cwd = absolute(job["cwd"], manifest_path.parent)
+        if "repository_worktree" in job:
+            repository_worktree_record(job["repository_worktree"])
+            try:
+                cwd = str(Path(cwd).resolve(strict=False))
+                recorded_path = str(Path(job["repository_worktree"]["path"]).resolve(strict=False))
+            except (OSError, RuntimeError):
+                invalid(f"{job_id}: repository worktree path cannot be canonicalized")
+            if cwd != recorded_path:
+                invalid(f"{job_id}: cwd must equal repository_worktree.path")
+        jobs.append({**job, "task_file": task_path, "cwd": cwd,
                      "task": task, "route": route, "model": model,
                      "kind": policy["runtime_kinds"][runtime]})
     prepared = {"schema_version": 1, "request_id": manifest["request_id"], "concurrency": concurrency,
