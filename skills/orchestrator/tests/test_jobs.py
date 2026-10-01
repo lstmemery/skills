@@ -35,7 +35,8 @@ class JobsTest(unittest.TestCase):
         for index in range(count):
             kind = kinds[index] if kinds else "ordinary"
             job = {"job_id": f"job{index}", "name": f"Fixture {index}", "task_kind": kind,
-                   "task_file": str(self.task), "cwd": str(self.root), "output_expectation": "A fixture report."}
+                   "task_file": str(self.task), "cwd": str(self.root), "output_expectation": "A fixture report.",
+                   "writes_repository": False}
             if kind == "ordinary":
                 job["override"] = {"runtime": "codex", "instruction": "Use Codex for this fixture."}
             jobs.append(job)
@@ -234,6 +235,9 @@ class JobsTest(unittest.TestCase):
     def test_strict_schema_and_duplicate_keys(self):
         manifest = json.loads(self.manifest.read_text())
         cases = [dict(manifest, install=True), dict(manifest, concurrency=True), dict(manifest, jobs=[])]
+        non_boolean_intent = copy.deepcopy(manifest)
+        non_boolean_intent["jobs"][0]["writes_repository"] = 1
+        cases.append(non_boolean_intent)
         malformed_kind = copy.deepcopy(manifest)
         malformed_kind["jobs"][0]["task_kind"] = []
         cases.append(malformed_kind)
@@ -242,6 +246,23 @@ class JobsTest(unittest.TestCase):
             self.assertEqual(self.call(preview=True)[0], 2)
         self.manifest.write_text('{"schema_version":1,"schema_version":1}')
         self.assertEqual(self.call(preview=True)[0], 2)
+
+    def test_writer_intent_is_required_and_missing_worktree_stops_before_launch(self):
+        manifest = json.loads(self.manifest.read_text())
+        del manifest["jobs"][0]["writes_repository"]
+        self.manifest.write_text(json.dumps(manifest))
+        code, result = self.call()
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertFalse((self.root / "events.json").exists())
+        self.assertFalse((self.run / "state.json").exists())
+
+        manifest["jobs"][0]["writes_repository"] = True
+        self.manifest.write_text(json.dumps(manifest))
+        code, result = self.call()
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("writes_repository=true requires repository_worktree", result["message"])
+        self.assertFalse((self.root / "events.json").exists())
+        self.assertFalse((self.run / "state.json").exists())
 
     def test_ordinary_default_requires_a_runtime_decision(self):
         manifest = json.loads(self.manifest.read_text())

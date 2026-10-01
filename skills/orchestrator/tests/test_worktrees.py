@@ -13,7 +13,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / "scripts/lease-worktree.py"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.records import JobError, digest, prepare
+from herdr_jobs.records import JobError, digest, is_commit_id, prepare
 from herdr_jobs.transport import Deadline, NativeTransport
 
 
@@ -79,6 +79,14 @@ class WorktreeAllocationTest(unittest.TestCase):
         self.git("-C", str(repo), "worktree", "add", "-qb", "leased", str(worktree), base)
         return repo, worktree, base
 
+    def repository_worktree_record(self, path, repo, base_commit,
+                                   lease_id="lease-fixture", lease_holder="task-1119"):
+        return {"schema_version": 1, "path": str(Path(path).resolve()),
+                "lease_id": lease_id, "lease_holder": lease_holder,
+                "repo_root": str(Path(repo).resolve()),
+                "git_common_dir": str((Path(repo) / ".git").resolve()),
+                "base_commit": base_commit}
+
     def treehouse_records(self, path, lease_id="lease-fixture", holder="task-1119"):
         path = str(path)
         allocation = {"path": path, "lease_id": lease_id, "lease_holder": holder,
@@ -130,11 +138,9 @@ class WorktreeAllocationTest(unittest.TestCase):
 
     def test_managed_writer_rejects_main_checkout_before_launch(self):
         repo, _, base = self.git_fixture()
-        record = {"schema_version": 1, "path": str(repo.resolve()),
-                  "lease_id": "lease-fixture", "lease_holder": "task-1119",
-                  "repo_root": str(repo.resolve()), "git_common_dir": str((repo / ".git").resolve()),
-                  "base_commit": base}
+        record = self.repository_worktree_record(repo, repo, base)
         job = {"job_id": "job0", "cwd": str(repo), "kind": "codex", "model": None,
+               "writes_repository": True,
                "route": {"mode": "agent", "runtime": "codex"},
                "repository_worktree": record}
         adapter = self.writer_adapter()
@@ -148,11 +154,10 @@ class WorktreeAllocationTest(unittest.TestCase):
         repo, worktree, base = self.git_fixture()
         lease, status = self.treehouse_records(worktree)
         lease = json.loads(lease)
-        record = {"schema_version": 1, "path": str(worktree.resolve()),
-                  "lease_id": lease["lease_id"], "lease_holder": lease["lease_holder"],
-                  "repo_root": str(repo.resolve()), "git_common_dir": str((repo / ".git").resolve()),
-                  "base_commit": base}
+        record = self.repository_worktree_record(worktree, repo, base,
+                                                 lease["lease_id"], lease["lease_holder"])
         job = {"job_id": "job0", "cwd": str(worktree), "kind": "codex", "model": None,
+               "writes_repository": True,
                "route": {"mode": "agent", "runtime": "codex"},
                "repository_worktree": record}
         adapter = self.writer_adapter()
@@ -168,13 +173,12 @@ class WorktreeAllocationTest(unittest.TestCase):
         repo, worktree, base = self.git_fixture()
         lease, status = self.treehouse_records(worktree)
         lease = json.loads(lease)
-        record = {"schema_version": 1, "path": str(worktree.resolve()),
-                  "lease_id": lease["lease_id"], "lease_holder": lease["lease_holder"],
-                  "repo_root": str(repo.resolve()), "git_common_dir": str((repo / ".git").resolve()),
-                  "base_commit": base}
+        record = self.repository_worktree_record(worktree, repo, base,
+                                                 lease["lease_id"], lease["lease_holder"])
         status_data = json.loads(status)
         status_data[1]["lease_id"] = "different-lease"
         job = {"job_id": "job0", "cwd": str(worktree), "kind": "codex", "model": None,
+               "writes_repository": True,
                "route": {"mode": "agent", "runtime": "codex"},
                "repository_worktree": record}
         adapter = self.writer_adapter()
@@ -191,11 +195,10 @@ class WorktreeAllocationTest(unittest.TestCase):
         repo, worktree, base = self.git_fixture()
         lease, status = self.treehouse_records(worktree)
         lease = json.loads(lease)
-        record = {"schema_version": 1, "path": str(worktree.resolve()),
-                  "lease_id": lease["lease_id"], "lease_holder": lease["lease_holder"],
-                  "repo_root": str(repo.resolve()), "git_common_dir": str((repo / ".git").resolve()),
-                  "base_commit": "0" * 40}
+        record = self.repository_worktree_record(worktree, repo, "0" * 40,
+                                                 lease["lease_id"], lease["lease_holder"])
         job = {"job_id": "job0", "cwd": str(worktree), "kind": "codex", "model": None,
+               "writes_repository": True,
                "route": {"mode": "agent", "runtime": "codex"},
                "repository_worktree": record}
         adapter = self.writer_adapter()
@@ -208,19 +211,45 @@ class WorktreeAllocationTest(unittest.TestCase):
 
         self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in adapter.calls))
 
+    def test_writer_without_record_is_rejected_before_git_or_launch(self):
+        job = {"job_id": "job0", "cwd": str(self.root), "kind": "codex", "model": None,
+               "writes_repository": True, "route": {"mode": "agent", "runtime": "codex"}}
+        adapter = self.writer_adapter()
+
+        with patch("herdr_jobs.transport.command") as run_command:
+            with self.assertRaisesRegex(JobError, "writes_repository=true requires repository_worktree"):
+                adapter.preflight({"jobs": [job]})
+
+        run_command.assert_not_called()
+        self.assertEqual(adapter.calls, [])
+
+    def test_writer_with_mismatched_record_is_rejected_before_git_or_launch(self):
+        repo, worktree, base = self.git_fixture()
+        record = self.repository_worktree_record(worktree, repo, base)
+        job = {"job_id": "job0", "cwd": str(repo), "kind": "codex", "model": None,
+               "writes_repository": True, "route": {"mode": "agent", "runtime": "codex"},
+               "repository_worktree": record}
+        adapter = self.writer_adapter()
+
+        with patch("herdr_jobs.transport.command") as run_command:
+            with self.assertRaisesRegex(JobError, "writer cwd does not match"):
+                adapter.preflight({"jobs": [job]})
+
+        run_command.assert_not_called()
+        self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in adapter.calls))
+
     def test_writer_manifest_cannot_pair_cwd_with_a_different_recorded_path(self):
         task = self.root / "task.md"
         task.write_text("Write a report.\n")
-        record = {"schema_version": 1, "path": str(self.root / "different-worktree"),
-                  "lease_id": "lease-fixture", "lease_holder": "task-1119",
-                  "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
-                  "base_commit": "a" * 40}
+        record = self.repository_worktree_record(self.root / "different-worktree", self.root,
+                                                 "a" * 40)
         manifest = self.root / "manifest.json"
         manifest.write_text(json.dumps({"schema_version": 1, "request_id": "writer-check",
             "jobs": [{"job_id": "job0", "name": "Writer", "task_kind": "ordinary",
                       "task_file": str(task), "cwd": str(self.root),
                       "output_expectation": "A report.",
                       "override": {"runtime": "codex", "instruction": "Write the report."},
+                      "writes_repository": True,
                       "repository_worktree": record}]}))
 
         with self.assertRaisesRegex(JobError, "cwd must equal repository_worktree.path"):
@@ -232,21 +261,40 @@ class WorktreeAllocationTest(unittest.TestCase):
         alias.symlink_to(worktree, target_is_directory=True)
         task = self.root / "task.md"
         task.write_text("Write a report.\n")
-        record = {"schema_version": 1, "path": str(worktree.resolve()),
-                  "lease_id": "lease-fixture", "lease_holder": "task-1119",
-                  "repo_root": str(repo.resolve()), "git_common_dir": str((repo / ".git").resolve()),
-                  "base_commit": base}
+        record = self.repository_worktree_record(worktree, repo, base)
         manifest = self.root / "manifest.json"
         manifest.write_text(json.dumps({"schema_version": 1, "request_id": "writer-canonical",
             "jobs": [{"job_id": "job0", "name": "Writer", "task_kind": "ordinary",
                       "task_file": str(task), "cwd": str(alias),
                       "output_expectation": "A report.",
                       "override": {"runtime": "codex", "instruction": "Write the report."},
+                      "writes_repository": True,
                       "repository_worktree": record}]}))
 
         prepared = prepare(manifest, PACKAGE / "launch-policy.json")
 
         self.assertEqual(prepared["jobs"][0]["cwd"], str(worktree.resolve()))
+
+    def test_repository_writer_manifest_requires_explicit_worktree_record(self):
+        task = self.root / "task.md"
+        task.write_text("Write a report.\n")
+        manifest = self.root / "manifest.json"
+        manifest.write_text(json.dumps({"schema_version": 1, "request_id": "writer-missing-record",
+            "jobs": [{"job_id": "job0", "name": "Writer", "task_kind": "ordinary",
+                      "task_file": str(task), "cwd": str(self.root),
+                      "output_expectation": "A report.", "writes_repository": True,
+                      "override": {"runtime": "codex", "instruction": "Write the report."}}]}))
+
+        with self.assertRaisesRegex(JobError, "writes_repository=true requires repository_worktree"):
+            prepare(manifest, PACKAGE / "launch-policy.json")
+
+    def test_shared_commit_id_validator_accepts_supported_full_ids_only(self):
+        self.assertTrue(is_commit_id("a" * 40))
+        self.assertTrue(is_commit_id("f" * 64))
+        self.assertFalse(is_commit_id("a" * 39))
+        self.assertFalse(is_commit_id("a" * 65))
+        self.assertFalse(is_commit_id("A" * 40))
+        self.assertFalse(is_commit_id(None))
 
     def test_empty_allocation_stops_before_git(self):
         result = self.allocate()

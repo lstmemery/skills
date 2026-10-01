@@ -1,14 +1,12 @@
 """Treehouse lease parsing and linked-worktree verification."""
 
 from pathlib import Path
-import re
 import shutil
 import subprocess
 
-from .records import JobError, parse_json, repository_worktree_record
+from .records import JobError, is_commit_id, parse_json, repository_worktree_record
 
 
-COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 TREEHOUSE_GET_FIELDS = {"path", "lease_id", "lease_holder", "name", "leased_at"}
 TREEHOUSE_STATUS_FIELDS = {"name", "path", "status", "flavor", "lease_id", "lease_holder",
                            "leased_at", "processes"}
@@ -152,7 +150,7 @@ def _git_identity(worktree, repo_hint, run_command, expected_common=None, expect
     if not paths or paths[0] == worktree or worktree not in paths:
         unavailable("writer cwd is not a registered linked worktree of the expected repository")
     base = _git_text(run_command, git, worktree, "rev-parse", "HEAD").lower()
-    if not COMMIT.fullmatch(base):
+    if not is_commit_id(base):
         unavailable("Git returned an invalid worktree base commit")
     if expected_base is not None and base != expected_base.lower():
         unavailable("writer worktree HEAD no longer matches its recorded base commit")
@@ -194,7 +192,7 @@ def acquire(repo, holder, expected_base=None, treehouse="treehouse", run_command
         unavailable("requested repository must be an existing directory")
     if not holder.strip() or "\0" in holder:
         raise JobError("invalid_input", "lease holder must be nonempty text")
-    if expected_base is not None and not COMMIT.fullmatch(expected_base):
+    if expected_base is not None and not is_commit_id(expected_base):
         raise JobError("invalid_input", "expected base must be a full Git commit ID")
     allocated = _call(run_command,
                       [treehouse, "get", "--lease", "--lease-holder", holder, "--json"],

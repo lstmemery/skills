@@ -39,6 +39,7 @@ class TransportTest(unittest.TestCase):
         self.catalog = {"models": [{"id": "native-id", "displayName": "Human label"}]}
         self.adapter.raw = self.raw
         self.spec = {"job_id": "j1", "cwd": str(self.root), "kind": "codex", "model": None,
+                     "writes_repository": False,
                      "route": {"mode": "agent", "runtime": "codex"}}
         self.job = {"spec": self.spec, "pane_id": "moved:1", "agent_name": "c9-fixture",
                     "attempt_id": "attempt1", "resolved_model": None,
