@@ -36,12 +36,7 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.head = self.git("-C", str(self.repo), "rev-parse", "HEAD")
         self.git("-C", str(self.repo), "switch", "main")
         self.write_result()
-        (self.run_dir / "workers.txt").write_text(
-            "task-1 coder-1 w1:p1 codex test-model max working\n"
-            "task-1 reviewer-1 w2:p1 codex test-model max (reviewer) head="
-            + self.head
-            + "\n"
-        )
+        self.write_workers()
 
     def git(self, *args):
         environment = os.environ.copy()
@@ -84,6 +79,7 @@ class IntegrationPreflightTests(unittest.TestCase):
         spec_findings=None,
         coverage="complete",
         gaps=None,
+        unfixed=0,
     ):
         standards_findings = standards_findings or []
         spec_findings = spec_findings or []
@@ -100,12 +96,14 @@ class IntegrationPreflightTests(unittest.TestCase):
         }
         (capture_dir / "manifest.json").write_text(json.dumps(manifest) + "\n")
         (capture_dir / "COMPLETE").write_text("synthetic complete capture\n")
-        done = {
-            "task_id": "task-1",
-            "capture_id": capture_id,
-            "standards_findings": len(standards_findings),
-            "spec_findings": len(spec_findings),
-        }
+        done = {"task_id": "task-1", "capture_id": capture_id}
+        if name == "review":
+            done["standards_findings"] = len(standards_findings)
+            done["spec_findings"] = len(spec_findings)
+        else:
+            done["new_findings"] = len(standards_findings) + len(spec_findings)
+            if unfixed is not None:
+                done["unfixed"] = unfixed
         (review_dir / "done.json").write_text(json.dumps(done) + "\n")
         (review_dir / "review.md").write_text(
             "# Independent review\n\n## Standards\n\n"
@@ -133,6 +131,47 @@ class IntegrationPreflightTests(unittest.TestCase):
         response_path = self.task_dir / "review-response.md"
         old = response_path.read_text() if response_path.exists() else "# Review response\n\n"
         response_path.write_text(old + "\n".join(dispositions) + ("\n" if dispositions else ""))
+
+    def write_workers(self, additional_rows=()):
+        rows = [
+            "task-1 coder-1 w1:p1 codex test-model max working",
+            "task-1 reviewer-1 w2:p1 codex test-model max (reviewer) head=" + self.head,
+            *additional_rows,
+        ]
+        (self.run_dir / "workers.txt").write_text("\n".join(rows) + "\n")
+
+    def add_roster_only_candidate(self):
+        self.write_workers(["task-2 coder-2 w3:p1 codex test-model max working"])
+
+    def add_result_only_candidate(self, *, include_task_id=True):
+        task_dir = self.run_dir / "task-2"
+        task_dir.mkdir()
+        result = {"candidate": {"head": "2" * 40}}
+        if include_task_id:
+            result["task_id"] = "task-2"
+        (task_dir / "result.json").write_text(
+            json.dumps(result) + "\n"
+        )
+
+    def add_delta_review(self, *, unfixed=0):
+        first_review_head = self.head
+        self.git("-C", str(self.repo), "switch", "orch/task-1")
+        (self.repo / "README.md").write_text("final candidate\n")
+        self.git("-C", str(self.repo), "commit", "-am", "final candidate")
+        self.head = self.git("-C", str(self.repo), "rev-parse", "HEAD")
+        self.git("-C", str(self.repo), "switch", "main")
+        self.write_result()
+        self.write_workers()
+        self.write_review(head=first_review_head)
+        self.write_review(
+            "review-r2",
+            base=first_review_head,
+            standards_findings=[
+                {"id": "S2", "disposition": "fixed", "reason": "Corrected the delta issue."}
+            ],
+            unfixed=unfixed,
+        )
+        return self.task_dir / "review-r2" / "done.json"
 
     def install_review_fixture(self):
         fixture = SKILL_DIR / "tests" / "fixtures" / "integration-preflight" / "run"
@@ -210,6 +249,24 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no complete review capture chain", result.stdout)
 
+    def test_revision_review_requires_unfixed_field(self):
+        done_path = self.add_delta_review(unfixed=None)
+        done = json.loads(done_path.read_text())
+        self.assertNotIn("unfixed", done)
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("'unfixed'", result.stdout)
+
+    def test_revision_review_requires_zero_unfixed_findings(self):
+        self.add_delta_review(unfixed=1)
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unfixed", result.stdout)
+
     def test_pinned_branch_must_still_point_to_the_reviewed_candidate(self):
         self.git("-C", str(self.repo), "switch", "orch/task-1")
         (self.repo / "README.md").write_text("branch moved\n")
@@ -269,27 +326,7 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertIn("missing recorded disposition for review/S1", result.stdout)
 
     def test_complete_full_review_and_contiguous_delta_review_cover_final_head(self):
-        first_review_head = self.head
-        self.git("-C", str(self.repo), "switch", "orch/task-1")
-        (self.repo / "README.md").write_text("final candidate\n")
-        self.git("-C", str(self.repo), "commit", "-am", "final candidate")
-        self.head = self.git("-C", str(self.repo), "rev-parse", "HEAD")
-        self.git("-C", str(self.repo), "switch", "main")
-        self.write_result()
-        (self.run_dir / "workers.txt").write_text(
-            "task-1 coder-1 w1:p1 codex test-model max working\n"
-            "task-1 reviewer-1 w2:p1 codex test-model max (reviewer) head="
-            + self.head
-            + "\n"
-        )
-        self.write_review(head=first_review_head)
-        self.write_review(
-            "review-r2",
-            base=first_review_head,
-            standards_findings=[
-                {"id": "S2", "disposition": "fixed", "reason": "Corrected the delta issue."}
-            ],
-        )
+        self.add_delta_review()
 
         result = self.command()
 
@@ -301,6 +338,47 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(
             [review["review_id"] for review in report["candidates"][0]["reviews"]],
             ["review", "review-r2"],
+        )
+
+    def test_omitted_rostered_coding_candidate_blocks_batch(self):
+        self.write_review()
+        self.add_roster_only_candidate()
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unaccounted coding candidates: task-2", result.stdout)
+
+    def test_omitted_result_candidate_blocks_batch(self):
+        self.write_review()
+        self.add_result_only_candidate()
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unaccounted coding candidates: task-2", result.stdout)
+
+    def test_candidate_result_without_task_id_is_rejected(self):
+        self.add_result_only_candidate(include_task_id=False)
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("candidate result has no valid task_id", result.stderr)
+
+    def test_deferred_candidate_is_recorded_and_allows_partial_batch(self):
+        self.install_review_fixture()
+        self.add_roster_only_candidate()
+
+        result = self.command("--defer", "task-2:waiting for review")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report_path = json.loads(result.stdout)["evidence"]
+        report = json.loads(Path(report_path).read_text())
+        self.assertEqual(report["outcome"], "ready")
+        self.assertEqual(
+            report["deferred"],
+            [{"task_id": "task-2", "reason": "waiting for review"}],
         )
 
 

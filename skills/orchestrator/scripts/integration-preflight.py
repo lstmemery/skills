@@ -39,6 +39,13 @@ def parse_args(argv=None):
         required=True,
         help="candidate branch, commit SHA, or BRANCH=REV to pin both",
     )
+    parser.add_argument(
+        "--defer",
+        action="append",
+        default=[],
+        metavar="TASK[:REASON]",
+        help="explicitly defer one discovered task from this integration batch",
+    )
     return parser.parse_args(argv)
 
 
@@ -135,6 +142,54 @@ def parse_worker_identities(path, task_id):
     if not identities:
         raise PreflightError(f"workers.txt has no roster entry for task {task_id}")
     return identities
+
+
+def discover_candidate_tasks(run_dir, workers_path):
+    task_ids = set()
+    for result_path in sorted(run_dir.glob("*/result.json")):
+        try:
+            result = load_json(result_path, "worker result")
+        except PreflightError as error:
+            raise PreflightError(
+                f"cannot discover batch candidates from {result_path}: {error}"
+            ) from error
+        if isinstance(result.get("candidate"), dict):
+            task_id = result.get("task_id")
+            if (
+                not isinstance(task_id, (str, int))
+                or isinstance(task_id, bool)
+                or not str(task_id)
+            ):
+                raise PreflightError(f"candidate result has no valid task_id: {result_path}")
+            task_ids.add(str(task_id))
+
+    try:
+        worker_lines = workers_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        worker_lines = []
+    except OSError as error:
+        raise PreflightError(f"cannot read workers.txt: {workers_path}") from error
+    for line in worker_lines:
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] != "diffpane" and fields[0]:
+            task_ids.add(fields[0])
+    return task_ids
+
+
+def parse_deferred(specs):
+    deferred = {}
+    for spec in specs:
+        task_id, separator, reason = spec.partition(":")
+        task_id = task_id.strip()
+        reason = reason.strip() if separator else ""
+        if not task_id:
+            raise PreflightError("--defer needs a task ID")
+        if separator and not reason:
+            raise PreflightError(f"--defer {task_id}: needs a non-empty reason")
+        if task_id in deferred:
+            raise PreflightError(f"task {task_id} is deferred more than once")
+        deferred[task_id] = reason
+    return deferred
 
 
 def find_capture(review_dir, capture_id):
@@ -288,22 +343,26 @@ def review_records(task_dir, task_id, workers_path):
                     if dispositions.get((review_dir.name, finding_id)) != disposition:
                         raise PreflightError(f"missing recorded disposition for {review_dir.name}/{finding_id}")
                     finding_count += 1
-            if "standards_findings" in done or "spec_findings" in done:
+            if review_dir.name == "review":
+                standards_findings = done["standards_findings"]
+                spec_findings = done["spec_findings"]
                 if (
-                    type(done.get("standards_findings")) is not int
-                    or done["standards_findings"] != len(axes["standards"]["findings"])
+                    type(standards_findings) is not int
+                    or standards_findings != len(axes["standards"]["findings"])
                 ):
                     raise PreflightError(f"{review_dir.name} Standards count disagrees with done.json")
                 if (
-                    type(done.get("spec_findings")) is not int
-                    or done["spec_findings"] != len(axes["spec"]["findings"])
+                    type(spec_findings) is not int
+                    or spec_findings != len(axes["spec"]["findings"])
                 ):
                     raise PreflightError(f"{review_dir.name} Spec count disagrees with done.json")
-            elif type(done.get("new_findings")) is not int or done["new_findings"] != finding_count:
-                raise PreflightError(f"{review_dir.name} finding count disagrees with done.json")
-            unfixed = done.get("unfixed", 0)
-            if type(unfixed) is not int or unfixed != 0:
-                raise PreflightError(f"{review_dir.name} reports unfixed review findings")
+            else:
+                new_findings = done["new_findings"]
+                unfixed = done["unfixed"]
+                if type(new_findings) is not int or new_findings != finding_count:
+                    raise PreflightError(f"{review_dir.name} finding count disagrees with done.json")
+                if type(unfixed) is not int or unfixed != 0:
+                    raise PreflightError(f"{review_dir.name} reports unfixed review findings")
             records.append(
                 {
                     "review_id": review_dir.name,
@@ -321,7 +380,7 @@ def review_records(task_dir, task_id, workers_path):
                     "finding_count": finding_count,
                 }
             )
-        except (OSError, PreflightError, TypeError) as error:
+        except (KeyError, OSError, PreflightError, TypeError) as error:
             diagnostics.append(f"{review_dir.name}: {error}")
     return records, diagnostics
 
@@ -401,7 +460,13 @@ def candidate_report(repo, run_dir, workers_path, target_head, spec):
         if not records:
             detail = "; ".join(diagnostics) if diagnostics else "no review directories found"
             raise PreflightError(f"missing independent review evidence ({detail})")
-        chain = select_review_chain(repo, merge_base, head, records)
+        try:
+            chain = select_review_chain(repo, merge_base, head, records)
+        except PreflightError as error:
+            if diagnostics:
+                detail = "; ".join(diagnostics)
+                raise PreflightError(f"{error} ({detail})") from error
+            raise
         authors = {record["author_identity"] for record in chain}
         if len(authors) != 1:
             raise PreflightError("review records disagree about the candidate author identity")
@@ -474,10 +539,28 @@ def main(argv=None):
         workers_path = run_dir / "workers.txt"
         if len(set(args.candidate)) != len(args.candidate):
             raise PreflightError("candidate arguments must be unique")
+        deferred = parse_deferred(args.defer)
+        discovered_tasks = discover_candidate_tasks(run_dir, workers_path)
         candidates = [
             candidate_report(repo, run_dir, workers_path, target_head, spec)
             for spec in args.candidate
         ]
+        selected_task_ids = [
+            candidate["task_id"] for candidate in candidates if "task_id" in candidate
+        ]
+        selected_tasks = set(selected_task_ids)
+        batch_issues = []
+        if len(selected_task_ids) != len(selected_tasks):
+            batch_issues.append("more than one --candidate resolves to the same task")
+        conflicts = sorted(selected_tasks.intersection(deferred))
+        if conflicts:
+            batch_issues.append(f"tasks are both candidates and deferred: {', '.join(conflicts)}")
+        unknown_deferred = sorted(set(deferred) - discovered_tasks)
+        if unknown_deferred:
+            batch_issues.append(f"--defer references unknown tasks: {', '.join(unknown_deferred)}")
+        unaccounted = sorted(discovered_tasks - selected_tasks - set(deferred))
+        if unaccounted:
+            batch_issues.append(f"unaccounted coding candidates: {', '.join(unaccounted)}")
         for candidate, spec in zip(candidates, args.candidate):
             if candidate.get("branch") is None or candidate.get("head") is None:
                 continue
@@ -494,7 +577,11 @@ def main(argv=None):
         if target_head_after != target_head:
             for candidate in candidates:
                 block_candidate(candidate, "target branch moved during preflight")
-        outcome = "ready" if all(candidate["status"] == "ready" for candidate in candidates) else "blocked"
+        outcome = (
+            "ready"
+            if not batch_issues and all(candidate["status"] == "ready" for candidate in candidates)
+            else "blocked"
+        )
         report = {
             "schema_version": 1,
             "outcome": outcome,
@@ -503,6 +590,11 @@ def main(argv=None):
             "target_head": target_head,
             "target_head_after_check": target_head_after,
             "candidates": candidates,
+            "deferred": [
+                {"task_id": task_id, "reason": reason}
+                for task_id, reason in sorted(deferred.items())
+            ],
+            "batch_issues": batch_issues,
         }
         evidence_path = write_report(run_dir, report)
         output = {"outcome": outcome, "evidence": str(evidence_path)}
@@ -512,6 +604,8 @@ def main(argv=None):
                 for candidate in candidates
                 if candidate["status"] != "ready"
             ]
+            if batch_issues:
+                output["issues"].append({"batch": "accounting", "issues": batch_issues})
         print(json.dumps(output, sort_keys=True))
         return 0 if outcome == "ready" else 1
     except (OSError, PreflightError, subprocess.CalledProcessError) as error:

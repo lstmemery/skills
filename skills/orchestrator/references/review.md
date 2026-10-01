@@ -24,13 +24,20 @@ evidence. Run it again if the target branch or any candidate head changes.
 ```sh
 python3 scripts/integration-preflight.py \
   --repo REPO --target TARGET_BRANCH --run-dir RUN_DIR \
-  --candidate BRANCH_A=SHA_A --candidate BRANCH_B=SHA_B
+  --candidate BRANCH_A=SHA_A [--candidate BRANCH_B=SHA_B] \
+  [--defer TASK_ID[:REASON]]
 ```
 
 Use one `--candidate` per coding branch. Pin each branch to its current commit
 with `BRANCH=SHA`; the command verifies the local branch still points to that
 SHA. A commit SHA can also be supplied without a branch name. The run directory
 is the batch folder containing `workers.txt` and each task's `result.json`.
+The preflight discovers coding task IDs from `workers.txt` and task `result.json`
+files that have a `candidate` block. Every discovered task must be supplied as
+a `--candidate` or explicitly deferred with a repeatable `--defer TASK_ID[:REASON]`.
+Use a reason to make the handoff clear; deferred tasks appear in the report.
+Omitted tasks, unknown deferrals, and tasks both selected and deferred block the
+batch, while allowing the supplied candidates to proceed as a partial landing.
 
 The preflight checks the worker result against the actual candidate commit and
 the candidate's merge base with the target branch. It requires a complete
@@ -79,8 +86,12 @@ Finding IDs must be unique within a review directory. Each must have a
 Use the directory name in place of `review` for a revision review. The only
 terminal dispositions are `fixed` and `rejected`; a rejection must include a
 reason in both records. Missing dispositions, deferred findings, and unresolved
-review findings block integration. `done.json` counts must match the sidecar;
-revision reviews use `new_findings`, and must report `unfixed: 0`.
+review findings block integration. The required `done.json` count fields depend
+on the review directory type. A full `review/` requires `standards_findings`
+and `spec_findings`, each matching its axis in the sidecar. A revision
+`review-rN/` requires `new_findings` matching the total sidecar finding count
+and `unfixed` equal to `0`. All count fields are required in their respective
+review type; a missing count is invalid.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and
