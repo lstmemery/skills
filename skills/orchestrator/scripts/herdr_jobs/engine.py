@@ -1,24 +1,117 @@
 """Job transitions are checkpointed before and after each external effect."""
 
 from pathlib import Path
+import math
 import time
 import uuid
 
+from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
                       integer, load_json, now, parse_json, save, text, version)
-from .transport import BudgetExpired, EffectUnknown
+from .transport import BudgetExpired, EffectUnknown, RateLimited
 
 
 PHASES = {"pending", "split", "moved", "ready", "submitted"}
 
 
 class Engine:
-    def __init__(self, root, transport, deadline):
+    def __init__(self, root, transport, deadline, admission_store=None):
         self.root = Path(root).absolute()
         self.path = self.root / "state.json"
         self.transport = transport
         self.deadline = deadline
+        self.admission = admission_store or AdmissionStore()
         self.state = None
+
+    def admission_config(self):
+        return self.state["request"]["policy"].get("provider_admission", {
+            "default_provider_cap": 4, "provider_caps": {}, "default_backoff_seconds": 60})
+
+    def provider_cap(self, provider):
+        config = self.admission_config()
+        return config["provider_caps"].get(provider.casefold(), config["default_provider_cap"])
+
+    @staticmethod
+    def provider_for(spec, resolved_model):
+        if spec.get("provider"):
+            return spec["provider"].casefold()
+        if resolved_model and "/" in resolved_model:
+            return resolved_model.split("/", 1)[0].casefold()
+        return spec["route"]["runtime"].casefold()
+
+    def admission_lease_id(self, request_id, job_id, attempt_id):
+        identity = encoded({"run_dir": str(self.root), "request_id": request_id,
+                            "job_id": job_id, "attempt_id": attempt_id})
+        return "managed-" + digest(identity)[:40]
+
+    def acquire_admission(self, job, force=False):
+        result = self.admission.acquire(job["provider"], job["admission_model"],
+                                        job["admission_lease_id"], self.provider_cap(job["provider"]),
+                                        self.state["request"]["request_id"], force=force)
+        job["admission_acquired"] = result["lease_held"]
+        if not result["admitted"] and result["reason"] == "backoff" and result["lease_held"]:
+            self.release_admission(job)
+        return result["admitted"]
+
+    def release_admission(self, job):
+        if job["admission_acquired"]:
+            self.admission.release(job["admission_lease_id"])
+            job["admission_acquired"] = False
+
+    def note_rate_limit(self, job, signal):
+        if job["rate_limit_seen"]:
+            return job["rate_limit_until"]
+        retry_after = signal.get("retry_after_seconds")
+        if retry_after is None:
+            delay, source = backoff_delay(default_seconds=self.admission_config()["default_backoff_seconds"])
+        else:
+            delay = retry_after
+            source = signal.get("source") or "metadata"
+        backoff = self.admission.note_rate_limit(job["provider"], job["admission_model"], delay, source)
+        job["rate_limit_seen"] = True
+        job["rate_limit_until"] = backoff["retry_at"]
+        job["history"].append({"action": "provider_rate_limit", "attempt_id": job["attempt_id"],
+                               "provider": job["provider"], "model": job["admission_model"],
+                               "retry_at": backoff["retry_at"], "source": source,
+                               "observed_at": now()})
+        return backoff["retry_at"]
+
+    def retry_rate_limited_attempt(self, job, lifecycle, receipt_valid):
+        if (not job["rate_limit_seen"] or receipt_valid
+                or lifecycle not in ("idle", "done", "exited")):
+            return False
+        previous = {"attempt_id": job["attempt_id"], "agent_name": job["agent_name"],
+                    "host_output": job["host_output"], "worker_output": job["worker_output"],
+                    "exit_record": job["exit_record"], "pane_id": job["pane_id"]}
+        if job["pending_effect"]:
+            previous["pending_action"] = job["pending_effect"]["action"]
+            job["pending_effect"] = None
+        self.release_admission(job)
+        job["history"].append({"action": "rate_limit_retry", **previous,
+                               "retry_at": job["rate_limit_until"], "observed_at": now()})
+
+        attempt = uuid.uuid4().hex
+        output_name = f"{job['spec']['job_id']}-{attempt}"
+        job["attempt_id"] = attempt
+        job["agent_name"] = "c9-" + attempt[:24]
+        job["host_output"] = str(Path(previous["host_output"]).with_name(output_name))
+        job["worker_output"] = str(Path(previous["worker_output"]).with_name(output_name))
+        job["exit_record"] = str(self.root / "lifecycle" / job["spec"]["job_id"] / f"{attempt}.json")
+        job["pane_id"] = None
+        job["admission_lease_id"] = self.admission_lease_id(
+            self.state["request"]["request_id"], job["spec"]["job_id"], attempt)
+        job["admission_acquired"] = False
+        job["rate_limit_seen"] = False
+        job["rate_limit_until"] = None
+        job["phase"] = "pending"
+        job["pending_effect"] = None
+        job["observed"] = None
+        job["activity_seen"] = False
+        job["settled"] = False
+        job["collection"] = None
+        job["collection_error"] = None
+        job["issue"] = None
+        return True
 
     def checkpoint(self):
         self.state["updated_at"] = now()
@@ -52,12 +145,31 @@ class Engine:
             raise JobError("conflict", "stored request digest does not match its contents")
         if not isinstance(state["jobs"], list) or len(state["jobs"]) != len(state["request"]["jobs"]):
             raise JobError("conflict", "stored jobs do not match the request")
+        self.state = state
         for job, spec in zip(state["jobs"], state["request"]["jobs"]):
             fields(job, ["spec", "attempt_id", "agent_name", "resolved_model", "phase", "pane_id", "previous_pane_ids",
                          "pending_effect", "history", "observed", "activity_seen", "settled", "collection",
-                         "collection_error", "host_output", "worker_output", "issue", "exit_record"], label="stored job")
+                         "collection_error", "host_output", "worker_output", "issue", "exit_record"],
+                   ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
+                    "rate_limit_until"],
+                   label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
+            job.setdefault("provider", self.provider_for(spec, job["resolved_model"]))
+            job.setdefault("admission_model", (job["resolved_model"] or "default").casefold())
+            job.setdefault("admission_lease_id", self.admission_lease_id(
+                state["request"]["request_id"], spec["job_id"], job["attempt_id"]))
+            job["provider"] = normalize_provider(job["provider"])
+            job["admission_model"] = normalize_model(job["admission_model"])
+            text(job["admission_lease_id"], "stored admission_lease_id", 512)
+            job.setdefault("admission_acquired", False)
+            job.setdefault("rate_limit_seen", False)
+            job.setdefault("rate_limit_until", None)
+            if type(job["admission_acquired"]) is not bool or type(job["rate_limit_seen"]) is not bool:
+                raise JobError("conflict", "stored admission flags must be booleans")
+            if job["rate_limit_until"] is not None and (
+                    type(job["rate_limit_until"]) not in (int, float) or not math.isfinite(job["rate_limit_until"])):
+                raise JobError("conflict", "stored rate_limit_until must be a finite timestamp or null")
             if job["pending_effect"] is not None:
                 fields(job["pending_effect"], ["action", "started_at"], label="pending effect")
                 if job["pending_effect"]["action"] not in ("split", "move", "start", "prompt", "jail"):
@@ -69,11 +181,19 @@ class Engine:
                 raise JobError("conflict", "invalid stored job history")
             if job["observed"] is not None:
                 observation = fields(job["observed"], ["state", "observed_at", "identity_verified"],
-                                     ["exit_code", "prompt_verified", "launch_issue"], label="observation")
+                                     ["exit_code", "prompt_verified", "launch_issue", "rate_limit"], label="observation")
                 if "prompt_verified" in observation and type(observation["prompt_verified"]) is not bool:
                     raise JobError("conflict", "stored prompt_verified must be a boolean")
                 if "launch_issue" in observation and not isinstance(observation["launch_issue"], str):
                     raise JobError("conflict", "stored launch_issue must be text")
+                if "rate_limit" in observation:
+                    signal = fields(observation["rate_limit"], ["retry_after_seconds", "source"],
+                                    label="rate_limit observation")
+                    delay = signal["retry_after_seconds"]
+                    if delay is not None and (type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0):
+                        raise JobError("conflict", "stored rate-limit delay must be finite and nonnegative")
+                    if signal["source"] is not None and signal["source"] not in ("retry-after", "reset"):
+                        raise JobError("conflict", "stored rate-limit source is invalid")
             if job["collection"] is not None:
                 fields(job["collection"], ["revision", "receipt_sha256", "outcome", "unresolved", "artifacts",
                                            "receipt_path", "collected_at", "acceptance"], label="collection")
@@ -81,6 +201,9 @@ class Engine:
                     raise JobError("conflict", "invalid stored collection")
             for name in ("host_output", "worker_output", "exit_record", "agent_name", "attempt_id"):
                 text(job[name], f"stored {name}", 4096)
+            if ((job["phase"] != "pending" or job["pending_effect"] is not None)
+                    and not job["settled"] and not job["admission_acquired"]):
+                self.acquire_admission(job, force=True)
         integer(state["request"]["concurrency"], "stored concurrency", 1, 64)
         self.state = state
 
@@ -96,6 +219,8 @@ class Engine:
         jobs = []
         for spec in request["jobs"]:
             attempt = uuid.uuid4().hex
+            resolved_model = capabilities["models"].get(spec["job_id"])
+            provider = self.provider_for(spec, resolved_model)
             suffix = f"c9-{digest(request['request_id'].encode())[:12]}/{spec['job_id']}-{attempt}"
             if spec["route"]["mode"] == "jail":
                 export = capabilities["binding"]["jail_export"]
@@ -105,7 +230,10 @@ class Engine:
                 host_output = str(self.root / "workers" / spec["job_id"] / attempt)
                 worker_output = host_output
             jobs.append({"spec": spec, "attempt_id": attempt, "agent_name": "c9-" + attempt[:24],
-                         "resolved_model": capabilities["models"].get(spec["job_id"]),
+                         "resolved_model": resolved_model, "provider": provider,
+                         "admission_model": (resolved_model or "default").casefold(),
+                         "admission_lease_id": self.admission_lease_id(request["request_id"], spec["job_id"], attempt),
+                         "admission_acquired": False, "rate_limit_seen": False, "rate_limit_until": None,
                          "phase": "pending", "pane_id": None, "previous_pane_ids": [],
                          "pending_effect": None, "history": [], "observed": None,
                          "activity_seen": False, "settled": False, "collection": None,
@@ -167,6 +295,15 @@ class Engine:
         self.checkpoint()
         try:
             result = self.transport.effect(action, job, prompt)
+        except RateLimited as error:
+            job["pending_effect"] = None
+            job["phase"] = "ready"
+            self.note_rate_limit(job, error.signal)
+            job["history"].append({"action": "rate_limit_effect", "attempt_id": job["attempt_id"],
+                                   "effect": action, "observed_at": now()})
+            self.retry_rate_limited_attempt(job, "done", receipt_valid=False)
+            self.checkpoint()
+            return False
         except EffectUnknown as error:
             job["issue"] = str(error)
             self.checkpoint()
@@ -198,8 +335,13 @@ class Engine:
 
     def launch(self, job):
         while job["phase"] != "submitted" and job["pending_effect"] is None:
+            if not self.acquire_admission(job):
+                return
             if job["phase"] == "pending":
-                action = "split"
+                if job["pane_id"] is None:
+                    action = "split"
+                else:
+                    action = "jail" if job["spec"]["route"]["mode"] == "jail" else "start"
             elif job["phase"] == "split":
                 action = "move"
             elif job["phase"] == "moved":
@@ -309,6 +451,15 @@ class Engine:
             job["settled"] = False
             return
         lifecycle = observation["state"]
+        rate_limit = observation.get("rate_limit")
+        if rate_limit is not None:
+            self.note_rate_limit(job, rate_limit)
+            if job["pending_effect"] and lifecycle in ("idle", "done", "exited"):
+                job["history"].append({"action": "rate_limit_effect_reconciled",
+                                       "pending_action": job["pending_effect"]["action"],
+                                       "attempt_id": job["attempt_id"], "observed_at": now()})
+                job["pending_effect"] = None
+                job["phase"] = "submitted"
         if lifecycle == "working":
             job["activity_seen"] = True
         pending = job["pending_effect"]
@@ -337,6 +488,10 @@ class Engine:
         job["settled"] = bool(job["phase"] == "submitted" and job["pending_effect"] is None
                               and lifecycle in ("idle", "done", "exited")
                               and (job["activity_seen"] or receipt_valid or lifecycle == "exited"))
+        if job["settled"]:
+            self.release_admission(job)
+        if self.retry_rate_limited_attempt(job, lifecycle, receipt_valid):
+            return
         if job["pending_effect"]:
             job["issue"] = "effect delivery remains unproven; it will not be replayed"
         elif lifecycle == "blocked":
@@ -366,6 +521,7 @@ class Engine:
         try:
             while True:
                 self.deadline.check()
+                observed_in_launch = set()
                 if not status_only:
                     for job in self.state["jobs"]:
                         if job["settled"] or job["pending_effect"] or job["phase"] == "submitted":
@@ -374,8 +530,13 @@ class Engine:
                         if job["phase"] == "pending" and active_count >= self.state["request"]["concurrency"]:
                             continue
                         self.launch(job)
+                        self.observe(job)
+                        self.checkpoint()
+                        observed_in_launch.add(job["spec"]["job_id"])
                 for job in self.state["jobs"]:
                     self.deadline.check()
+                    if job["spec"]["job_id"] in observed_in_launch:
+                        continue
                     self.observe(job)
                     self.checkpoint()
                 if status_only or all(job["settled"] for job in self.state["jobs"]):
@@ -394,6 +555,8 @@ class Engine:
         for job in self.state["jobs"]:
             jobs.append({"job_id": job["spec"]["job_id"], "agent_name": job["agent_name"],
                          "phase": job["phase"], "pane_id": job["pane_id"], "route": job["spec"]["route"],
+                         "provider": job["provider"], "model": job["admission_model"],
+                         "admission_acquired": job["admission_acquired"],
                          "attempt_id": job["attempt_id"], "resolved_model": job["resolved_model"],
                          "observed": job["observed"], "settled": job["settled"],
                          "pending_effect": job["pending_effect"], "issue": job["issue"],
@@ -404,7 +567,13 @@ class Engine:
                       or (job["collection"] and (job["collection"]["outcome"] != "complete" or job["collection"]["unresolved"]))
                       for job in jobs)
         batch = "unresolved_effect" if unresolved else "partial" if partial else "collected" if all_collected and all(job["settled"] for job in jobs) else "active"
+        provider_active = {}
+        for job in self.state["jobs"]:
+            provider = job["provider"]
+            if provider not in provider_active:
+                provider_active[provider] = self.admission.status(provider)["active_count"]
         return {"schema_version": 1, "request_id": self.state["request"]["request_id"], "run_dir": str(self.root),
                 "batch_state": batch, "collection_complete": all_collected,
                 "concurrency": self.state["request"]["concurrency"], "active_jobs": sum(self.active(job) for job in self.state["jobs"]),
+                "provider_active": provider_active,
                 "updated_at": self.state["updated_at"], "jobs": jobs, "acceptance": "pending"}
