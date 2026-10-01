@@ -15,6 +15,88 @@ Delegate preparation to the coding worker or a bounded review worker. Produce:
 - checks and agent-review findings with their evidence and unresolved items;
 - the intended next action and any existing authorization for that action.
 
+Before integrating or merging coding candidates, run the integration preflight
+for the intended target and every candidate in the batch. It is a gate in
+addition to human inspection; it does not merge anything or authorize a merge.
+The command must return `outcome: ready`. Preserve its report with the merge
+evidence. Run it again if the target branch or any candidate head changes.
+
+```sh
+python3 scripts/integration-preflight.py \
+  --repo REPO --target TARGET_BRANCH --run-dir RUN_DIR \
+  --candidate BRANCH_A=SHA_A [--candidate BRANCH_B=SHA_B] \
+  [--defer TASK_ID[:REASON]]
+```
+
+Use one `--candidate` per coding branch. Pin each branch to its current commit
+with `BRANCH=SHA`; the command verifies the local branch still points to that
+SHA. A commit SHA can also be supplied without a branch name. The run directory
+is the batch folder containing `workers.txt` and each task's `result.json`.
+The preflight discovers coding task IDs from `workers.txt` and task `result.json`
+files that have a `candidate` block. Every discovered task must be supplied as
+a `--candidate` or explicitly deferred with a repeatable `--defer TASK_ID[:REASON]`.
+Use a reason to make the handoff clear; deferred tasks appear in the report.
+Omitted tasks, unknown deferrals, and tasks both selected and deferred block the
+batch, while allowing the supplied candidates to proceed as a partial landing.
+
+The preflight checks the worker result against the actual candidate commit and
+the candidate's merge base with the target branch. It requires a complete
+Standards and Spec review, an independent reviewer identity, current capture
+coverage, and a recorded disposition for each finding. A full review may be
+followed by contiguous delta reviews; every capture in that chain must cover
+both axes. Missing, blocked, stale, ambiguous, or unresolved evidence refuses
+the entire batch. The preflight writes a ready or blocked JSON report under
+`RUN_DIR/integration-preflight/`; retain the report with the merge record.
+
+### Machine-readable review evidence
+
+Each `review/` or `review-rN/` directory used for integration needs a
+`review-evidence.json` sidecar. The preflight verifies it against that
+directory's `review.md`, `done.json`, and completed capture manifest. The first
+worker identity listed for the task in batch `workers.txt` is the candidate
+author. The author and reviewer identities must both appear there, and they
+must differ. Record both axes even when an axis has zero findings:
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "1123",
+  "author_identity": "worker-1123",
+  "reviewer_identity": "reviewer-1123",
+  "capture_id": "capture-id-from-done-and-manifest",
+  "axes": {
+    "standards": {
+      "status": "complete",
+      "findings": [
+        {"id": "S1", "disposition": "fixed", "reason": "Corrected and verified."}
+      ]
+    },
+    "spec": {"status": "complete", "findings": []}
+  }
+}
+```
+
+Finding IDs must be unique within a review directory. Each must have a
+`review-response.md` line in the task directory in this form:
+
+```text
+- `review/S1`: fixed — Corrected and verified.
+```
+
+Use the directory name in place of `review` for a revision review. The only
+terminal dispositions are `fixed` and `rejected`; a rejection must include a
+reason in both records. Missing dispositions, deferred findings, and unresolved
+review findings block integration. The required `done.json` count fields depend
+on the review directory type. A full `review/` requires `standards_findings`
+and `spec_findings`, each matching its axis in the sidecar. A revision
+`review-rN/` requires `new_findings` matching the total sidecar finding count
+and `unfixed` equal to `0`. All count fields are required in their respective
+review type; a missing count is invalid.
+
+The preflight output is evidence of the check, not approval to integrate. It
+records the target head, candidate base/head, selected review captures, and
+digests of the records checked. It never updates a branch or performs a merge.
+
 Prefer a committed candidate, since local commits are permitted. Before marking
 it ready, account for task changes still staged, unstaged, or untracked. Commit
 them or provide an explicit immutable snapshot; a HEAD SHA cannot identify

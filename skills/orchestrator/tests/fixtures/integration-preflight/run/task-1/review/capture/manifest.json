@@ -1,0 +1,7 @@
+{
+  "capture_id": "synthetic-capture-1",
+  "base": "@BASE@",
+  "head": "@HEAD@",
+  "coverage": "complete",
+  "gaps": []
+}

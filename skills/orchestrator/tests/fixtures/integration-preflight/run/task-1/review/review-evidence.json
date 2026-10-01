@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "task_id": "task-1",
+  "author_identity": "coder-1",
+  "reviewer_identity": "reviewer-1",
+  "capture_id": "synthetic-capture-1",
+  "axes": {
+    "standards": {
+      "status": "complete",
+      "findings": [
+        {
+          "id": "S1",
+          "disposition": "fixed",
+          "reason": "Corrected the issue."
+        }
+      ]
+    },
+    "spec": {
+      "status": "complete",
+      "findings": [
+        {
+          "id": "P1",
+          "disposition": "rejected",
+          "reason": "Outside the agreed scope."
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "task_id": "task-1",
+  "outcome": "ready",
+  "candidate": {
+    "repo": "synthetic/repo",
+    "branch": "orch/task-1",
+    "base": "@BASE@",
+    "head": "@HEAD@"
+  },
+  "unresolved": []
+}
