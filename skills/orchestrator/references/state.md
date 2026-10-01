@@ -17,15 +17,45 @@ worker's `disposition.json`; a run is not closed until the worker-contract
 worker-shaped directory. A run with no workers may omit the roster; closeout
 treats it as empty but still scans the run tree.
 
+## Current-state premise check
+
+Before launching implementation for an assignment that depends on mutable live
+state, check the material premise from a current read-only source. This includes
+host or service state, repository or data paths, backup/protection coverage,
+installed versions, and existing owner decisions. The ticket text and older
+evidence describe intent or past state; they do not confirm current state.
+
+Record each check in `STATE.md` before launch, with enough detail to reproduce
+what was checked:
+
+```text
+Task | Ticket premise | Read-only source (exact command/path/lookup) |
+Checked at (UTC ISO 8601) | Observed value | Verdict (confirmed|contradicted|unknown)
+<id> | <claim that determines scope> | <source and query/target> |
+<YYYY-MM-DDTHH:MM:SSZ> | <current result> | <verdict>
+```
+
+If a premise is contradicted, add a dated rescope request to `STATE.md` naming
+the contradicted claim, the observed value and source, the decision needed from
+the owner, and that no implementation worker was launched. Keep the assignment
+queued or blocked pending that decision. If the source is unavailable or the
+observation is inconclusive, record `unknown` and the evidence gap; do not
+launch implementation against an unverified premise. The 2026-10-01 batch
+preflight, recorded in its run `STATE.md`, is a recent example: #1080, #1046,
+and #1088 were already done, while #1081 and #1082 remained under Matt's
+wait-for-upstream decision and were assigned a read-only upstream recheck.
+
 ```text
 Run: <id>; updated: <UTC>; owner: <harness + actual session/pane identity>
 Generation: <positive integer>; phase: <active|transferring>
 Supervision: <mechanism + handle + last observation, or explicit gap>
+Premise checks: <task + source + checked-at UTC + observed value + verdict, or none>
 
 Task | Revision | Status | Worker/location | Brief/result | Next action
 <id> | <positive integer> | <lifecycle status> | <actual handles> | <paths> | <action>
 
 Decisions/steering: <task + candidate/action + user instruction + disposition>
+Rescope requests: <task + contradicted premise + owner decision requested + status, or none>
 Retained resources: <task + worktree/lease + review location + cleanup condition>
 ```
 

@@ -131,8 +131,18 @@ repurpose retained work as fallback.
    substantive review, and recovery analysis. Split independent work when it has
    separate ownership; sequence dependent work. Use the
    [worker contract](references/workers.md) for the brief and return record.
-   Finish with a bounded assignment and a selected runtime, not an open-ended
-   instruction to manage the whole queue.
+   Before launch, check any mutable host, service, path, protection, version, or
+   decision premise that materially determines whether a state-dependent
+   assignment still applies. The coordinator performs this as a current,
+   read-only check rather than spending an implementation worker on preflight.
+   Record the source, UTC check time, observed value, and verdict in run state
+   using [the premise-check record](references/state.md#current-state-premise-check).
+   If evidence contradicts the ticket, do not launch an implementation worker;
+   record a rescope request for the owner and hold the assignment for that
+   decision. If the premise is unknown or its source cannot be checked, record
+   the gap and hold implementation until it is resolved. Finish with a bounded
+   assignment and a selected runtime, not an open-ended instruction to manage
+   the whole queue.
 3. **Launch.** For independent ordinary-agent or omp-train jobs in an authorized
    Herdr host session, use **Managed Herdr Jobs** above. Otherwise choose
    execution through [runtime operations](references/runtime.md). Inside Herdr,
