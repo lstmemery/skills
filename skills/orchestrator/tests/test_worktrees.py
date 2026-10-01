@@ -252,6 +252,7 @@ class WorktreeAllocationTest(unittest.TestCase):
         result = self.allocate()
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
         self.assertFalse(self.git_calls.exists())
 
     def test_failed_allocation_stops_before_git(self):
@@ -259,12 +260,14 @@ class WorktreeAllocationTest(unittest.TestCase):
                                                  "lease_holder": "task-1119"}), status=1)
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
         self.assertFalse(self.git_calls.exists())
 
     def test_plain_path_is_not_accepted_as_a_lease_record(self):
         result = self.allocate(output=str(self.root))
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
         self.assertFalse(self.git_calls.exists())
 
     def test_lease_record_missing_identity_is_rejected_before_git(self):
@@ -272,6 +275,7 @@ class WorktreeAllocationTest(unittest.TestCase):
                                                   "lease_holder": "task-1119"}))
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
         self.assertFalse(self.git_calls.exists())
 
     def test_broken_slot_cannot_select_main_checkout_or_home(self):
@@ -282,6 +286,7 @@ class WorktreeAllocationTest(unittest.TestCase):
                 output, status = self.treehouse_records(path)
                 result = self.allocate(output, status_output=status, repo=repo, expected_base=base)
                 self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
                 self.assertFalse(self.git_calls.exists())
 
     def test_valid_lease_emits_repo_base_and_linked_worktree_identity(self):
