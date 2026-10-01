@@ -3,6 +3,7 @@
   "verified": false,
   "herdr_help_sha256": "",
   "herdr_agent_help_sha256": "",
+  "herdr_pane_help_sha256": "",
   "orchestrator_help_sha256": "",
   "supported_kinds": [],
   "server_version": "",

@@ -106,10 +106,12 @@ class WorktreeAllocationTest(unittest.TestCase):
         adapter.deadline = Deadline(2)
         help_bytes = b"fixture herdr help"
         agent_help = b"fixture agent help"
+        pane_help = b"fixture pane help"
         orchestrator_help = b"fixture orchestrator help"
         adapter.binding = {
             "herdr_help_sha256": digest(help_bytes),
             "herdr_agent_help_sha256": digest(agent_help),
+            "herdr_pane_help_sha256": digest(pane_help),
             "orchestrator_help_sha256": digest(orchestrator_help),
             "supported_kinds": ["codex"], "server_version": "fixture-v1",
             "paths": {"session_id": ["session"], "server_version": ["version"],
@@ -125,6 +127,8 @@ class WorktreeAllocationTest(unittest.TestCase):
                 return help_bytes
             if argv == ["herdr", "agent"]:
                 return agent_help
+            if argv == ["herdr", "pane"]:
+                return pane_help
             if argv == ["orchestrator", "help", "--json", "--compact"]:
                 return orchestrator_help
             if argv == ["herdr", "status"]:

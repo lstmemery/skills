@@ -68,7 +68,12 @@ class Engine:
             if not isinstance(job["history"], list) or not isinstance(job["previous_pane_ids"], list):
                 raise JobError("conflict", "invalid stored job history")
             if job["observed"] is not None:
-                fields(job["observed"], ["state", "observed_at", "identity_verified"], ["exit_code"], label="observation")
+                observation = fields(job["observed"], ["state", "observed_at", "identity_verified"],
+                                     ["exit_code", "prompt_verified", "launch_issue"], label="observation")
+                if "prompt_verified" in observation and type(observation["prompt_verified"]) is not bool:
+                    raise JobError("conflict", "stored prompt_verified must be a boolean")
+                if "launch_issue" in observation and not isinstance(observation["launch_issue"], str):
+                    raise JobError("conflict", "stored launch_issue must be text")
             if job["collection"] is not None:
                 fields(job["collection"], ["revision", "receipt_sha256", "outcome", "unresolved", "artifacts",
                                            "receipt_path", "collected_at", "acceptance"], label="collection")
@@ -174,7 +179,16 @@ class Engine:
             job["pane_id"] = result["pane_id"]
             job["phase"] = "moved"
         elif action == "start":
-            job["phase"] = "ready"
+            if result.get("prompt_submitted") is True:
+                job["phase"] = "submitted"
+                job["activity_seen"] = True
+            elif result.get("launch_blocked") is True:
+                job["phase"] = "ready"
+                observation = result.get("observation", {"state": "blocked", "identity_verified": True})
+                job["observed"] = {**observation, "observed_at": now()}
+                job["issue"] = result.get("issue", "Codex launch is blocked; inspect the owned pane")
+            else:
+                job["phase"] = "ready"
         else:
             job["phase"] = "submitted"
         job["history"].append({"action": action, "observed_at": now(), "pane_id": job["pane_id"]})
@@ -255,6 +269,12 @@ class Engine:
             pass
         atomic_bytes(path, expected)
 
+    @staticmethod
+    def is_codex_pending_start(job, pending):
+        return bool(pending and pending["action"] == "start"
+                    and job["spec"]["route"]["mode"] == "agent"
+                    and job["spec"]["route"]["runtime"] == "codex")
+
     def observe(self, job):
         if job["pane_id"] is None:
             if job["pending_effect"]:
@@ -269,6 +289,13 @@ class Engine:
             job["pending_effect"] = None
             job["issue"] = None
             job["history"].append({"action": pending["action"], "reconciled_by": "matching receipt", "observed_at": now()})
+        codex_start = self.is_codex_pending_start(job, pending)
+        if codex_start and job["collection"] and not job["collection_error"]:
+            job["phase"] = "submitted"
+            job["pending_effect"] = None
+            job["activity_seen"] = True
+            job["issue"] = None
+            job["history"].append({"action": "start", "reconciled_by": "matching receipt", "observed_at": now()})
         try:
             observation = self.transport.observe(job)
         except JobError as error:
@@ -278,18 +305,29 @@ class Engine:
             return
         job["observed"] = {**observation, "observed_at": now()}
         if not observation["identity_verified"]:
-            job["issue"] = "worker identity unverified"
+            job["issue"] = observation.get("launch_issue", "worker identity unverified")
             job["settled"] = False
             return
         lifecycle = observation["state"]
         if lifecycle == "working":
             job["activity_seen"] = True
         pending = job["pending_effect"]
-        if pending and pending["action"] == "jail" and lifecycle == "exited":
+        codex_start = self.is_codex_pending_start(job, pending)
+        if codex_start and observation.get("prompt_verified"):
+            job["phase"] = "submitted"
+            job["pending_effect"] = None
+            job["activity_seen"] = True
+            job["history"].append({"action": "start", "reconciled_by": "observed Codex Working state", "observed_at": now()})
+        elif codex_start and lifecycle == "blocked":
+            job["phase"] = "ready"
+            job["pending_effect"] = None
+            job["issue"] = observation.get("launch_issue", "Codex startup is blocked; inspect the owned pane")
+            job["history"].append({"action": "start", "reconciled_by": "observed launch dialog", "observed_at": now()})
+        elif pending and pending["action"] == "jail" and lifecycle == "exited":
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["history"].append({"action": "jail", "reconciled_by": "owned launcher exit record", "observed_at": now()})
-        if pending and pending["action"] == "start" and lifecycle in ("idle", "done", "blocked"):
+        elif pending and pending["action"] == "start" and not codex_start and lifecycle in ("idle", "done", "blocked"):
             job["phase"] = "ready"
             job["pending_effect"] = None
             job["history"].append({"action": "start", "reconciled_by": "owned worker identity", "observed_at": now()})
@@ -302,7 +340,7 @@ class Engine:
         if job["pending_effect"]:
             job["issue"] = "effect delivery remains unproven; it will not be replayed"
         elif lifecycle == "blocked":
-            job["issue"] = "worker needs input; approval dialogs remain with the coordinator"
+            job["issue"] = observation.get("launch_issue", "worker needs input; approval dialogs remain with the coordinator")
         elif lifecycle == "unknown":
             job["issue"] = "worker activity is unknown"
         elif lifecycle == "exited" and observation["exit_code"] != 0:
@@ -314,6 +352,15 @@ class Engine:
 
     def active(self, job):
         return not job["settled"] and (job["phase"] != "pending" or job["pending_effect"] is not None)
+
+    @staticmethod
+    def has_verified_working_turn(job):
+        observation = job["observed"]
+        if not observation or observation["state"] != "working":
+            return False
+        pending = job["pending_effect"]
+        codex_start = Engine.is_codex_pending_start(job, pending)
+        return not codex_start or observation.get("prompt_verified") is True
 
     def drive(self, status_only=False):
         try:
@@ -333,7 +380,7 @@ class Engine:
                     self.checkpoint()
                 if status_only or all(job["settled"] for job in self.state["jobs"]):
                     return
-                if not any(job["observed"] and job["observed"]["state"] == "working" for job in self.state["jobs"]):
+                if not any(self.has_verified_working_turn(job) for job in self.state["jobs"]):
                     launchable = any(job["phase"] in ("pending", "split", "moved", "ready")
                                      and job["pending_effect"] is None for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:

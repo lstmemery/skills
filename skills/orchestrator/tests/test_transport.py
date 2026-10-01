@@ -16,6 +16,29 @@ from herdr_jobs.records import JobError, digest, load_json, save
 from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport
 
 
+class FakeHerdr:
+    """Small offline stand-in for the external Herdr CLI boundary."""
+
+    def __init__(self, state="working", output="Working", start_code=0):
+        self.calls = []
+        self.state = state
+        self.output = output
+        self.start_code = start_code
+
+    def command(self, argv, deadline, cwd=None):
+        self.calls.append(argv)
+        if argv[:3] == ["herdr", "agent", "start"]:
+            return self.start_code, b'{"result":{}}', b"agent_not_ready: timed out" if self.start_code else b""
+        if argv[:3] == ["herdr", "agent", "get"]:
+            if self.state is None:
+                return 1, b'{"error":{"code":"agent_not_found","message":"not detected yet"}}', b""
+            agent = {"state": self.state, "pane": "moved:1", "kind": "codex", "name": "c9-fixture"}
+            return 0, json.dumps(agent).encode(), b""
+        if argv[:3] == ["herdr", "pane", "read"]:
+            return 0, json.dumps({"result": {"output": self.output}}).encode(), b""
+        return 0, b'{"result":{}}', b""
+
+
 class TransportTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
@@ -27,6 +50,7 @@ class TransportTest(unittest.TestCase):
         self.adapter.deadline = Deadline(2)
         self.adapter.binding = {"herdr_help_sha256": digest(b"herdr help"),
                                 "herdr_agent_help_sha256": digest(b"herdr agent help"),
+                                "herdr_pane_help_sha256": digest(b"herdr pane help"),
                                 "orchestrator_help_sha256": digest(b"orchestrator help"),
                                 "supported_kinds": ["codex", "omp"], "server_version": "fixture-v1",
                                 "paths": {"session_id": ["session"], "server_version": ["version"],
@@ -51,6 +75,8 @@ class TransportTest(unittest.TestCase):
             return b"herdr help"
         if argv == ["herdr", "agent"]:
             return b"herdr agent help"
+        if argv == ["herdr", "pane"]:
+            return b"herdr pane help"
         if argv[:2] == ["orchestrator", "help"]:
             return b"orchestrator help"
         if argv == ["herdr", "status"]:
@@ -61,6 +87,8 @@ class TransportTest(unittest.TestCase):
             return json.dumps(self.catalog).encode()
         if argv[:3] == ["herdr", "agent", "get"]:
             return json.dumps(self.agent).encode()
+        if argv[:3] == ["herdr", "pane", "read"]:
+            return b'{"result":{"output":"Working"}}'
         if argv[:3] == ["herdr", "pane", "split"]:
             return b'{"result":{"pane":{"pane_id":"old:1"}}}'
         if argv[:3] == ["herdr", "pane", "move"]:
@@ -97,6 +125,12 @@ class TransportTest(unittest.TestCase):
         with self.assertRaisesRegex(JobError, "CLI help contract changed"):
             self.adapter.preflight({"jobs": [self.spec]})
 
+    def test_changed_pane_read_contract_stops_preflight_before_launch(self):
+        self.adapter.binding["herdr_pane_help_sha256"] = "stale"
+        with self.assertRaisesRegex(JobError, "CLI help contract changed"):
+            self.adapter.preflight({"jobs": [self.spec]})
+        self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in self.calls))
+
     def test_status_does_not_rediscover_finished_workers_runtime_or_model(self):
         self.available = []
         self.spec["model"] = "formerly valid alias"
@@ -111,6 +145,49 @@ class TransportTest(unittest.TestCase):
         prompt = "Literal 'quotes' and $(echo nope)\nNext line"
         self.adapter.effect("prompt", self.job, prompt)
         self.assertEqual(self.calls[-1], ["herdr", "agent", "prompt", "c9-fixture", prompt])
+
+    def test_codex_start_opens_a_fresh_session_with_prompt_as_native_argv(self):
+        fake = FakeHerdr(start_code=1)
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        prompt = "Review this exact work request."
+        self.job["resolved_model"] = "native-id"
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("start", self.job, prompt)
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(result["prompt_submitted"], True)
+        self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "codex",
+                                 "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
+                                 "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
+
+    def test_trust_and_resume_dialogs_fail_launch_without_answering_the_dialog(self):
+        cases = [
+            ("Do you trust the contents of this folder?", "trust dialog"),
+            ("Resume session or use session directory", "resume/session-selection dialog"),
+        ]
+        for output, expected in cases:
+            with self.subTest(output=output):
+                fake = FakeHerdr(state=None, output=output, start_code=1)
+                self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+                with patch("herdr_jobs.transport.command", fake.command):
+                    result = self.adapter.effect("start", self.job, "Assigned work")
+
+                self.assertTrue(result["launch_blocked"])
+                self.assertIn(expected, result["issue"])
+                self.assertFalse(any(call[:2] == ["herdr", "agent"] and call[2] == "prompt" for call in fake.calls))
+                self.assertFalse(any(call[:2] == ["herdr", "agent"] and call[2] == "send-keys" for call in fake.calls))
+                self.assertFalse(any(call[:3] == ["herdr", "agent", "get"] for call in fake.calls))
+
+    def test_working_state_without_visible_working_text_does_not_prove_prompt_delivery(self):
+        fake = FakeHerdr(state="working", output="Codex session is starting")
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaises(EffectUnknown):
+                self.adapter.effect("start", self.job, "Assigned work")
+
+        self.assertEqual(sum(call[:3] == ["herdr", "agent", "start"] for call in fake.calls), 1)
+        self.assertTrue(any(call[:3] == ["herdr", "pane", "read"] for call in fake.calls))
+        self.assertFalse(any(call[:3] == ["herdr", "agent", "prompt"] for call in fake.calls))
 
     def test_unverified_mutation_response_stays_ambiguous(self):
         self.adapter.raw = lambda argv: b'{}'

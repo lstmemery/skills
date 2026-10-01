@@ -1,5 +1,6 @@
 """Narrow host CLI adapter; all live access is gated before discovery."""
 
+import json
 import os
 from pathlib import Path, PurePosixPath
 import selectors
@@ -87,7 +88,7 @@ class NativeTransport:
             raise JobError("unavailable_capability", "provide a verified --host-contract; no host schema is assumed")
         self.deadline = deadline
         self.binding = fields(load_json(binding_path), ["schema_version", "verified", "herdr_help_sha256",
-                              "herdr_agent_help_sha256", "supported_kinds", "orchestrator_help_sha256",
+                              "herdr_agent_help_sha256", "herdr_pane_help_sha256", "supported_kinds", "orchestrator_help_sha256",
                               "server_version", "paths", "jail_export"])
         version(self.binding["schema_version"])
         if self.binding["verified"] is not True:
@@ -114,8 +115,12 @@ class NativeTransport:
             validate_writer_intent(job, label)
         help_bytes = self.raw([self.herdr, "--help"])
         agent_help = self.raw([self.herdr, "agent"])
+        pane_help = self.raw([self.herdr, "pane"])
         orchestrator_help = self.raw([self.orchestrator, "help", "--json", "--compact"])
-        if digest(help_bytes) != self.binding["herdr_help_sha256"] or digest(agent_help) != self.binding["herdr_agent_help_sha256"] or digest(orchestrator_help) != self.binding["orchestrator_help_sha256"]:
+        if (digest(help_bytes) != self.binding["herdr_help_sha256"]
+                or digest(agent_help) != self.binding["herdr_agent_help_sha256"]
+                or digest(pane_help) != self.binding["herdr_pane_help_sha256"]
+                or digest(orchestrator_help) != self.binding["orchestrator_help_sha256"]):
             raise JobError("unavailable_capability", "CLI help contract changed; reverify the host binding")
         status = self.read([self.herdr, "status"])
         paths = self.binding["paths"]
@@ -191,13 +196,21 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        codex_prompt_start = (action == "start" and spec["route"]["mode"] == "agent"
+                              and spec["route"]["runtime"] == "codex")
         if action == "split":
             argv = [self.herdr, "pane", "split", "--current", "--direction", "right", "--cwd", spec["cwd"], "--no-focus"]
         elif action == "move":
             argv = [self.herdr, "pane", "move", pane, "--new-workspace", "--label", job["agent_name"], "--no-focus"]
         elif action == "start":
             argv = [self.herdr, "agent", "start", job["agent_name"], "--kind", spec["kind"], "--pane", pane]
-            if job["resolved_model"] is not None:
+            if codex_prompt_start:
+                argv += ["--timeout", "5000", "--", "-C", spec["cwd"], "-c",
+                         f"projects.{json.dumps(spec['cwd'])}.trust_level=\"trusted\""]
+                if job["resolved_model"] is not None:
+                    argv += ["-m", job["resolved_model"]]
+                argv.append(prompt)
+            elif job["resolved_model"] is not None:
                 argv += ["--", "--model", job["resolved_model"]]
         elif action == "prompt":
             argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
@@ -211,6 +224,22 @@ class NativeTransport:
                     shlex.join([sys.executable, str(runner), "--request", str(launch_request)])]
         else:
             raise ValueError(f"unknown effect: {action}")
+        if codex_prompt_start:
+            # A prompt-bearing Codex invocation makes Herdr's startup timeout
+            # expected. Trust only a verified worker identity and live Working
+            # state from the pane before reporting the effect as delivered.
+            command(argv, self.deadline)
+            try:
+                observation = self.observe(job)
+            except (JobError, UnicodeError, BudgetExpired) as error:
+                raise EffectUnknown("Codex startup could not be verified; inspect the owned pane before retrying") from error
+            if observation["state"] == "blocked":
+                return {"launch_blocked": True,
+                        "issue": observation.get("launch_issue", "Codex startup is blocked"),
+                        "observation": observation}
+            if observation.get("prompt_verified"):
+                return {"prompt_submitted": True}
+            raise EffectUnknown("Codex prompt delivery is unverified; inspect the owned pane before retrying")
         try:
             result = self.read(argv)
             if not isinstance(result, dict) or not isinstance(result.get("result"), dict) or result.get("ok") is False or result.get("success") is False:
@@ -231,6 +260,16 @@ class NativeTransport:
                 raise JobError("conflict", "jail exit record does not match this job attempt")
             integer(record["exit_code"], "launcher exit code", -255, 255)
             return {"state": "exited", "identity_verified": True, "exit_code": record["exit_code"]}
+        codex = job["spec"]["route"]["mode"] == "agent" and job["spec"]["route"]["runtime"] == "codex"
+        output = None
+        if codex:
+            terminal = self.read([self.herdr, "pane", "read", job["pane_id"],
+                                  "--source", "visible", "--lines", "200"])
+            output = self.terminal_output(terminal)
+            dialog = self.codex_dialog(output)
+            if dialog:
+                return {"state": "blocked", "identity_verified": False,
+                        "prompt_verified": False, "launch_issue": dialog}
         result = self.read([self.herdr, "agent", "get", job["pane_id"]])
         paths = self.binding["paths"]
         pane = at(result, paths["agent_pane_id"])
@@ -243,4 +282,42 @@ class NativeTransport:
         state = at(result, paths["agent_state"])
         if state not in ("idle", "done", "working", "blocked", "unknown"):
             raise JobError("unavailable_capability", "unrecognized worker lifecycle state")
-        return {"state": state, "identity_verified": True}
+        observation = {"state": state, "identity_verified": True}
+        if codex:
+            observation["prompt_verified"] = (observation["state"] == "working"
+                                               and "working" in output.casefold())
+        return observation
+
+    @staticmethod
+    def terminal_output(result):
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            payload = result.get("result", result)
+            if isinstance(payload, dict):
+                for key in ("output", "text", "terminal", "snapshot", "lines"):
+                    if isinstance(payload.get(key), str):
+                        return payload[key]
+                    lines = payload.get(key)
+                    if isinstance(lines, list) and all(isinstance(line, str) for line in lines):
+                        return "\n".join(payload[key])
+        raise JobError("unavailable_capability", "Herdr pane read returned no terminal text")
+
+    @staticmethod
+    def codex_dialog(output):
+        text_lower = output.casefold()
+        if any(phrase in text_lower for phrase in (
+            "use session directory", "select a session", "choose a session",
+        )):
+            return "Codex is showing a resume/session-selection dialog; do not choose a session"
+        if any(phrase in text_lower for phrase in (
+            "resume session", "resume the last session", "resume previous session",
+        )):
+            return "Codex is showing a resume/session-selection dialog; do not choose a session"
+        trust_dialog = any(phrase in text_lower for phrase in (
+            "do you trust", "trust the contents of this", "trust this folder",
+            "trust this directory", "trust this project",
+        ))
+        if trust_dialog:
+            return "Codex is showing a trust dialog; inspect and resolve it manually before relaunching"
+        return None
