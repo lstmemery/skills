@@ -59,9 +59,11 @@ rejects failed, empty, or unrecognized results before any Git command, confirms
 the active lease through `treehouse status --json`, then checks the canonical
 path, linked-worktree registration, repository identity, and base commit without
 changing branches. Include its complete JSON output as the job's
-`repository_worktree` record and set `cwd` to that record's `path`. Supply
-`--expected-base` whenever the assignment pins a base; otherwise the helper
-records the worktree's current `HEAD`.
+`repository_worktree` record, set `writes_repository: true`, and set `cwd` to
+that record's `path`. Every other job must explicitly set
+`writes_repository: false`; manifests that omit writer intent are rejected.
+Supply `--expected-base` whenever the assignment pins a base; otherwise the
+helper records the worktree's current `HEAD`.
 
 The managed launcher repeats the lease, repository, linked-worktree, and base
 checks before creating a pane for a repository writer. If allocation reports an

@@ -32,15 +32,19 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation` | `override`, `repository_worktree` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree` |
 | Override | `instruction: string` | `runtime: string`, `model: string` |
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary`, `deep_research`, or `shopping`; the coordinator supplies it explicitly. Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
 
 Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–32 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
 
-Every repository-writing job must include `repository_worktree` and set `cwd` to
-its `path`. Produce the record with:
+Every job must explicitly declare `writes_repository` as `true` or `false`.
+Existing manifests without this field are rejected; omission never means
+non-writer. Set it to `false` for jobs that do not write repository files. A
+repository-writing job sets it to `true`, must include `repository_worktree`,
+and must set `cwd` to that record's `path`. A record on a `false` job is rejected.
+Produce a writer record with:
 
 ```sh
 python3 scripts/lease-worktree.py acquire --repo <expected-repository> \
@@ -53,9 +57,9 @@ Omit `--expected-base` only when the assignment does not pin a base. The record 
 current Treehouse lease ID and holder, then verifies that the canonical cwd is a
 registered linked worktree of the recorded repository and that `HEAD` still
 matches `base_commit`. It does this before the first pane is created. Preview
-checks the record's shape and cwd pairing offline; it does not claim that the
-live lease is valid. Jobs without `repository_worktree` are non-repository-writing
-jobs and do not receive this worktree check.
+checks the explicit writer intent, record shape, and cwd pairing offline; it
+does not claim that the live lease is valid. Every writer record is verified
+before the first pane is created.
 
 Treehouse allocation can reserve a slot before later verification fails. If the
 allocator exits unsuccessfully after `get`, reconcile `treehouse status --json`

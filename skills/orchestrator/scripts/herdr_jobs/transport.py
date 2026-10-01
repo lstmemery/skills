@@ -9,7 +9,8 @@ import subprocess
 import sys
 import time
 
-from .records import JobError, digest, fields, integer, load_json, parse_json, save, text, version
+from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
+                      validate_writer_intent, version)
 from .worktrees import verify_repository_worktree
 
 
@@ -108,6 +109,9 @@ class NativeTransport:
         return parse_json(self.raw(argv))
 
     def preflight(self, request, existing=None, status_only=False):
+        for job in request["jobs"]:
+            label = job.get("job_id", "job") if isinstance(job, dict) else "job"
+            validate_writer_intent(job, label)
         help_bytes = self.raw([self.herdr, "--help"])
         agent_help = self.raw([self.herdr, "agent"])
         orchestrator_help = self.raw([self.orchestrator, "help", "--json", "--compact"])
@@ -127,7 +131,7 @@ class NativeTransport:
         writer_checks = []
         if not status_only:
             for job in request["jobs"]:
-                if "repository_worktree" not in job:
+                if not job["writes_repository"]:
                     continue
                 old = previous.get(job["job_id"])
                 if old is None or old["phase"] in ("pending", "split", "moved") or (

@@ -84,6 +84,11 @@ def text(value, label, maximum=100000):
     return value
 
 
+def is_commit_id(value):
+    return (isinstance(value, str)
+            and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is not None)
+
+
 def identifier(value, label):
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value):
         invalid(f"{label}: expected 1–64 letters, digits, underscores or hyphens")
@@ -110,10 +115,22 @@ def repository_worktree_record(value):
             invalid(f"repository_worktree.{key} must be absolute")
     text(value["lease_id"], "repository_worktree.lease_id", 4096)
     text(value["lease_holder"], "repository_worktree.lease_holder", 4096)
-    if (not isinstance(value["base_commit"], str)
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value["base_commit"])):
+    if not is_commit_id(value["base_commit"]):
         invalid("repository_worktree.base_commit must be a full Git commit ID")
     return value
+
+
+def validate_writer_intent(job, label="job"):
+    if not isinstance(job, dict):
+        invalid(f"{label}: expected an object")
+    if type(job.get("writes_repository")) is not bool:
+        invalid(f"{label}: writes_repository must be explicitly set to true or false")
+    has_worktree = "repository_worktree" in job
+    if job["writes_repository"] and not has_worktree:
+        invalid(f"{label}: writes_repository=true requires repository_worktree")
+    if not job["writes_repository"] and has_worktree:
+        invalid(f"{label}: repository_worktree requires writes_repository=true")
+    return job["writes_repository"]
 
 
 def absolute(value, base):
@@ -157,9 +174,11 @@ def prepare(manifest_path, policy_path):
     jobs = []
     seen = set()
     for job in manifest["jobs"]:
-        fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation"],
+        fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
+                     "writes_repository"],
                ["override", "repository_worktree"], "job")
         job_id = identifier(job["job_id"], "job_id")
+        validate_writer_intent(job, job_id)
         if job_id in seen:
             invalid(f"duplicate job_id: {job_id}")
         seen.add(job_id)
@@ -191,7 +210,7 @@ def prepare(manifest_path, policy_path):
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")
         cwd = absolute(job["cwd"], manifest_path.parent)
-        if "repository_worktree" in job:
+        if job["writes_repository"]:
             repository_worktree_record(job["repository_worktree"])
             try:
                 cwd = str(Path(cwd).resolve(strict=False))
