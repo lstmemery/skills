@@ -1,0 +1,2 @@
+task-1 coder-1 w1:p1 codex synthetic-model max working
+task-1 reviewer-1 w2:p1 codex synthetic-model max (reviewer) head=@HEAD@
