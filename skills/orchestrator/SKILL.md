@@ -141,22 +141,31 @@ repurpose retained work as fallback.
    Retain the returned identities and observe startup before marking the task
    running. Preserve the user's focus.
 4. **Supervise.** Wait through the backend's event/wait surface, inspect an actual
-   outcome, then checkpoint the transition. Continue authorized follow-ups while
-   the user is away and queue their decisions. Delegate substantive fixes and
-   analysis; inspect compact evidence records yourself. A timeout, missing signal,
-   or unknown state calls for reconciliation, not an assumed success or duplicate
-   launch. End this step only with a verified outcome, a recorded human decision,
-   or an explicit supervision handoff/blocker.
+   outcome, then checkpoint the transition. For each returned worker result, run
+   the shared validator in [the worker contract](references/workers.md) with the
+   expected task ID and assignment revision before accepting it. Continue
+   authorized follow-ups while the user is away and queue their decisions.
+   Delegate substantive fixes and analysis; inspect compact evidence records
+   yourself. A timeout, missing signal, or unknown state calls for reconciliation,
+   not an assumed success or duplicate launch. Record a terminal disposition for
+   every worker; an explicit stop or cancellation gets `cancelled`, with evidence
+   for the observed stop even when no `result.json` exists. End this step only with
+   a verified outcome, a recorded human decision, or an explicit supervision
+   handoff/blocker.
 5. **Present.** Research and other artifacts follow their task's delivery contract.
    For repository changes, follow [human code inspection](references/review.md):
    show the complete task diff and files in Herdr before the action requiring the
    user's decision. Apply the standing review boundary in preferences. Finish
    with the candidate, evidence, and exact next action visible to the user.
-6. **Close or continue.** Perform only the authorized next action and verify its
-   actual result. Record artifact retention, worker disposition, and any pending
-   decision before cleanup. Stop only work owned by this task. Preserve unlanded
-   changes and pending review artifacts. A completed PR-creation task does not
-   establish that its code was merged or its worktree is disposable.
+6. **Close or continue.** Before closing a run, execute the worker-contract
+   `check-closeout` command against its run directory. It checks every rostered
+   disposition and scans for unrostered worker-shaped directories. If any worker
+   lacks a valid terminal disposition or roster entry, keep the run open and
+   reconcile it first. Then perform only the authorized next action and verify
+   its actual result. Record artifact retention and any pending decision before
+   cleanup. Stop only work owned by this task. Preserve unlanded changes and
+   pending review artifacts. A completed PR-creation task does not establish that
+   its code was merged or its worktree is disposable.
 
 ## Keep the coordinator small
 
