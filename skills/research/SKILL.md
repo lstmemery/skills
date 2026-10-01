@@ -9,6 +9,14 @@ Answer the user's focused question from opened sources. Finish when each materia
 claim matches its evidence, contradictions and missing evidence are explicit,
 and the active runtime's output and delivery contract is satisfied.
 
+Load the active runtime's durable user preferences and delivery contract for
+this step. When this run produces a finished report, deliver it through that
+contract by default after the research coordinator has completed synthesis and
+validation. Do not ask again whether to send it. Honor an explicit opt-out in
+the current request. Workers return their slice artifacts to the coordinator
+and never deliver them. Report only the delivery state observed; say the report
+was emailed only after the delivery helper verifies receipt.
+
 Use the request first, then relevant supplied prior art and sources that own
 the claims: official documentation, code, specifications, APIs, or original
 papers. Search snippets and model memory are leads. A prior report is a
@@ -27,8 +35,10 @@ papers. Search snippets and model memory are leads. A prior report is a
   before gathering sources. Scope, rather than a fixed source count, decides.
 
 A required saved report may be the same concise answer as a single lookup.
-Use the runtime's output root and delivery mechanism. Queue only a finished
-report when that mechanism exists; confirm only the delivery state observed.
+Use the runtime's output root and delivery mechanism. Queue only the finished
+report, never plans, drafts, or worker slices. If no delivery mechanism exists,
+say so and leave the report available. Confirm only the delivery state
+observed.
 
 ## Focused investigation
 

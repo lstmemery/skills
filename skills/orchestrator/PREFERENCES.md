@@ -15,6 +15,12 @@ acceptance of worker output.
 
 ## User Preferences
 
+- Deliver each finished report produced by focused or deep research through the
+  active runtime's delivery contract by default, after the research coordinator
+  completes synthesis and validation. Do not ask again whether to send it. Honor
+  an explicit opt-out in the current request. Deliver only finished reports,
+  not plans, drafts, or worker slices. Report the observed delivery state; say a
+  report was emailed only after the delivery helper verifies receipt.
 - Delegate as much execution as possible. Use the coordinator for routing,
   task state, and user communication; delegate substantive reasoning and review.
   Fast models are preferred for coordinators. No exact model is pinned here.
