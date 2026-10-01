@@ -2,16 +2,18 @@
 
 from pathlib import Path
 import math
+import re
 import time
 import uuid
 
 from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
-                      integer, load_json, now, parse_json, save, text, version)
+                      integer, load_json, now, parse_json, read_regular, save, text, version)
+from .retry import prepare_pi_run_profile
 from .transport import BudgetExpired, EffectUnknown, RateLimited
 
 
-PHASES = {"pending", "split", "moved", "ready", "submitted"}
+PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted"}
 
 
 class Engine:
@@ -99,6 +101,11 @@ class Engine:
         job["worker_output"] = str(Path(previous["worker_output"]).with_name(output_name))
         job["exit_record"] = str(self.root / "lifecycle" / job["spec"]["job_id"] / f"{attempt}.json")
         job["pane_id"] = None
+        job["retry_profile"] = None
+        if job.get("retry_override") is not None and job["spec"]["route"]["runtime"] == "pi":
+            profile_root = self.root / "runtime" / "pi" / job["spec"]["job_id"] / attempt
+            job["retry_profile"] = prepare_pi_run_profile(profile_root / "agent", profile_root / "sessions",
+                                                          job["retry_override"])
         job["admission_lease_id"] = self.admission_lease_id(
             self.state["request"]["request_id"], job["spec"]["job_id"], attempt)
         job["admission_acquired"] = False
@@ -137,9 +144,13 @@ class Engine:
 
     def load(self):
         state = fields(load_json(self.path, 67108864), ["schema_version", "request", "request_digest", "host_contract",
-                       "session_id", "binding_digest", "jobs", "created_at", "updated_at"], label="state")
+                       "session_id", "binding_digest", "jobs", "created_at", "updated_at"],
+                       ["retry_override"], label="state")
         version(state["schema_version"])
-        fields(state["request"], ["schema_version", "request_id", "concurrency", "jobs", "policy", "policy_digest"], label="stored request")
+        fields(state["request"], ["schema_version", "request_id", "concurrency", "jobs", "policy", "policy_digest"],
+               ["retry_override"], label="stored request")
+        if state.get("retry_override") != state["request"].get("retry_override"):
+            raise JobError("conflict", "run retry override does not match the pinned request")
         if not isinstance(state["request"]["jobs"], list):
             raise JobError("conflict", "stored request jobs must be a list")
         if digest(encoded(state["request"])) != state["request_digest"]:
@@ -152,10 +163,12 @@ class Engine:
                          "pending_effect", "history", "observed", "activity_seen", "settled", "collection",
                          "collection_error", "host_output", "worker_output", "issue", "exit_record"],
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
-                    "rate_limit_until"],
+                    "rate_limit_until", "retry_override", "retry_profile"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
+            if not isinstance(job["attempt_id"], str) or re.fullmatch(r"[0-9a-f]{32}", job["attempt_id"]) is None:
+                raise JobError("conflict", "stored job attempt ID is invalid")
             job.setdefault("provider", self.provider_for(spec, job["resolved_model"]))
             job.setdefault("admission_model", (job["resolved_model"] or "default").casefold())
             job.setdefault("admission_lease_id", self.admission_lease_id(
@@ -171,9 +184,37 @@ class Engine:
             if job["rate_limit_until"] is not None and (
                     type(job["rate_limit_until"]) not in (int, float) or not math.isfinite(job["rate_limit_until"])):
                 raise JobError("conflict", "stored rate_limit_until must be a finite timestamp or null")
+            expected_retry = state["request"].get("retry_override", {}).get(spec["route"]["runtime"])
+            job.setdefault("retry_override", expected_retry)
+            job.setdefault("retry_profile", None)
+            if job["retry_override"] != expected_retry:
+                raise JobError("conflict", "stored job retry override differs from the pinned request")
+            if spec["route"]["runtime"] == "pi" and expected_retry is not None and job.get("retry_profile") is None:
+                raise JobError("conflict", "stored pi retry override has no run-scoped profile")
+            if job.get("retry_profile") is not None:
+                profile = fields(job["retry_profile"], ["agent_dir", "session_dir", "settings_sha256"],
+                                 label="stored pi retry profile")
+                agent_dir = text(profile["agent_dir"], "stored pi agent directory", 4096)
+                session_dir = text(profile["session_dir"], "stored pi session directory", 4096)
+                expected_root = self.root / "runtime" / "pi" / spec["job_id"] / job["attempt_id"]
+                if (Path(agent_dir) != expected_root / "agent"
+                        or Path(session_dir) != expected_root / "sessions"):
+                    raise JobError("conflict", "stored pi retry profile escapes its run-scoped directory")
+                if (Path(agent_dir).is_symlink() or Path(session_dir).is_symlink()
+                        or not Path(session_dir).is_dir()):
+                    raise JobError("conflict", "stored pi retry profile directories are invalid")
+                if (not isinstance(profile["settings_sha256"], str)
+                        or re.fullmatch(r"[0-9a-f]{64}", profile["settings_sha256"]) is None):
+                    raise JobError("conflict", "stored pi settings digest is invalid")
+                try:
+                    settings_bytes = read_regular(Path(agent_dir) / "settings.json", 1048576)
+                except (OSError, JobError) as error:
+                    raise JobError("conflict", "stored pi retry settings are unavailable") from error
+                if digest(settings_bytes) != profile["settings_sha256"]:
+                    raise JobError("conflict", "stored pi retry settings changed after profile preparation")
             if job["pending_effect"] is not None:
                 fields(job["pending_effect"], ["action", "started_at"], label="pending effect")
-                if job["pending_effect"]["action"] not in ("split", "move", "start", "prompt", "jail"):
+                if job["pending_effect"]["action"] not in ("split", "move", "retry_setup", "start", "prompt", "jail"):
                     raise JobError("conflict", "unknown pending effect")
             for flag in ("settled", "activity_seen"):
                 if type(job[flag]) is not bool:
@@ -230,11 +271,19 @@ class Engine:
             else:
                 host_output = str(self.root / "workers" / spec["job_id"] / attempt)
                 worker_output = host_output
+            runtime = spec["route"]["runtime"]
+            retry_override = request.get("retry_override", {}).get(runtime)
+            retry_profile = None
+            if runtime == "pi" and retry_override is not None:
+                profile_root = self.root / "runtime" / "pi" / spec["job_id"] / attempt
+                retry_profile = prepare_pi_run_profile(profile_root / "agent", profile_root / "sessions",
+                                                       retry_override)
             jobs.append({"spec": spec, "attempt_id": attempt, "agent_name": "c9-" + attempt[:24],
                          "resolved_model": resolved_model, "provider": provider,
                          "admission_model": (resolved_model or "default").casefold(),
                          "admission_lease_id": self.admission_lease_id(request["request_id"], spec["job_id"], attempt),
                          "admission_acquired": False, "rate_limit_seen": False, "rate_limit_until": None,
+                         "retry_override": retry_override, "retry_profile": retry_profile,
                          "phase": "pending", "pane_id": None, "previous_pane_ids": [],
                          "pending_effect": None, "history": [], "observed": None,
                          "activity_seen": False, "settled": False, "collection": None,
@@ -245,6 +294,7 @@ class Engine:
                       "host_contract": str(Path(binding_path).absolute()) if binding_path else None,
                       "session_id": capabilities["session_id"], "binding_digest": digest(encoded(capabilities["binding"])),
                       "jobs": jobs, "created_at": now(), "updated_at": now()}
+        self.state["retry_override"] = request.get("retry_override")
         self.validate_prompts()
         self.checkpoint()
 
@@ -316,6 +366,8 @@ class Engine:
             job["previous_pane_ids"].append(job["pane_id"])
             job["pane_id"] = result["pane_id"]
             job["phase"] = "moved"
+        elif action == "retry_setup":
+            job["phase"] = "retry_ready"
         elif action == "start":
             if result.get("prompt_submitted") is True:
                 job["phase"] = "submitted"
@@ -346,7 +398,12 @@ class Engine:
             elif job["phase"] == "split":
                 action = "move"
             elif job["phase"] == "moved":
-                action = "jail" if job["spec"]["route"]["mode"] == "jail" else "start"
+                if job.get("retry_profile") is not None:
+                    action = "retry_setup"
+                else:
+                    action = "jail" if job["spec"]["route"]["mode"] == "jail" else "start"
+            elif job["phase"] == "retry_ready":
+                action = "start"
             else:
                 if job["observed"] and job["observed"]["state"] not in ("idle", "done"):
                     return
@@ -543,7 +600,7 @@ class Engine:
                 if status_only or all(job["settled"] for job in self.state["jobs"]):
                     return
                 if not any(self.has_verified_working_turn(job) for job in self.state["jobs"]):
-                    launchable = any(job["phase"] in ("pending", "split", "moved", "ready")
+                    launchable = any(job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
                                      and job["pending_effect"] is None for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:
                         return
@@ -577,4 +634,5 @@ class Engine:
                 "batch_state": batch, "collection_complete": all_collected,
                 "concurrency": self.state["request"]["concurrency"], "active_jobs": sum(self.active(job) for job in self.state["jobs"]),
                 "provider_active": provider_active,
-                "updated_at": self.state["updated_at"], "jobs": jobs, "acceptance": "pending"}
+                "updated_at": self.state["updated_at"], "jobs": jobs,
+                "retry_override": self.state.get("retry_override"), "acceptance": "pending"}
