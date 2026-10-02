@@ -74,13 +74,33 @@ or report its blocker; worker lifecycle state does not substitute for findings.
 
 Use separate `## Standards` and `## Spec` headings. Preserve each axis's findings
 verbatim or lightly cleaned; link any complete findings file beside its summary.
-For integration preflight, give every finding a stable ID and render it under
-its axis as `- [S1] <finding>`; use the same ID in the evidence sidecar and
-record `No findings.` as plain text for an empty axis. Finding list entries
-without IDs cannot be gated.
-Keep the axes separate without merging or reranking them. End with each axis's
-finding count and its own worst issue, or “none”; identify any skipped or blocked
-axis. Summary limits never discard findings.
+An optional single `#` title may precede them; do not add other section headings
+or prose outside the two axis sections.
+For integration preflight, every nonblank line in either axis section must use
+one of these exact forms:
+
+- `- [S1] <finding>` for a finding, with its stable ID also used in
+  `review-evidence.json`;
+- `No findings.` for an empty axis;
+- `Summary: findings=<count>; worst=<description|none>.` as the final line,
+  with the count matching the findings. Use `worst=none` only for an empty axis.
+
+Do not put prose, headings, or untagged list entries inside an axis section.
+For example:
+
+```markdown
+## Standards
+- [S1] **MAJOR · CONFIRMED** — Missing validation for captured payloads.
+Summary: findings=1; worst=Missing payload verification.
+
+## Spec
+No findings.
+Summary: findings=0; worst=none.
+```
+
+Keep the axes separate without merging or reranking them. The final Summary line
+in each section gives its finding count and worst issue. Identify any skipped or
+blocked axis outside those sections. Summary limits never discard findings.
 
 Before claiming the current checkout has been reviewed, run capture `check`.
 If source or authorities drifted, finish findings for the captured version and

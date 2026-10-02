@@ -17,6 +17,7 @@ from pathlib import Path
 AXES = ("standards", "spec")
 EVIDENCE_NAME = "review-evidence.json"
 CAPTURE_VERIFIER = Path(__file__).resolve().parents[2] / "code-review" / "scripts" / "capture.py"
+CAPTURE_VERIFICATION_KEYS = frozenset({"outcome", "capture_id", "coverage", "gaps"})
 FINDING_LINE = re.compile(
     r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
     r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
@@ -25,6 +26,10 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
 MARKDOWN_LIST_ENTRY = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S.*$")
+MARKDOWN_SUMMARY = re.compile(
+    r"^Summary: findings=(?P<count>0|[1-9][0-9]*); worst=(?P<worst>.+)\.$"
+)
+NO_FINDINGS_LINE = "No findings."
 
 
 class PreflightError(ValueError):
@@ -254,17 +259,23 @@ def verify_capture_payload(review_dir, capture_dir, manifest):
         verification = json.loads(result.stdout)
     except (json.JSONDecodeError, TypeError) as error:
         raise PreflightError(f"{review_dir.name} capture verifier returned invalid output") from error
-    if result.returncode != 0 or not isinstance(verification, dict):
-        outcome = verification.get("outcome") if isinstance(verification, dict) else None
+    if not isinstance(verification, dict):
+        raise PreflightError(f"{review_dir.name} capture verifier returned a non-object result")
+    if result.returncode != 0:
         raise PreflightError(
-            f"{review_dir.name} capture payload verification failed"
-            + (f" ({outcome})" if isinstance(outcome, str) else "")
+            f"{review_dir.name} capture payload verification failed (exit {result.returncode})"
+        )
+    missing = CAPTURE_VERIFICATION_KEYS - verification.keys()
+    if missing:
+        raise PreflightError(
+            f"{review_dir.name} capture verifier is missing required keys: "
+            + ", ".join(sorted(missing))
         )
     if (
-        verification.get("outcome") != "verified"
-        or verification.get("capture_id") != manifest.get("capture_id")
-        or verification.get("coverage") != "complete"
-        or verification.get("gaps") != []
+        verification["outcome"] != "verified"
+        or verification["capture_id"] != manifest["capture_id"]
+        or verification["coverage"] != "complete"
+        or verification["gaps"] != []
     ):
         raise PreflightError(f"{review_dir.name} capture verifier did not verify complete matching coverage")
 
@@ -279,44 +290,100 @@ def review_markdown_has_axes(review_dir):
         raise PreflightError(f"cannot read review.md in {review_dir.name}") from error
     findings = {axis: set() for axis in AXES}
     found_axes = set()
+    no_findings = set()
+    summaries = {}
     current_axis = None
-    fence = None
+    title_seen = False
     for line in text.splitlines():
-        fence_marker = re.match(r"^\s*(`{3,}|~{3,})", line)
-        if fence is not None:
-            if (
-                fence_marker is not None
-                and fence_marker.group(1)[0] == fence[0]
-                and len(fence_marker.group(1)) >= len(fence)
-            ):
-                fence = None
+        content = line.strip()
+        if not content:
             continue
-        if fence_marker is not None:
-            fence = fence_marker.group(1)
-            continue
-        heading = re.match(r"^\s*##\s+(.+?)\s*#*\s*$", line)
+        heading = re.match(r"^##\s+(.+?)\s*#*\s*$", content)
         if heading:
             title = heading.group(1).strip().lower()
-            current_axis = title if title in AXES else None
-            if current_axis is not None:
-                found_axes.add(current_axis)
-            continue
-        finding = MARKDOWN_FINDING.fullmatch(line)
-        if finding is None:
-            if current_axis is not None and MARKDOWN_LIST_ENTRY.fullmatch(line):
+            if title not in AXES:
                 raise PreflightError(
-                    f"{review_dir.name}/review.md finding entry lacks a stable ID"
+                    f"{review_dir.name}/review.md has an unsupported level-two heading; "
+                    "only Standards and Spec are allowed"
                 )
+            current_axis = title
+            if current_axis in found_axes:
+                raise PreflightError(
+                    f"{review_dir.name}/review.md repeats the {current_axis.title()} section"
+                )
+            found_axes.add(current_axis)
             continue
-        finding_id = finding.group("finding")
         if current_axis is None:
-            raise PreflightError(f"{review_dir.name}/review.md has a finding outside an axis section")
+            if not found_axes and not title_seen and re.fullmatch(r"#\s+\S.*", content):
+                title_seen = True
+                continue
+            raise PreflightError(
+                f"{review_dir.name}/review.md has unrecognized content outside its axis sections"
+            )
+        if current_axis in summaries:
+            raise PreflightError(
+                f"{review_dir.name}/review.md summary must be the last nonblank line in "
+                f"the {current_axis.title()} section"
+            )
+        finding = MARKDOWN_FINDING.fullmatch(content)
+        if finding is None:
+            if content == NO_FINDINGS_LINE:
+                if current_axis in no_findings or findings[current_axis]:
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md has an inconsistent No findings. line"
+                    )
+                no_findings.add(current_axis)
+                continue
+            summary = MARKDOWN_SUMMARY.fullmatch(content)
+            if summary is not None:
+                count = int(summary.group("count"))
+                worst = summary.group("worst").strip()
+                actual_count = len(findings[current_axis])
+                if not worst:
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md {current_axis.title()} summary has no worst-issue value"
+                    )
+                if count != actual_count:
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md {current_axis.title()} summary count "
+                        "does not match Markdown findings"
+                    )
+                if count == 0 and (current_axis not in no_findings or worst != "none"):
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md empty {current_axis.title()} summary "
+                        "requires No findings. and worst=none"
+                    )
+                if count > 0 and (current_axis in no_findings or worst.lower() == "none"):
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md nonempty {current_axis.title()} summary "
+                        "requires a worst-issue description"
+                    )
+                summaries[current_axis] = count
+                continue
+            if MARKDOWN_LIST_ENTRY.fullmatch(content):
+                raise PreflightError(
+                    f"{review_dir.name}/review.md finding entry must use the new "
+                    "'- [ID] <finding>' format"
+                )
+            raise PreflightError(
+                f"{review_dir.name}/review.md has an unrecognized nonblank line in "
+                f"the {current_axis.title()} section"
+            )
+        finding_id = finding.group("finding")
+        if current_axis in no_findings:
+            raise PreflightError(
+                f"{review_dir.name}/review.md has a finding after No findings."
+            )
         if any(finding_id in ids for ids in findings.values()):
             raise PreflightError(f"{review_dir.name}/review.md repeats finding ID {finding_id}")
         findings[current_axis].add(finding_id)
     for axis in AXES:
         if axis not in found_axes:
             raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} section")
+        if axis not in summaries:
+            raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} summary line")
+        if not findings[axis] and axis not in no_findings:
+            raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} No findings. line")
     return path, findings
 
 
