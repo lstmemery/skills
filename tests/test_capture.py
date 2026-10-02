@@ -100,6 +100,30 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(em['changed'], ['feature.txt', 'landing.txt'])
         self.assertIn('feature work', (branch / 'commits.txt').read_text())
 
+    def test_branch_capture_includes_runtime_credential_assignment_in_context(self):
+        sender = self.repo / 'skills-local/research-delivery/send_report_email.py'
+        sender.parent.mkdir(parents=True)
+        sender.write_text(
+            'def credentials_provider():\n'
+            '    return get_runtime_credentials()\n'
+            'user, password = credentials_provider()\n')
+        self.commit('add delivery helper context')
+        base = self.git('rev-parse', 'HEAD').strip()
+        self.git('checkout', '-b', 'review-target')
+        (self.repo / 'file.txt').write_text('unrelated branch change\n')
+        self.commit('change unrelated file')
+
+        capture, result = self.capture('branch', base)
+
+        manifest = json.loads((capture / 'manifest.json').read_text())
+        self.assertEqual(result['coverage'], 'complete')
+        self.assertEqual(manifest['changed'], ['file.txt'])
+        self.assertIn('skills-local/research-delivery/send_report_email.py', manifest['after'])
+        code, saved = self.invoke('read', '--capture', capture, '--path',
+                                  'skills-local/research-delivery/send_report_email.py')
+        self.assertEqual(code, 0, saved)
+        self.assertIn('user, password = credentials_provider()', saved['text'])
+
     def test_ref_movement_and_dirty_committed_checkout(self):
         out, _ = self.capture('since', self.initial)
         (self.repo / 'file.txt').write_text('dirty\n')

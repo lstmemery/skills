@@ -72,8 +72,11 @@ not consulted, and one false-positive class is suppressed: hex-shaped matches of
 its generic rule (digests, UUIDs, commit SHAs). A built-in rule set always runs
 alongside it: private-key PEM blocks, common token prefixes (`ghp_`,
 `github_pat_`, `sk-`, `xox…`, `AKIA…`, `glpat-`, `tk_`), and high-entropy
-assignments to names containing password/passwd/secret/token/api-key/access-key.
-Hex-shaped values and placeholders are not flagged by the built-in rules. If
+literal-like assignments to names containing password/passwd/secret/token/api-key/access-key.
+A candidate followed by an opening parenthesis is treated as a callable
+expression whose runtime result is assigned, not as a literal credential value.
+Direct high-entropy literal assignments remain blocked. Hex-shaped values and
+placeholders are not flagged by the built-in rules. If
 gitleaks is missing, the built-in rules still apply and the capture result says
 `unavailable` under `secret_scan`. If gitleaks is present but cannot run, times
 out, returns an unexpected status, or produces malformed output, capture fails
