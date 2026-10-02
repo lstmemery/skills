@@ -121,8 +121,10 @@ no-findings line (`No findings.`), or a summary line in the form
 match the entries in that axis, and `worst=none` is reserved for an empty axis.
 The preflight compares Markdown IDs with sidecar IDs per axis. Missing, extra,
 duplicate, differently placed IDs, headings, prose, and untagged finding entries
-block integration. Records produced before this format change cannot pass a
-preflight re-run; obtain a fresh independent review in the current format.
+block integration. Records that do not satisfy this grammar, including untagged
+findings, prose or heading findings, or missing summaries, fail closed and need
+a fresh independent review in the current format. Conformant records pass
+regardless of when they were written.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and
