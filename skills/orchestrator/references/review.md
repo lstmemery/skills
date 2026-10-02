@@ -97,23 +97,32 @@ and `spec_findings`, each matching its axis in the sidecar. A revision
 and `unfixed` equal to `0`. All count fields are required in their respective
 review type; a missing count is invalid.
 
-In `review.md`, put each finding on its own line under the matching axis using
-the same ID in this form:
+From this contract change on, every nonblank line in a Standards or Spec section
+of `review.md` must follow the axis grammar below. Put each finding on its own
+line under the matching axis with the same ID as the sidecar. A single level-one
+document title may precede the two axis sections; use no other headings or prose
+outside them.
 
 ```markdown
 ## Standards
 
-- [S1] **MAJOR · CONFIRMED** — Corrected and verified.
+- [S1] **MAJOR · CONFIRMED** — Missing validation for captured payloads.
+Summary: findings=1; worst=Missing payload verification.
 
 ## Spec
 
 No findings.
+Summary: findings=0; worst=none.
 ```
 
-The preflight compares the Markdown IDs with the sidecar IDs per axis. Missing,
-extra, duplicate, or differently placed IDs block integration. Finding list
-entries without an ID also block integration. An axis with no findings can say
-`No findings.` as plain text.
+Each line must be a stable-ID finding entry (`- [ID] <finding>`), the exact
+no-findings line (`No findings.`), or a summary line in the form
+`Summary: findings=<count>; worst=<description|none>.` The summary count must
+match the entries in that axis, and `worst=none` is reserved for an empty axis.
+The preflight compares Markdown IDs with sidecar IDs per axis. Missing, extra,
+duplicate, differently placed IDs, headings, prose, and untagged finding entries
+block integration. Records produced before this format change cannot pass a
+preflight re-run; obtain a fresh independent review in the current format.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and

@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -5,11 +6,15 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 CLI = SKILL_DIR / "scripts" / "integration-preflight.py"
 CAPTURE_CLI = SKILL_DIR.parent / "code-review" / "scripts" / "capture.py"
+PREFLIGHT_SPEC = importlib.util.spec_from_file_location("integration_preflight", CLI)
+PREFLIGHT = importlib.util.module_from_spec(PREFLIGHT_SPEC)
+PREFLIGHT_SPEC.loader.exec_module(PREFLIGHT)
 
 
 class IntegrationPreflightTests(unittest.TestCase):
@@ -128,8 +133,16 @@ class IntegrationPreflightTests(unittest.TestCase):
     @staticmethod
     def markdown_findings(findings, axis):
         if not findings:
-            return "No findings."
-        return "\n".join(f"- [{finding['id']}] Synthetic {axis} finding." for finding in findings)
+            entries = ["No findings."]
+            worst = "none"
+        else:
+            entries = [
+                f"- [{finding['id']}] Synthetic {axis} finding."
+                for finding in findings
+            ]
+            worst = f"Synthetic {axis} finding"
+        entries.append(f"Summary: findings={len(findings)}; worst={worst}.")
+        return "\n".join(entries)
 
     def create_capture(self, capture_dir, base, head):
         self.git("-C", str(self.repo), "switch", "--detach", head)
@@ -304,21 +317,135 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("capture payload verification failed", result.stdout)
 
+    def test_capture_verifier_requires_all_result_keys(self):
+        self.write_review()
+        review_dir = self.task_dir / "review"
+        capture_dir = review_dir / "capture"
+        manifest = json.loads((capture_dir / "manifest.json").read_text())
+        verification = {
+            "outcome": "verified",
+            "capture_id": manifest["capture_id"],
+            "coverage": "complete",
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(verification), "")
+
+        with patch.object(PREFLIGHT.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(
+                PREFLIGHT.PreflightError,
+                "capture verifier is missing required keys: gaps",
+            ):
+                PREFLIGHT.verify_capture_payload(review_dir, capture_dir, manifest)
+
     def test_markdown_finding_missing_from_sidecar_is_refused(self):
         self.write_review()
         review_path = self.task_dir / "review" / "review.md"
         review_path.write_text(
             "# Independent review\n\n"
             "## Standards\n\n"
-            "- [S1] MAJOR · CONFIRMED — Missing validation.\n\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n"
+            "Summary: findings=1; worst=Missing validation.\n\n"
             "## Spec\n\n"
             "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
         )
 
         result = self.command()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
+    def test_code_review_skill_format_passes(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
+        self.write_review(standards_findings=[finding])
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n"
+            "- [S1] **MAJOR · CONFIRMED** — Missing validation for captured payloads.\n"
+            "Summary: findings=1; worst=Missing payload verification.\n\n"
+            "## Spec\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "ready")
+
+    def test_markdown_prose_finding_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "The reviewer found a MAJOR validation issue.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unrecognized nonblank line in the Standards section", result.stdout)
+
+    def test_markdown_heading_finding_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "### S1 — MAJOR: Missing validation.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unrecognized nonblank line in the Standards section", result.stdout)
+
+    def test_other_heading_cannot_hide_a_finding_outside_axis_sections(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Additional findings\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n\n"
+            "## Spec\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unsupported level-two heading", result.stdout)
+
+    def test_markdown_summary_count_must_match_finding_entries(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "No findings.\n"
+            "Summary: findings=1; worst=Missing validation.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Standards summary count does not match Markdown findings", result.stdout)
 
     def test_unlabeled_markdown_finding_is_refused(self):
         self.write_review()
@@ -327,14 +454,16 @@ class IntegrationPreflightTests(unittest.TestCase):
             "# Independent review\n\n"
             "## Standards\n\n"
             "1. MAJOR · CONFIRMED — Missing validation.\n\n"
+            "Summary: findings=0; worst=none.\n\n"
             "## Spec\n\n"
             "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
         )
 
         result = self.command()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("finding entry lacks a stable ID", result.stdout)
+        self.assertIn("finding entry must use the new '- [ID] <finding>' format", result.stdout)
 
     def test_sidecar_finding_missing_from_markdown_is_refused(self):
         finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
@@ -343,9 +472,11 @@ class IntegrationPreflightTests(unittest.TestCase):
         review_path.write_text(
             "# Independent review\n\n"
             "## Standards\n\n"
-            "No findings.\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
             "## Spec\n\n"
             "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
         )
 
         result = self.command()
@@ -360,9 +491,11 @@ class IntegrationPreflightTests(unittest.TestCase):
         review_path.write_text(
             "# Independent review\n\n"
             "## Standards\n\n"
-            "No findings.\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
             "## Spec\n\n"
             "- [S1] MAJOR · CONFIRMED — Missing validation.\n"
+            "Summary: findings=1; worst=Missing validation.\n"
         )
 
         result = self.command()
