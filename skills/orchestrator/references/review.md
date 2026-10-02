@@ -47,6 +47,10 @@ followed by contiguous delta reviews; every capture in that chain must cover
 both axes. Missing, blocked, stale, ambiguous, or unresolved evidence refuses
 the entire batch. The preflight writes a ready or blocked JSON report under
 `RUN_DIR/integration-preflight/`; retain the report with the merge record.
+Each selected capture is checked with `code-review/scripts/capture.py verify`;
+the manifest, completion marker, source blobs, diff, and history must pass their
+recorded digest checks, and the verified capture ID and complete coverage must
+match the review records.
 
 ### Machine-readable review evidence
 
@@ -92,6 +96,24 @@ and `spec_findings`, each matching its axis in the sidecar. A revision
 `review-rN/` requires `new_findings` matching the total sidecar finding count
 and `unfixed` equal to `0`. All count fields are required in their respective
 review type; a missing count is invalid.
+
+In `review.md`, put each finding on its own line under the matching axis using
+the same ID in this form:
+
+```markdown
+## Standards
+
+- [S1] **MAJOR · CONFIRMED** — Corrected and verified.
+
+## Spec
+
+No findings.
+```
+
+The preflight compares the Markdown IDs with the sidecar IDs per axis. Missing,
+extra, duplicate, or differently placed IDs block integration. Finding list
+entries without an ID also block integration. An axis with no findings can say
+`No findings.` as plain text.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and

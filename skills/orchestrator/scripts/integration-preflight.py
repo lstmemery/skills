@@ -16,12 +16,15 @@ from pathlib import Path
 
 AXES = ("standards", "spec")
 EVIDENCE_NAME = "review-evidence.json"
+CAPTURE_VERIFIER = Path(__file__).resolve().parents[2] / "code-review" / "scripts" / "capture.py"
 FINDING_LINE = re.compile(
     r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
     r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
 )
 IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
+MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
+MARKDOWN_LIST_ENTRY = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S.*$")
 
 
 class PreflightError(ValueError):
@@ -223,6 +226,7 @@ def find_capture(review_dir, capture_id):
         raise PreflightError(f"{review_dir.name} capture has an invalid base SHA")
     if not isinstance(head, str) or not SHA.fullmatch(head):
         raise PreflightError(f"{review_dir.name} capture has an invalid head SHA")
+    verify_capture_payload(review_dir, manifest_path.parent, manifest)
     return {
         "base": base,
         "head": head,
@@ -233,6 +237,38 @@ def find_capture(review_dir, capture_id):
     }
 
 
+def verify_capture_payload(review_dir, capture_dir, manifest):
+    if not CAPTURE_VERIFIER.is_file():
+        raise PreflightError(f"{review_dir.name} capture verifier is unavailable")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(CAPTURE_VERIFIER), "verify", "--capture", str(capture_dir)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PreflightError(f"{review_dir.name} capture payload verification failed") from error
+    try:
+        verification = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise PreflightError(f"{review_dir.name} capture verifier returned invalid output") from error
+    if result.returncode != 0 or not isinstance(verification, dict):
+        outcome = verification.get("outcome") if isinstance(verification, dict) else None
+        raise PreflightError(
+            f"{review_dir.name} capture payload verification failed"
+            + (f" ({outcome})" if isinstance(outcome, str) else "")
+        )
+    if (
+        verification.get("outcome") != "verified"
+        or verification.get("capture_id") != manifest.get("capture_id")
+        or verification.get("coverage") != "complete"
+        or verification.get("gaps") != []
+    ):
+        raise PreflightError(f"{review_dir.name} capture verifier did not verify complete matching coverage")
+
+
 def review_markdown_has_axes(review_dir):
     path = review_dir / "review.md"
     try:
@@ -241,10 +277,47 @@ def review_markdown_has_axes(review_dir):
         raise PreflightError(f"missing review.md in {review_dir.name}") from error
     except OSError as error:
         raise PreflightError(f"cannot read review.md in {review_dir.name}") from error
+    findings = {axis: set() for axis in AXES}
+    found_axes = set()
+    current_axis = None
+    fence = None
+    for line in text.splitlines():
+        fence_marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence is not None:
+            if (
+                fence_marker is not None
+                and fence_marker.group(1)[0] == fence[0]
+                and len(fence_marker.group(1)) >= len(fence)
+            ):
+                fence = None
+            continue
+        if fence_marker is not None:
+            fence = fence_marker.group(1)
+            continue
+        heading = re.match(r"^\s*##\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            title = heading.group(1).strip().lower()
+            current_axis = title if title in AXES else None
+            if current_axis is not None:
+                found_axes.add(current_axis)
+            continue
+        finding = MARKDOWN_FINDING.fullmatch(line)
+        if finding is None:
+            if current_axis is not None and MARKDOWN_LIST_ENTRY.fullmatch(line):
+                raise PreflightError(
+                    f"{review_dir.name}/review.md finding entry lacks a stable ID"
+                )
+            continue
+        finding_id = finding.group("finding")
+        if current_axis is None:
+            raise PreflightError(f"{review_dir.name}/review.md has a finding outside an axis section")
+        if any(finding_id in ids for ids in findings.values()):
+            raise PreflightError(f"{review_dir.name}/review.md repeats finding ID {finding_id}")
+        findings[current_axis].add(finding_id)
     for axis in AXES:
-        if re.search(rf"^##\s+{axis}\s*$", text, re.IGNORECASE | re.MULTILINE) is None:
+        if axis not in found_axes:
             raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} section")
-    return path
+    return path, findings
 
 
 def review_records(task_dir, task_id, workers_path):
@@ -312,11 +385,12 @@ def review_records(task_dir, task_id, workers_path):
             done = load_json(done_path, "review done record")
             if str(done.get("task_id")) != str(task_id) or done.get("capture_id") != capture_id:
                 raise PreflightError(f"{review_dir.name}/done.json does not match its task and capture")
-            review_markdown = review_markdown_has_axes(review_dir)
+            review_markdown, markdown_findings = review_markdown_has_axes(review_dir)
             axes = evidence["axes"]
             if not isinstance(axes, dict) or set(axes) != set(AXES):
                 raise PreflightError(f"{review_dir.name} must record both Standards and Spec axes")
             finding_ids = set()
+            evidence_findings = {}
             finding_count = 0
             for axis in AXES:
                 axis_record = axes[axis]
@@ -325,6 +399,7 @@ def review_records(task_dir, task_id, workers_path):
                 findings = axis_record["findings"]
                 if axis_record["status"] != "complete" or not isinstance(findings, list):
                     raise PreflightError(f"{review_dir.name} {axis} review is incomplete")
+                axis_finding_ids = set()
                 for finding in findings:
                     if not isinstance(finding, dict) or set(finding) - {"id", "disposition", "reason"} or not {"id", "disposition"} <= set(finding):
                         raise PreflightError(f"{review_dir.name} has a malformed finding")
@@ -335,6 +410,7 @@ def review_records(task_dir, task_id, workers_path):
                     if finding_id in finding_ids:
                         raise PreflightError(f"{review_dir.name} repeats finding ID {finding_id}")
                     finding_ids.add(finding_id)
+                    axis_finding_ids.add(finding_id)
                     if disposition not in {"fixed", "rejected"}:
                         raise PreflightError(f"{review_dir.name}/{finding_id} has no terminal disposition")
                     reason = finding.get("reason", "")
@@ -343,6 +419,12 @@ def review_records(task_dir, task_id, workers_path):
                     if dispositions.get((review_dir.name, finding_id)) != disposition:
                         raise PreflightError(f"missing recorded disposition for {review_dir.name}/{finding_id}")
                     finding_count += 1
+                evidence_findings[axis] = axis_finding_ids
+            if markdown_findings != evidence_findings:
+                raise PreflightError(
+                    f"{review_dir.name}/review.md Markdown finding IDs disagree with "
+                    "review-evidence.json"
+                )
             if review_dir.name == "review":
                 standards_findings = done["standards_findings"]
                 spec_findings = done["spec_findings"]
