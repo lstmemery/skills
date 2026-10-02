@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,7 @@ import unittest
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 CLI = SKILL_DIR / "scripts" / "integration-preflight.py"
+CAPTURE_CLI = SKILL_DIR.parent / "code-review" / "scripts" / "capture.py"
 
 
 class IntegrationPreflightTests(unittest.TestCase):
@@ -77,25 +77,15 @@ class IntegrationPreflightTests(unittest.TestCase):
         reviewer="reviewer-1",
         standards_findings=None,
         spec_findings=None,
-        coverage="complete",
-        gaps=None,
         unfixed=0,
     ):
         standards_findings = standards_findings or []
         spec_findings = spec_findings or []
         review_dir = self.task_dir / name
         capture_dir = review_dir / "capture"
-        capture_dir.mkdir(parents=True)
-        capture_id = hashlib.sha256(f"{name}:{base or self.base}:{head or self.head}".encode()).hexdigest()
-        manifest = {
-            "capture_id": capture_id,
-            "base": base or self.base,
-            "head": head or self.head,
-            "coverage": coverage,
-            "gaps": gaps or [],
-        }
-        (capture_dir / "manifest.json").write_text(json.dumps(manifest) + "\n")
-        (capture_dir / "COMPLETE").write_text("synthetic complete capture\n")
+        review_dir.mkdir(parents=True)
+        capture = self.create_capture(capture_dir, base or self.base, head or self.head)
+        capture_id = capture["capture_id"]
         done = {"task_id": "task-1", "capture_id": capture_id}
         if name == "review":
             done["standards_findings"] = len(standards_findings)
@@ -105,11 +95,14 @@ class IntegrationPreflightTests(unittest.TestCase):
             if unfixed is not None:
                 done["unfixed"] = unfixed
         (review_dir / "done.json").write_text(json.dumps(done) + "\n")
+        standards_markdown = self.markdown_findings(standards_findings, "Standards")
+        spec_markdown = self.markdown_findings(spec_findings, "Spec")
         (review_dir / "review.md").write_text(
             "# Independent review\n\n## Standards\n\n"
-            + ("No findings.\n\n" if not standards_findings else "Findings recorded.\n\n")
-            + "## Spec\n\n"
-            + ("No findings.\n" if not spec_findings else "Findings recorded.\n")
+            + standards_markdown
+            + "\n\n## Spec\n\n"
+            + spec_markdown
+            + "\n"
         )
         evidence = {
             "schema_version": 1,
@@ -131,6 +124,39 @@ class IntegrationPreflightTests(unittest.TestCase):
         response_path = self.task_dir / "review-response.md"
         old = response_path.read_text() if response_path.exists() else "# Review response\n\n"
         response_path.write_text(old + "\n".join(dispositions) + ("\n" if dispositions else ""))
+
+    @staticmethod
+    def markdown_findings(findings, axis):
+        if not findings:
+            return "No findings."
+        return "\n".join(f"- [{finding['id']}] Synthetic {axis} finding." for finding in findings)
+
+    def create_capture(self, capture_dir, base, head):
+        self.git("-C", str(self.repo), "switch", "--detach", head)
+        try:
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(CAPTURE_CLI),
+                    "capture",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "since",
+                    "--base",
+                    base,
+                    "--out",
+                    str(capture_dir),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                self.fail(f"capture fixture generation failed: {result.stdout}{result.stderr}")
+            return json.loads(result.stdout)
+        finally:
+            self.git("-C", str(self.repo), "switch", "main")
 
     def write_workers(self, additional_rows=()):
         rows = [
@@ -183,6 +209,15 @@ class IntegrationPreflightTests(unittest.TestCase):
                     contents.replace("@BASE@", self.base).replace("@HEAD@", self.head),
                     encoding="utf-8",
                 )
+        review_dir = self.task_dir / "review"
+        capture_dir = review_dir / "capture"
+        shutil.rmtree(capture_dir)
+        capture = self.create_capture(capture_dir, self.base, self.head)
+        for record_name in ("done.json", "review-evidence.json"):
+            record_path = review_dir / record_name
+            record = json.loads(record_path.read_text())
+            record["capture_id"] = capture["capture_id"]
+            record_path.write_text(json.dumps(record) + "\n")
 
     def test_complete_independent_review_passes_and_is_recorded(self):
         self.install_review_fixture()
@@ -233,8 +268,110 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(report["outcome"], "blocked")
         self.assertEqual(report["candidates"][0]["head"], self.head)
 
+    def test_capture_without_payload_is_refused(self):
+        self.write_review()
+        capture_dir = self.task_dir / "review" / "capture"
+        for entry in capture_dir.iterdir():
+            if entry.name in {"manifest.json", "COMPLETE"}:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_modified_capture_payload_is_refused(self):
+        self.write_review()
+        diff_path = self.task_dir / "review" / "capture" / "diff.patch"
+        diff_path.write_bytes(diff_path.read_bytes() + b"tampered\n")
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_mismatched_capture_completion_marker_is_refused(self):
+        self.write_review()
+        complete_path = self.task_dir / "review" / "capture" / "COMPLETE"
+        complete_path.write_text("different capture ID\n")
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_markdown_finding_missing_from_sidecar_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
+    def test_unlabeled_markdown_finding_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "1. MAJOR · CONFIRMED — Missing validation.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("finding entry lacks a stable ID", result.stdout)
+
+    def test_sidecar_finding_missing_from_markdown_is_refused(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
+        self.write_review(standards_findings=[finding])
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "No findings.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
+    def test_finding_id_moved_to_the_wrong_axis_is_refused(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
+        self.write_review(standards_findings=[finding])
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "No findings.\n\n"
+            "## Spec\n\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
     def test_capture_of_a_different_base_or_head_is_stale(self):
-        self.write_review(base="f" * 40)
+        self.write_review(base=self.head)
 
         result = self.command()
 

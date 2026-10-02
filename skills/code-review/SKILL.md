@@ -74,6 +74,10 @@ or report its blocker; worker lifecycle state does not substitute for findings.
 
 Use separate `## Standards` and `## Spec` headings. Preserve each axis's findings
 verbatim or lightly cleaned; link any complete findings file beside its summary.
+For integration preflight, give every finding a stable ID and render it under
+its axis as `- [S1] <finding>`; use the same ID in the evidence sidecar and
+record `No findings.` as plain text for an empty axis. Finding list entries
+without IDs cannot be gated.
 Keep the axes separate without merging or reranking them. End with each axis's
 finding count and its own worst issue, or “none”; identify any skipped or blocked
 axis. Summary limits never discard findings.

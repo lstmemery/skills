@@ -2,8 +2,8 @@
 
 ## Standards
 
-1. Synthetic Standards finding.
+- [S1] Synthetic Standards finding.
 
 ## Spec
 
-1. Synthetic Spec finding.
+- [P1] Synthetic Spec finding.
