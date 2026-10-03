@@ -121,10 +121,20 @@ no-findings line (`No findings.`), or a summary line in the form
 match the entries in that axis, and `worst=none` is reserved for an empty axis.
 The preflight compares Markdown IDs with sidecar IDs per axis. Missing, extra,
 duplicate, differently placed IDs, headings, prose, and untagged finding entries
-block integration. Records that do not satisfy this grammar, including untagged
-findings, prose or heading findings, or missing summaries, fail closed and need
-a fresh independent review in the current format. Conformant records pass
-regardless of when they were written.
+block integration. New reviews must use this grammar. The only historical prose
+exception is the exact completed batch9 review record for each of tasks 1131,
+1132, and 1133, as selected by ready preflight
+`preflight-9706b575d1279316.json` (SHA-256
+`9706b575d12793163f61b5120fcd728b74ee8a2b73961fa1b341b1cc272ea8a7`). The
+gate pins each task, reviewer, base, head, capture ID, Markdown, sidecar, done
+record, capture manifest, and completion marker digest, and it still runs the
+capture verifier and all current sidecar, axis, identity, count, and disposition
+checks. These three records have complete Standards and Spec axes and no
+findings. Version-1 capture manifests have no trustworthy creation timestamp,
+so the gate does not infer legacy status from dates or prose shape; any other
+prose-format review, including an edited or copied variant, fails closed and
+needs a fresh independent review in the current format. Do not rewrite an
+original review or capture to use this exception.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and

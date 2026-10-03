@@ -391,6 +391,53 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("unrecognized nonblank line in the Standards section", result.stdout)
 
+    def test_fresh_prose_only_review_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "Scope: this is a fresh review with no findings.\n\n"
+            "## Standards\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unrecognized content outside its axis sections", result.stdout)
+
+    def test_legacy_prose_exception_is_exactly_pinned_to_three_prior_records(self):
+        allowlist = PREFLIGHT.LEGACY_PRECHANGE_REVIEWS
+        self.assertEqual(set(allowlist), {"1131", "1132", "1133"})
+        self.assertEqual(
+            PREFLIGHT.LEGACY_PRECEDENT["sha256"],
+            "9706b575d12793163f61b5120fcd728b74ee8a2b73961fa1b341b1cc272ea8a7",
+        )
+        for task_id, expected in allowlist.items():
+            with self.subTest(task_id=task_id):
+                self.assertTrue(PREFLIGHT.legacy_review_record_matches(task_id, expected))
+                forged = dict(expected)
+                forged["review_markdown_sha256"] = "0" * 64
+                self.assertFalse(PREFLIGHT.legacy_review_record_matches(task_id, forged))
+                self.assertFalse(PREFLIGHT.legacy_review_record_matches("fresh-task", expected))
+
+    def test_legacy_prose_requires_the_previously_ready_preflight_report(self):
+        task_id = "1132"
+        observed = PREFLIGHT.LEGACY_PRECHANGE_REVIEWS[task_id]
+        self.assertIsNone(
+            PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
+        )
+        report_dir = self.run_dir / "integration-preflight"
+        report_dir.mkdir()
+        (report_dir / PREFLIGHT.LEGACY_PRECEDENT["report"]).write_text("{}\n")
+        self.assertIsNone(
+            PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
+        )
+
     def test_markdown_heading_finding_is_refused(self):
         self.write_review()
         review_path = self.task_dir / "review" / "review.md"
