@@ -77,7 +77,8 @@ worker lifecycle state does not substitute for findings.
 ## 4. Present
 
 Use separate `## Standards` and `## Spec` headings. Preserve each axis's findings
-verbatim or lightly cleaned; link any complete findings file beside its summary.
+verbatim or lightly cleaned; link any complete findings file beside its summary
+in the review result/report; keep the link out of a gate-conformant `review.md`.
 An optional single `#` title may precede them; do not add other section headings
 or prose outside the two axis sections.
 For new reviews used by integration preflight, every nonblank line in either
