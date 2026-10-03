@@ -41,6 +41,116 @@ class WorkerRecordsTest(unittest.TestCase):
         record.update(overrides)
         return record
 
+    def test_schema_command_prints_the_result_contract_from_validator(self):
+        process = self.call("schema", "--format", "md")
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn('"path": "artifact-path"', process.stdout)
+        self.assertIn('"kind": "report"', process.stdout)
+        for value in ("`ready`", "`blocked`", "`failed`", "`passed`", "`not_run`"):
+            self.assertIn(value, process.stdout)
+        self.assertIn("candidate", process.stdout)
+        self.assertIn("--repository-changes", process.stdout)
+
+    def test_normalize_result_repairs_known_legacy_shapes_and_reports_changes(self):
+        source = self.root / "result.json"
+        output = self.root / "normalized.json"
+        source.write_text(json.dumps(self.make_result(
+            candidate=None,
+            outcome="complete",
+            checks=["unit tests"],
+            artifacts=[{"path": "report.md"}],
+        )))
+
+        process = self.call(
+            "normalize-result", source, "--output", output,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        original = json.loads(source.read_text())
+        self.assertIsNone(original["candidate"])
+        self.assertEqual(original["outcome"], "complete")
+        normalized = json.loads(output.read_text())
+        self.assertNotIn("candidate", normalized)
+        self.assertEqual(normalized["outcome"], "ready")
+        self.assertEqual(normalized["artifacts"], [{"path": "report.md", "kind": "artifact"}])
+        self.assertEqual(normalized["checks"][0]["name"], "unit tests")
+        self.assertEqual(normalized["checks"][0]["status"], "not_run")
+        audit = json.loads(process.stdout)
+        self.assertEqual(len(audit["changes"]), 4)
+        self.assertIn("candidate", audit["changes"][0]["path"])
+        self.assertEqual(audit["output"], str(output))
+
+        validated = self.call(
+            "validate-result", output,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+
+    def test_normalize_result_rejects_unrecognized_outcomes_without_writing_output(self):
+        source = self.root / "result.json"
+        output = self.root / "normalized.json"
+        source.write_text(json.dumps(self.make_result(outcome="done")))
+
+        process = self.call(
+            "normalize-result", source, "--output", output,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("outcome must be one of", process.stderr)
+        self.assertFalse(output.exists())
+
+    def test_normalize_result_rejects_malformed_outcome_without_traceback(self):
+        source = self.root / "result.json"
+        output = self.root / "normalized.json"
+        source.write_text(json.dumps(self.make_result(outcome=[])))
+
+        process = self.call(
+            "normalize-result", source, "--output", output,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("outcome", process.stderr)
+        self.assertNotIn("Traceback", process.stderr)
+        self.assertFalse(output.exists())
+
+    def test_normalize_result_still_requires_candidate_for_repository_changes(self):
+        source = self.root / "result.json"
+        output = self.root / "normalized.json"
+        source.write_text(json.dumps(self.make_result(candidate=None)))
+
+        process = self.call(
+            "normalize-result", source, "--output", output,
+            "--task-id", "worker-a", "--revision", "1", "--repository-changes",
+        )
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("candidate", process.stderr)
+        self.assertFalse(output.exists())
+
+    def test_normalize_result_preserves_already_valid_records(self):
+        source = self.root / "result.json"
+        output = self.root / "normalized.json"
+        record = self.make_result(candidate={
+            "repo": "example/project",
+            "branch": "feature/result-contract",
+            "base": "base-sha",
+            "head": "head-sha",
+        })
+        source.write_text(json.dumps(record))
+
+        process = self.call(
+            "normalize-result", source, "--output", output,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(json.loads(output.read_text()), record)
+        self.assertEqual(json.loads(process.stdout)["changes"], [])
+
     def write_roster(self, run_dir, workers):
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "workers.json").write_text(json.dumps({"workers": workers}))

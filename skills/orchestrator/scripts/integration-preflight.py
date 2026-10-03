@@ -16,12 +16,90 @@ from pathlib import Path
 
 AXES = ("standards", "spec")
 EVIDENCE_NAME = "review-evidence.json"
+CAPTURE_VERIFIER = Path(__file__).resolve().parents[2] / "code-review" / "scripts" / "capture.py"
+CAPTURE_VERIFICATION_KEYS = frozenset({"outcome", "capture_id", "coverage", "gaps"})
 FINDING_LINE = re.compile(
     r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
     r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
 )
 IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
+MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
+MARKDOWN_LIST_ENTRY = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S.*$")
+MARKDOWN_SUMMARY = re.compile(
+    r"^Summary: findings=(?P<count>0|[1-9][0-9]*); worst=(?P<worst>.+)\.$"
+)
+NO_FINDINGS_LINE = "No findings."
+
+# Version-1 captures have no trustworthy creation timestamp. The sole historical
+# prose exception is therefore pinned to the exact review records selected by
+# the previously-ready batch9 preflight below. Capture payloads are still
+# verified at use time, and every record field below must continue to match.
+LEGACY_PRECEDENT = {
+    "report": "preflight-9706b575d1279316.json",
+    "sha256": "9706b575d12793163f61b5120fcd728b74ee8a2b73961fa1b341b1cc272ea8a7",
+}
+# These fields occur in both the observed review pin and its precedent report
+# entry. Keep their comparison inventory in one place; only the observed pin
+# additionally records per-axis finding IDs.
+LEGACY_REVIEW_SHARED_FIELDS = (
+    "review_id",
+    "base",
+    "head",
+    "capture_id",
+    "author_identity",
+    "reviewer_identity",
+    "review_markdown_sha256",
+    "review_evidence_sha256",
+    "done_sha256",
+    "capture_manifest_sha256",
+    "capture_complete_sha256",
+)
+LEGACY_REVIEW_RECORD_FIELDS = (*LEGACY_REVIEW_SHARED_FIELDS, "finding_ids")
+LEGACY_PRECHANGE_REVIEWS = {
+    "1131": {
+        "review_id": "review",
+        "base": "f499c221c811a52d38c0c7fce7867e7fad6a1b66",
+        "head": "a04abcb8648feff4388f4ea01911467d99243913",
+        "capture_id": "15f9dd10725129432a9127ef0ae1971a959b01f6813f0d770dc814710a1f72b4",
+        "author_identity": "luna-b9-1131",
+        "reviewer_identity": "luna-rev-b9-1131",
+        "review_markdown_sha256": "cc9216db19a54acadcfce4d0e851047e19480136e09beb702f4cdca45977119c",
+        "review_evidence_sha256": "c045a1646f6718078cc312f94f67bf8c8fd4d62913741a211cdd1a8a538c67a4",
+        "done_sha256": "ad654a039db2767b0fce6ad79768c22a2beb2838154f3f9754487a1bb86517c4",
+        "capture_manifest_sha256": "4ec8a769b4612e4165f2f1dd7f03005b9ec6953c90585286de14ac283aec8e90",
+        "capture_complete_sha256": "43f71027bb8fb28eb545689dea27963b1b6dcaa264f47b0d87fdd540a20b2b94",
+        "finding_ids": {"standards": [], "spec": []},
+    },
+    "1132": {
+        "review_id": "review",
+        "base": "f499c221c811a52d38c0c7fce7867e7fad6a1b66",
+        "head": "c833ae969f8c25ba37b29a5237e0b38912dbf834",
+        "capture_id": "682443f118202ff06f713c5d698c0fca1e46a29644bbed5287b583e09e9aa7f0",
+        "author_identity": "luna-b9-1132",
+        "reviewer_identity": "luna-rev-b9-1132",
+        "review_markdown_sha256": "5873e5c51498ca38c0ca2e20031e1c1b090cb6d8fa17b45cc3807d03e560daac",
+        "review_evidence_sha256": "3f47fb960d0e5f0ef90905c03ce3d7e13e131c7a6df948ed38ffb4966a2ac19d",
+        "done_sha256": "c349a36c9afa7950a2a3401e649bb9a11ef7bc5feafe17836a88e63379c036ab",
+        "capture_manifest_sha256": "90afac994db11157ee7aed6385f22e58d86e2f999597ee756ad0e37b0118931b",
+        "capture_complete_sha256": "d02487e46e59f520ca8489a8994c47b69fc829440214da8ab06c889c019ed9aa",
+        "finding_ids": {"standards": [], "spec": []},
+    },
+    "1133": {
+        "review_id": "review",
+        "base": "f499c221c811a52d38c0c7fce7867e7fad6a1b66",
+        "head": "a608df624400f542e774889dd31f399147b7600a",
+        "capture_id": "33fe037532b26ed7dfb6f7b904767b34b4d73df6e79744bcae71df6a8ca28b94",
+        "author_identity": "luna-b9-1133",
+        "reviewer_identity": "luna-rev-b9-1133",
+        "review_markdown_sha256": "0cdbf111492255b753e675dd5fe9949cd84f5538c53ec5713f162551c65ba72d",
+        "review_evidence_sha256": "3839149ab20f4c77853aa0e84c0a08857e4f4b8aaed6bef74228282e79a3aaa3",
+        "done_sha256": "0725d48f9862d63b55f04a3c4e14970a740cdf460c16d646e87447e8417a29ac",
+        "capture_manifest_sha256": "19675c5c92980384f398cf5111437e37bceaae536cd2b46eab86e27d7f3196e2",
+        "capture_complete_sha256": "2053eea221d58c882a69f5eb01dbd5010e80f69c764b6a1c0cce03b6bde51a45",
+        "finding_ids": {"standards": [], "spec": []},
+    },
+}
 
 
 class PreflightError(ValueError):
@@ -223,6 +301,7 @@ def find_capture(review_dir, capture_id):
         raise PreflightError(f"{review_dir.name} capture has an invalid base SHA")
     if not isinstance(head, str) or not SHA.fullmatch(head):
         raise PreflightError(f"{review_dir.name} capture has an invalid head SHA")
+    verify_capture_payload(review_dir, manifest_path.parent, manifest)
     return {
         "base": base,
         "head": head,
@@ -233,7 +312,45 @@ def find_capture(review_dir, capture_id):
     }
 
 
-def review_markdown_has_axes(review_dir):
+def verify_capture_payload(review_dir, capture_dir, manifest):
+    if not CAPTURE_VERIFIER.is_file():
+        raise PreflightError(f"{review_dir.name} capture verifier is unavailable")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(CAPTURE_VERIFIER), "verify", "--capture", str(capture_dir)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PreflightError(f"{review_dir.name} capture payload verification failed") from error
+    try:
+        verification = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise PreflightError(f"{review_dir.name} capture verifier returned invalid output") from error
+    if not isinstance(verification, dict):
+        raise PreflightError(f"{review_dir.name} capture verifier returned a non-object result")
+    if result.returncode != 0:
+        raise PreflightError(
+            f"{review_dir.name} capture payload verification failed (exit {result.returncode})"
+        )
+    missing = CAPTURE_VERIFICATION_KEYS - verification.keys()
+    if missing:
+        raise PreflightError(
+            f"{review_dir.name} capture verifier is missing required keys: "
+            + ", ".join(sorted(missing))
+        )
+    if (
+        verification["outcome"] != "verified"
+        or verification["capture_id"] != manifest["capture_id"]
+        or verification["coverage"] != "complete"
+        or verification["gaps"] != []
+    ):
+        raise PreflightError(f"{review_dir.name} capture verifier did not verify complete matching coverage")
+
+
+def parse_review_markdown(review_dir):
     path = review_dir / "review.md"
     try:
         text = path.read_text(encoding="utf-8")
@@ -241,10 +358,157 @@ def review_markdown_has_axes(review_dir):
         raise PreflightError(f"missing review.md in {review_dir.name}") from error
     except OSError as error:
         raise PreflightError(f"cannot read review.md in {review_dir.name}") from error
+    findings = {axis: set() for axis in AXES}
+    found_axes = set()
+    no_findings = set()
+    summaries = {}
+    current_axis = None
+    title_seen = False
+    for line in text.splitlines():
+        content = line.strip()
+        if not content:
+            continue
+        heading = re.match(r"^##\s+(.+?)\s*#*\s*$", content)
+        if heading:
+            title = heading.group(1).strip().lower()
+            if title not in AXES:
+                raise PreflightError(
+                    f"{review_dir.name}/review.md has an unsupported level-two heading; "
+                    "only Standards and Spec are allowed"
+                )
+            current_axis = title
+            if current_axis in found_axes:
+                raise PreflightError(
+                    f"{review_dir.name}/review.md repeats the {current_axis.title()} section"
+                )
+            found_axes.add(current_axis)
+            continue
+        if current_axis is None:
+            if not found_axes and not title_seen and re.fullmatch(r"#\s+\S.*", content):
+                title_seen = True
+                continue
+            raise PreflightError(
+                f"{review_dir.name}/review.md has unrecognized content outside its axis sections"
+            )
+        if current_axis in summaries:
+            raise PreflightError(
+                f"{review_dir.name}/review.md summary must be the last nonblank line in "
+                f"the {current_axis.title()} section"
+            )
+        finding = MARKDOWN_FINDING.fullmatch(content)
+        if finding is None:
+            if content == NO_FINDINGS_LINE:
+                if current_axis in no_findings or findings[current_axis]:
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md has an inconsistent No findings. line"
+                    )
+                no_findings.add(current_axis)
+                continue
+            summary = MARKDOWN_SUMMARY.fullmatch(content)
+            if summary is not None:
+                count = int(summary.group("count"))
+                worst = summary.group("worst").strip()
+                actual_count = len(findings[current_axis])
+                if not worst:
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md {current_axis.title()} summary has no worst-issue value"
+                    )
+                if count != actual_count:
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md {current_axis.title()} summary count "
+                        "does not match Markdown findings"
+                    )
+                if count == 0 and (current_axis not in no_findings or worst != "none"):
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md empty {current_axis.title()} summary "
+                        "requires No findings. and worst=none"
+                    )
+                if count > 0 and (current_axis in no_findings or worst.lower() == "none"):
+                    raise PreflightError(
+                        f"{review_dir.name}/review.md nonempty {current_axis.title()} summary "
+                        "requires a worst-issue description"
+                    )
+                summaries[current_axis] = count
+                continue
+            if MARKDOWN_LIST_ENTRY.fullmatch(content):
+                raise PreflightError(
+                    f"{review_dir.name}/review.md finding entry must use the new "
+                    "'- [ID] <finding>' format"
+                )
+            raise PreflightError(
+                f"{review_dir.name}/review.md has an unrecognized nonblank line in "
+                f"the {current_axis.title()} section"
+            )
+        finding_id = finding.group("finding")
+        if current_axis in no_findings:
+            raise PreflightError(
+                f"{review_dir.name}/review.md has a finding after No findings."
+            )
+        if any(finding_id in ids for ids in findings.values()):
+            raise PreflightError(f"{review_dir.name}/review.md repeats finding ID {finding_id}")
+        findings[current_axis].add(finding_id)
     for axis in AXES:
-        if re.search(rf"^##\s+{axis}\s*$", text, re.IGNORECASE | re.MULTILINE) is None:
+        if axis not in found_axes:
             raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} section")
-    return path
+        if axis not in summaries:
+            raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} summary line")
+        if not findings[axis] and axis not in no_findings:
+            raise PreflightError(f"{review_dir.name}/review.md lacks a {axis.title()} No findings. line")
+    return path, findings
+
+
+def legacy_review_record_matches(task_id, observed):
+    expected = LEGACY_PRECHANGE_REVIEWS.get(str(task_id))
+    fields = set(LEGACY_REVIEW_RECORD_FIELDS)
+    return (
+        expected is not None
+        and set(expected) == fields
+        and set(observed) == fields
+        and all(observed[field] == expected[field] for field in LEGACY_REVIEW_RECORD_FIELDS)
+    )
+
+
+def legacy_review_precedent(task_id, observed, run_dir):
+    """Return the precedent digest only for exact records in the ready batch."""
+    if not legacy_review_record_matches(task_id, observed):
+        return None
+
+    precedent_path = run_dir / "integration-preflight" / LEGACY_PRECEDENT["report"]
+    try:
+        if sha256_file(precedent_path) != LEGACY_PRECEDENT["sha256"]:
+            return None
+        report = load_json(precedent_path, "legacy preflight report")
+    except (OSError, PreflightError):
+        return None
+    if report.get("outcome") != "ready":
+        return None
+    matching_candidates = [
+        candidate
+        for candidate in report.get("candidates", [])
+        if isinstance(candidate, dict)
+        and str(candidate.get("task_id")) == str(task_id)
+        and candidate.get("status") == "ready"
+    ]
+    if len(matching_candidates) != 1:
+        return None
+    reviews = matching_candidates[0].get("reviews")
+    if not isinstance(reviews, list):
+        return None
+    expected = LEGACY_PRECHANGE_REVIEWS[str(task_id)]
+    matching_reviews = [
+        review
+        for review in reviews
+        if isinstance(review, dict)
+        and all(
+            review.get(field) == expected[field]
+            for field in LEGACY_REVIEW_SHARED_FIELDS
+        )
+        and review.get("review_path") == expected["review_id"]
+        and review.get("finding_count") == 0
+    ]
+    if len(matching_reviews) != 1:
+        return None
+    return LEGACY_PRECEDENT["sha256"]
 
 
 def review_records(task_dir, task_id, workers_path):
@@ -312,11 +576,20 @@ def review_records(task_dir, task_id, workers_path):
             done = load_json(done_path, "review done record")
             if str(done.get("task_id")) != str(task_id) or done.get("capture_id") != capture_id:
                 raise PreflightError(f"{review_dir.name}/done.json does not match its task and capture")
-            review_markdown = review_markdown_has_axes(review_dir)
+            review_markdown = review_dir / "review.md"
+            try:
+                review_markdown, markdown_findings = parse_review_markdown(review_dir)
+                markdown_compatibility = "strict"
+                markdown_parse_error = None
+            except PreflightError as error:
+                markdown_findings = None
+                markdown_compatibility = None
+                markdown_parse_error = error
             axes = evidence["axes"]
             if not isinstance(axes, dict) or set(axes) != set(AXES):
                 raise PreflightError(f"{review_dir.name} must record both Standards and Spec axes")
             finding_ids = set()
+            evidence_findings = {}
             finding_count = 0
             for axis in AXES:
                 axis_record = axes[axis]
@@ -325,6 +598,7 @@ def review_records(task_dir, task_id, workers_path):
                 findings = axis_record["findings"]
                 if axis_record["status"] != "complete" or not isinstance(findings, list):
                     raise PreflightError(f"{review_dir.name} {axis} review is incomplete")
+                axis_finding_ids = set()
                 for finding in findings:
                     if not isinstance(finding, dict) or set(finding) - {"id", "disposition", "reason"} or not {"id", "disposition"} <= set(finding):
                         raise PreflightError(f"{review_dir.name} has a malformed finding")
@@ -335,6 +609,7 @@ def review_records(task_dir, task_id, workers_path):
                     if finding_id in finding_ids:
                         raise PreflightError(f"{review_dir.name} repeats finding ID {finding_id}")
                     finding_ids.add(finding_id)
+                    axis_finding_ids.add(finding_id)
                     if disposition not in {"fixed", "rejected"}:
                         raise PreflightError(f"{review_dir.name}/{finding_id} has no terminal disposition")
                     reason = finding.get("reason", "")
@@ -343,6 +618,36 @@ def review_records(task_dir, task_id, workers_path):
                     if dispositions.get((review_dir.name, finding_id)) != disposition:
                         raise PreflightError(f"missing recorded disposition for {review_dir.name}/{finding_id}")
                     finding_count += 1
+                evidence_findings[axis] = axis_finding_ids
+            legacy_precedent_sha256 = None
+            if markdown_findings is None:
+                legacy_observed = {
+                    "review_id": review_dir.name,
+                    "base": capture["base"],
+                    "head": capture["head"],
+                    "capture_id": capture_id,
+                    "author_identity": author,
+                    "reviewer_identity": reviewer,
+                    "review_markdown_sha256": sha256_file(review_markdown),
+                    "review_evidence_sha256": sha256_file(evidence_path),
+                    "done_sha256": sha256_file(done_path),
+                    "capture_manifest_sha256": capture["manifest_sha256"],
+                    "capture_complete_sha256": capture["complete_sha256"],
+                    "finding_ids": {
+                        axis: sorted(evidence_findings[axis]) for axis in AXES
+                    },
+                }
+                legacy_precedent_sha256 = legacy_review_precedent(
+                    task_id, legacy_observed, workers_path.parent
+                )
+                if legacy_precedent_sha256 is None:
+                    raise markdown_parse_error
+                markdown_compatibility = "allowlisted-pre-change"
+            elif markdown_findings != evidence_findings:
+                raise PreflightError(
+                    f"{review_dir.name}/review.md Markdown finding IDs disagree with "
+                    "review-evidence.json"
+                )
             if review_dir.name == "review":
                 standards_findings = done["standards_findings"]
                 spec_findings = done["spec_findings"]
@@ -378,8 +683,11 @@ def review_records(task_dir, task_id, workers_path):
                     "capture_manifest_sha256": capture["manifest_sha256"],
                     "capture_complete_sha256": capture["complete_sha256"],
                     "finding_count": finding_count,
+                    "markdown_compatibility": markdown_compatibility,
                 }
             )
+            if legacy_precedent_sha256 is not None:
+                records[-1]["legacy_precedent_sha256"] = legacy_precedent_sha256
         except (KeyError, OSError, PreflightError, TypeError) as error:
             diagnostics.append(f"{review_dir.name}: {error}")
     return records, diagnostics

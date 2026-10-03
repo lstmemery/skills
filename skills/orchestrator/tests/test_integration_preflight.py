@@ -1,4 +1,4 @@
-import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -6,10 +6,15 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 CLI = SKILL_DIR / "scripts" / "integration-preflight.py"
+CAPTURE_CLI = SKILL_DIR.parent / "code-review" / "scripts" / "capture.py"
+PREFLIGHT_SPEC = importlib.util.spec_from_file_location("integration_preflight", CLI)
+PREFLIGHT = importlib.util.module_from_spec(PREFLIGHT_SPEC)
+PREFLIGHT_SPEC.loader.exec_module(PREFLIGHT)
 
 
 class IntegrationPreflightTests(unittest.TestCase):
@@ -77,25 +82,15 @@ class IntegrationPreflightTests(unittest.TestCase):
         reviewer="reviewer-1",
         standards_findings=None,
         spec_findings=None,
-        coverage="complete",
-        gaps=None,
         unfixed=0,
     ):
         standards_findings = standards_findings or []
         spec_findings = spec_findings or []
         review_dir = self.task_dir / name
         capture_dir = review_dir / "capture"
-        capture_dir.mkdir(parents=True)
-        capture_id = hashlib.sha256(f"{name}:{base or self.base}:{head or self.head}".encode()).hexdigest()
-        manifest = {
-            "capture_id": capture_id,
-            "base": base or self.base,
-            "head": head or self.head,
-            "coverage": coverage,
-            "gaps": gaps or [],
-        }
-        (capture_dir / "manifest.json").write_text(json.dumps(manifest) + "\n")
-        (capture_dir / "COMPLETE").write_text("synthetic complete capture\n")
+        review_dir.mkdir(parents=True)
+        capture = self.create_capture(capture_dir, base or self.base, head or self.head)
+        capture_id = capture["capture_id"]
         done = {"task_id": "task-1", "capture_id": capture_id}
         if name == "review":
             done["standards_findings"] = len(standards_findings)
@@ -105,11 +100,14 @@ class IntegrationPreflightTests(unittest.TestCase):
             if unfixed is not None:
                 done["unfixed"] = unfixed
         (review_dir / "done.json").write_text(json.dumps(done) + "\n")
+        standards_markdown = self.markdown_findings(standards_findings, "Standards")
+        spec_markdown = self.markdown_findings(spec_findings, "Spec")
         (review_dir / "review.md").write_text(
             "# Independent review\n\n## Standards\n\n"
-            + ("No findings.\n\n" if not standards_findings else "Findings recorded.\n\n")
-            + "## Spec\n\n"
-            + ("No findings.\n" if not spec_findings else "Findings recorded.\n")
+            + standards_markdown
+            + "\n\n## Spec\n\n"
+            + spec_markdown
+            + "\n"
         )
         evidence = {
             "schema_version": 1,
@@ -131,6 +129,47 @@ class IntegrationPreflightTests(unittest.TestCase):
         response_path = self.task_dir / "review-response.md"
         old = response_path.read_text() if response_path.exists() else "# Review response\n\n"
         response_path.write_text(old + "\n".join(dispositions) + ("\n" if dispositions else ""))
+
+    @staticmethod
+    def markdown_findings(findings, axis):
+        if not findings:
+            entries = ["No findings."]
+            worst = "none"
+        else:
+            entries = [
+                f"- [{finding['id']}] Synthetic {axis} finding."
+                for finding in findings
+            ]
+            worst = f"Synthetic {axis} finding"
+        entries.append(f"Summary: findings={len(findings)}; worst={worst}.")
+        return "\n".join(entries)
+
+    def create_capture(self, capture_dir, base, head):
+        self.git("-C", str(self.repo), "switch", "--detach", head)
+        try:
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(CAPTURE_CLI),
+                    "capture",
+                    "--repo",
+                    str(self.repo),
+                    "--mode",
+                    "since",
+                    "--base",
+                    base,
+                    "--out",
+                    str(capture_dir),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                self.fail(f"capture fixture generation failed: {result.stdout}{result.stderr}")
+            return json.loads(result.stdout)
+        finally:
+            self.git("-C", str(self.repo), "switch", "main")
 
     def write_workers(self, additional_rows=()):
         rows = [
@@ -183,6 +222,15 @@ class IntegrationPreflightTests(unittest.TestCase):
                     contents.replace("@BASE@", self.base).replace("@HEAD@", self.head),
                     encoding="utf-8",
                 )
+        review_dir = self.task_dir / "review"
+        capture_dir = review_dir / "capture"
+        shutil.rmtree(capture_dir)
+        capture = self.create_capture(capture_dir, self.base, self.head)
+        for record_name in ("done.json", "review-evidence.json"):
+            record_path = review_dir / record_name
+            record = json.loads(record_path.read_text())
+            record["capture_id"] = capture["capture_id"]
+            record_path.write_text(json.dumps(record) + "\n")
 
     def test_complete_independent_review_passes_and_is_recorded(self):
         self.install_review_fixture()
@@ -233,8 +281,507 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(report["outcome"], "blocked")
         self.assertEqual(report["candidates"][0]["head"], self.head)
 
+    def test_capture_without_payload_is_refused(self):
+        self.write_review()
+        capture_dir = self.task_dir / "review" / "capture"
+        for entry in capture_dir.iterdir():
+            if entry.name in {"manifest.json", "COMPLETE"}:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_modified_capture_payload_is_refused(self):
+        self.write_review()
+        diff_path = self.task_dir / "review" / "capture" / "diff.patch"
+        diff_path.write_bytes(diff_path.read_bytes() + b"tampered\n")
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_mismatched_capture_completion_marker_is_refused(self):
+        self.write_review()
+        complete_path = self.task_dir / "review" / "capture" / "COMPLETE"
+        complete_path.write_text("different capture ID\n")
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_capture_verifier_requires_all_result_keys(self):
+        self.write_review()
+        review_dir = self.task_dir / "review"
+        capture_dir = review_dir / "capture"
+        manifest = json.loads((capture_dir / "manifest.json").read_text())
+        verification = {
+            "outcome": "verified",
+            "capture_id": manifest["capture_id"],
+            "coverage": "complete",
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(verification), "")
+
+        with patch.object(PREFLIGHT.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(
+                PREFLIGHT.PreflightError,
+                "capture verifier is missing required keys: gaps",
+            ):
+                PREFLIGHT.verify_capture_payload(review_dir, capture_dir, manifest)
+
+    def test_capture_verifier_rejects_result_mismatches(self):
+        self.write_review()
+        review_dir = self.task_dir / "review"
+        capture_dir = review_dir / "capture"
+        manifest = json.loads((capture_dir / "manifest.json").read_text())
+        valid = {
+            "outcome": "verified",
+            "capture_id": manifest["capture_id"],
+            "coverage": "complete",
+            "gaps": [],
+        }
+        mismatches = [
+            ("outcome", {**valid, "outcome": "failed"}),
+            ("capture ID", {**valid, "capture_id": "different-capture"}),
+            ("coverage", {**valid, "coverage": "partial"}),
+            ("gaps", {**valid, "gaps": ["missing source"]}),
+        ]
+
+        for name, verification in mismatches:
+            with self.subTest(name=name):
+                completed = subprocess.CompletedProcess([], 0, json.dumps(verification), "")
+                with patch.object(PREFLIGHT.subprocess, "run", return_value=completed):
+                    with self.assertRaisesRegex(
+                        PREFLIGHT.PreflightError,
+                        "capture verifier did not verify complete matching coverage",
+                    ):
+                        PREFLIGHT.verify_capture_payload(review_dir, capture_dir, manifest)
+
+    def test_markdown_finding_missing_from_sidecar_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n"
+            "Summary: findings=1; worst=Missing validation.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
+    def test_code_review_skill_format_passes(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
+        self.write_review(standards_findings=[finding])
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n"
+            "- [S1] **MAJOR · CONFIRMED** — Missing validation for captured payloads.\n"
+            "Summary: findings=1; worst=Missing payload verification.\n\n"
+            "## Spec\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "ready")
+
+    def test_markdown_prose_finding_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "The reviewer found a MAJOR validation issue.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unrecognized nonblank line in the Standards section", result.stdout)
+
+    def test_fresh_prose_only_review_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "Scope: this is a fresh review with no findings.\n\n"
+            "## Standards\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unrecognized content outside its axis sections", result.stdout)
+
+    def test_legacy_prose_exception_is_exactly_pinned_to_three_prior_records(self):
+        allowlist = PREFLIGHT.LEGACY_PRECHANGE_REVIEWS
+        self.assertEqual(set(allowlist), {"1131", "1132", "1133"})
+        self.assertEqual(
+            PREFLIGHT.LEGACY_PRECEDENT["sha256"],
+            "9706b575d12793163f61b5120fcd728b74ee8a2b73961fa1b341b1cc272ea8a7",
+        )
+        for task_id, expected in allowlist.items():
+            with self.subTest(task_id=task_id):
+                self.assertEqual(
+                    set(expected),
+                    set(PREFLIGHT.LEGACY_REVIEW_RECORD_FIELDS),
+                )
+                self.assertTrue(PREFLIGHT.legacy_review_record_matches(task_id, expected))
+                forged = dict(expected)
+                forged["review_markdown_sha256"] = "0" * 64
+                self.assertFalse(PREFLIGHT.legacy_review_record_matches(task_id, forged))
+                self.assertFalse(PREFLIGHT.legacy_review_record_matches("fresh-task", expected))
+
+    def test_legacy_prose_requires_the_previously_ready_preflight_report(self):
+        task_id = "1132"
+        observed = PREFLIGHT.LEGACY_PRECHANGE_REVIEWS[task_id]
+        self.assertIsNone(
+            PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
+        )
+        report_dir = self.run_dir / "integration-preflight"
+        report_dir.mkdir()
+        (report_dir / PREFLIGHT.LEGACY_PRECEDENT["report"]).write_text("{}\n")
+        self.assertIsNone(
+            PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
+        )
+
+    def test_legacy_precedent_refuses_nonmatching_synthetic_reports(self):
+        task_id = "task-1"
+        observed = {
+            field: f"synthetic-{field}"
+            for field in PREFLIGHT.LEGACY_REVIEW_RECORD_FIELDS
+        }
+        observed["finding_ids"] = {axis: [] for axis in PREFLIGHT.AXES}
+
+        def precedent_review():
+            review = {
+                field: observed[field]
+                for field in PREFLIGHT.LEGACY_REVIEW_SHARED_FIELDS
+            }
+            review.update({"review_path": observed["review_id"], "finding_count": 0})
+            return review
+
+        def ready_candidate(reviews):
+            return {"task_id": task_id, "status": "ready", "reviews": reviews}
+
+        def precedent(report_payload, sha256=None):
+            report_dir = self.run_dir / "integration-preflight"
+            report_dir.mkdir(exist_ok=True)
+            report_path = report_dir / "synthetic-precedent.json"
+            report_path.write_text(json.dumps(report_payload) + "\n")
+            return {
+                "report": report_path.name,
+                "sha256": sha256 or PREFLIGHT.sha256_file(report_path),
+            }
+
+        def refused(precedent):
+            with (
+                patch.object(PREFLIGHT, "LEGACY_PRECHANGE_REVIEWS", {task_id: observed}),
+                patch.object(PREFLIGHT, "LEGACY_PRECEDENT", precedent),
+            ):
+                return PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
+
+        cases = {
+            "non-ready outcome": {
+                "outcome": "blocked",
+                "candidates": [ready_candidate([precedent_review()])],
+            },
+            "zero matching ready candidates": {"outcome": "ready", "candidates": []},
+            "duplicate matching ready candidates": {
+                "outcome": "ready",
+                "candidates": [
+                    ready_candidate([precedent_review()]),
+                    ready_candidate([precedent_review()]),
+                ],
+            },
+            "zero matching precedent reviews": {
+                "outcome": "ready",
+                "candidates": [ready_candidate([])],
+            },
+            "multiple matching precedent reviews": {
+                "outcome": "ready",
+                "candidates": [
+                    ready_candidate([precedent_review(), precedent_review()])
+                ],
+            },
+        }
+        for name, report_payload in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(refused(precedent(report_payload)))
+
+        matching_report = {
+            "outcome": "ready",
+            "candidates": [ready_candidate([precedent_review()])],
+        }
+        control = precedent(matching_report)
+        self.assertEqual(refused(control), control["sha256"])
+        report_path = self.run_dir / "integration-preflight" / control["report"]
+        tampered = {"report": control["report"], "sha256": control["sha256"]}
+        report_path.write_text(json.dumps(matching_report, indent=2) + "\n")
+        self.assertNotEqual(PREFLIGHT.sha256_file(report_path), tampered["sha256"])
+        self.assertIsNone(refused(tampered))
+
+    def test_allowlisted_prechange_review_yields_ready_record_with_synthetic_pin(self):
+        self.write_review()
+        review_dir = self.task_dir / "review"
+        review_path = review_dir / "review.md"
+        review_path.write_text(
+            "Independent synthetic review. Both Standards and Spec axes are complete; "
+            "neither found an issue.\n"
+        )
+        evidence_path = review_dir / "review-evidence.json"
+        done_path = review_dir / "done.json"
+        evidence = json.loads(evidence_path.read_text())
+        capture = PREFLIGHT.find_capture(review_dir, evidence["capture_id"])
+        observed = {
+            "review_id": review_dir.name,
+            "base": capture["base"],
+            "head": capture["head"],
+            "capture_id": evidence["capture_id"],
+            "author_identity": evidence["author_identity"],
+            "reviewer_identity": evidence["reviewer_identity"],
+            "review_markdown_sha256": PREFLIGHT.sha256_file(review_path),
+            "review_evidence_sha256": PREFLIGHT.sha256_file(evidence_path),
+            "done_sha256": PREFLIGHT.sha256_file(done_path),
+            "capture_manifest_sha256": capture["manifest_sha256"],
+            "capture_complete_sha256": capture["complete_sha256"],
+            "finding_ids": {axis: [] for axis in PREFLIGHT.AXES},
+        }
+        precedent_review = {
+            field: observed[field]
+            for field in PREFLIGHT.LEGACY_REVIEW_SHARED_FIELDS
+        }
+        precedent_review.update({"review_path": review_dir.name, "finding_count": 0})
+        precedent_report = {
+            "outcome": "ready",
+            "candidates": [
+                {
+                    "task_id": "task-1",
+                    "status": "ready",
+                    "reviews": [precedent_review],
+                }
+            ],
+        }
+        report_dir = self.run_dir / "integration-preflight"
+        report_dir.mkdir()
+        report_path = report_dir / "synthetic-precedent.json"
+        report_path.write_text(json.dumps(precedent_report) + "\n")
+        precedent = {
+            "report": report_path.name,
+            "sha256": PREFLIGHT.sha256_file(report_path),
+        }
+
+        with (
+            patch.object(PREFLIGHT, "LEGACY_PRECHANGE_REVIEWS", {"task-1": observed}),
+            patch.object(PREFLIGHT, "LEGACY_PRECEDENT", precedent),
+        ):
+            records, diagnostics = PREFLIGHT.review_records(
+                self.task_dir,
+                "task-1",
+                self.run_dir / "workers.txt",
+            )
+
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["markdown_compatibility"], "allowlisted-pre-change")
+        self.assertEqual(records[0]["legacy_precedent_sha256"], precedent["sha256"])
+        self.assertEqual(records[0]["finding_count"], 0)
+
+    def test_markdown_heading_finding_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "### S1 — MAJOR: Missing validation.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unrecognized nonblank line in the Standards section", result.stdout)
+
+    def test_parser_refuses_specific_malformed_review_branches(self):
+        review_dir = self.task_dir / "review"
+        review_dir.mkdir()
+        review_path = review_dir / "review.md"
+        valid_empty_standards = "## Standards\nNo findings.\nSummary: findings=0; worst=none.\n"
+        valid_empty_spec = "## Spec\nNo findings.\nSummary: findings=0; worst=none.\n"
+        cases = {
+            "repeated axis section": (
+                valid_empty_standards + "\n## Standards\n",
+                "repeats the Standards section",
+            ),
+            "duplicate finding ID across axes": (
+                "## Standards\n- [S1] Finding.\nSummary: findings=1; worst=Finding.\n\n"
+                "## Spec\n- [S1] Duplicate finding.\n",
+                "repeats finding ID S1",
+            ),
+            "finding after No findings": (
+                "## Standards\nNo findings.\n- [S1] Finding.\n",
+                "has a finding after No findings.",
+            ),
+            "summary not last": (
+                valid_empty_standards + "Unexpected trailing text.\n",
+                "summary must be the last nonblank line in the Standards section",
+            ),
+            "missing summary": (
+                "## Standards\nNo findings.\n\n" + valid_empty_spec,
+                "lacks a Standards summary line",
+            ),
+            "empty axis without No findings": (
+                "## Standards\nSummary: findings=0; worst=none.\n",
+                "empty Standards summary requires No findings. and worst=none",
+            ),
+            "worst none with finding": (
+                "## Standards\n- [S1] Finding.\nSummary: findings=1; worst=none.\n",
+                "nonempty Standards summary requires a worst-issue description",
+            ),
+            "worst None variant with finding": (
+                "## Standards\n- [S1] Finding.\nSummary: findings=1; worst=None.\n",
+                "nonempty Standards summary requires a worst-issue description",
+            ),
+            "second title": (
+                "# Independent review\n# Extra title\n" + valid_empty_standards,
+                "unrecognized content outside its axis sections",
+            ),
+            "content before title": (
+                "Introductory text.\n# Independent review\n" + valid_empty_standards,
+                "unrecognized content outside its axis sections",
+            ),
+        }
+
+        for name, (markdown, diagnostic) in cases.items():
+            with self.subTest(name=name):
+                review_path.write_text(markdown)
+                with self.assertRaisesRegex(PREFLIGHT.PreflightError, diagnostic):
+                    PREFLIGHT.parse_review_markdown(review_dir)
+
+    def test_other_heading_cannot_hide_a_finding_outside_axis_sections(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Additional findings\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n\n"
+            "## Spec\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unsupported level-two heading", result.stdout)
+
+    def test_markdown_summary_count_must_match_finding_entries(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "No findings.\n"
+            "Summary: findings=1; worst=Missing validation.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Standards summary count does not match Markdown findings", result.stdout)
+
+    def test_unlabeled_markdown_finding_is_refused(self):
+        self.write_review()
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "1. MAJOR · CONFIRMED — Missing validation.\n\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("finding entry must use the new '- [ID] <finding>' format", result.stdout)
+
+    def test_sidecar_finding_missing_from_markdown_is_refused(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
+        self.write_review(standards_findings=[finding])
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
+    def test_finding_id_moved_to_the_wrong_axis_is_refused(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Corrected the issue."}
+        self.write_review(standards_findings=[finding])
+        review_path = self.task_dir / "review" / "review.md"
+        review_path.write_text(
+            "# Independent review\n\n"
+            "## Standards\n\n"
+            "No findings.\n"
+            "Summary: findings=0; worst=none.\n\n"
+            "## Spec\n\n"
+            "- [S1] MAJOR · CONFIRMED — Missing validation.\n"
+            "Summary: findings=1; worst=Missing validation.\n"
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Markdown finding IDs disagree with review-evidence.json", result.stdout)
+
     def test_capture_of_a_different_base_or_head_is_stale(self):
-        self.write_review(base="f" * 40)
+        self.write_review(base=self.head)
 
         result = self.command()
 

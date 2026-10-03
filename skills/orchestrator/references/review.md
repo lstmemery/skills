@@ -47,6 +47,10 @@ followed by contiguous delta reviews; every capture in that chain must cover
 both axes. Missing, blocked, stale, ambiguous, or unresolved evidence refuses
 the entire batch. The preflight writes a ready or blocked JSON report under
 `RUN_DIR/integration-preflight/`; retain the report with the merge record.
+Each selected capture is checked with `code-review/scripts/capture.py verify`;
+the manifest, completion marker, source blobs, diff, and history must pass their
+recorded digest checks, and the verified capture ID and complete coverage must
+match the review records.
 
 ### Machine-readable review evidence
 
@@ -107,6 +111,45 @@ The helper requires exactly one response for every sidecar finding, refuses
 unknown or missing finding references before writing, and preserves the first
 pre-sync sidecar at `review-evidence.json.pre-disposition-sync`. Re-running it
 with the same response is safe.
+
+From this contract change on, every nonblank line in a Standards or Spec section
+of `review.md` must follow the axis grammar below. Put each finding on its own
+line under the matching axis with the same ID as the sidecar. A single level-one
+document title may precede the two axis sections; use no other headings or prose
+outside them.
+
+```markdown
+## Standards
+
+- [S1] **MAJOR · CONFIRMED** — Missing validation for captured payloads.
+Summary: findings=1; worst=Missing payload verification.
+
+## Spec
+
+No findings.
+Summary: findings=0; worst=none.
+```
+
+Each line must be a stable-ID finding entry (`- [ID] <finding>`), the exact
+no-findings line (`No findings.`), or a summary line in the form
+`Summary: findings=<count>; worst=<description|none>.` The summary count must
+match the entries in that axis, and `worst=none` is reserved for an empty axis.
+The preflight compares Markdown IDs with sidecar IDs per axis. Missing, extra,
+duplicate, differently placed IDs, headings, prose, and untagged finding entries
+block integration. New reviews must use this grammar. The only historical prose
+exception is the exact completed batch9 review record for each of tasks 1131,
+1132, and 1133, as selected by ready preflight
+`preflight-9706b575d1279316.json` (SHA-256
+`9706b575d12793163f61b5120fcd728b74ee8a2b73961fa1b341b1cc272ea8a7`). The
+gate pins each task, reviewer, base, head, capture ID, Markdown, sidecar, done
+record, capture manifest, and completion marker digest, and it still runs the
+capture verifier and all current sidecar, axis, identity, count, and disposition
+checks. These three records have complete Standards and Spec axes and no
+findings. Version-1 capture manifests have no trustworthy creation timestamp,
+so the gate does not infer legacy status from dates or prose shape; any other
+prose-format review, including an edited or copied variant, fails closed and
+needs a fresh independent review in the current format. Do not rewrite an
+original review or capture to use this exception.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and
