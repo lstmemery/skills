@@ -470,6 +470,82 @@ class IntegrationPreflightTests(unittest.TestCase):
             PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
         )
 
+    def test_legacy_precedent_refuses_nonmatching_synthetic_reports(self):
+        task_id = "task-1"
+        observed = {
+            field: f"synthetic-{field}"
+            for field in PREFLIGHT.LEGACY_REVIEW_RECORD_FIELDS
+        }
+        observed["finding_ids"] = {axis: [] for axis in PREFLIGHT.AXES}
+
+        def precedent_review():
+            review = {
+                field: observed[field]
+                for field in PREFLIGHT.LEGACY_REVIEW_SHARED_FIELDS
+            }
+            review.update({"review_path": observed["review_id"], "finding_count": 0})
+            return review
+
+        def ready_candidate(reviews):
+            return {"task_id": task_id, "status": "ready", "reviews": reviews}
+
+        def precedent(report_payload, sha256=None):
+            report_dir = self.run_dir / "integration-preflight"
+            report_dir.mkdir(exist_ok=True)
+            report_path = report_dir / "synthetic-precedent.json"
+            report_path.write_text(json.dumps(report_payload) + "\n")
+            return {
+                "report": report_path.name,
+                "sha256": sha256 or PREFLIGHT.sha256_file(report_path),
+            }
+
+        def refused(precedent):
+            with (
+                patch.object(PREFLIGHT, "LEGACY_PRECHANGE_REVIEWS", {task_id: observed}),
+                patch.object(PREFLIGHT, "LEGACY_PRECEDENT", precedent),
+            ):
+                return PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
+
+        cases = {
+            "non-ready outcome": {
+                "outcome": "blocked",
+                "candidates": [ready_candidate([precedent_review()])],
+            },
+            "zero matching ready candidates": {"outcome": "ready", "candidates": []},
+            "duplicate matching ready candidates": {
+                "outcome": "ready",
+                "candidates": [
+                    ready_candidate([precedent_review()]),
+                    ready_candidate([precedent_review()]),
+                ],
+            },
+            "zero matching precedent reviews": {
+                "outcome": "ready",
+                "candidates": [ready_candidate([])],
+            },
+            "multiple matching precedent reviews": {
+                "outcome": "ready",
+                "candidates": [
+                    ready_candidate([precedent_review(), precedent_review()])
+                ],
+            },
+        }
+        for name, report_payload in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(refused(precedent(report_payload)))
+
+        matching_report = {
+            "outcome": "ready",
+            "candidates": [ready_candidate([precedent_review()])],
+        }
+        control = precedent(matching_report)
+        self.assertEqual(refused(control), control["sha256"])
+        report_path = self.run_dir / "integration-preflight" / control["report"]
+        tampered = {"report": control["report"], "sha256": control["sha256"]}
+        report_path.write_text(json.dumps(matching_report, indent=2) + "\n")
+        self.assertNotEqual(PREFLIGHT.sha256_file(report_path), tampered["sha256"])
+        self.assertIsNone(refused(tampered))
+
     def test_allowlisted_prechange_review_yields_ready_record_with_synthetic_pin(self):
         self.write_review()
         review_dir = self.task_dir / "review"
