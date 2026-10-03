@@ -59,7 +59,7 @@ def _call(run_command, argv, cwd, label):
         code, output, _ = run_command(argv, cwd)
     except JobError:
         raise
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except (OSError, subprocess.TimeoutExpired):
         unavailable(f"{label} could not be read")
     if code != 0:
         unavailable(f"{label} exited with status {code}")
