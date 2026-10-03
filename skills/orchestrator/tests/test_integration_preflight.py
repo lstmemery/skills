@@ -336,6 +336,34 @@ class IntegrationPreflightTests(unittest.TestCase):
             ):
                 PREFLIGHT.verify_capture_payload(review_dir, capture_dir, manifest)
 
+    def test_capture_verifier_rejects_result_mismatches(self):
+        self.write_review()
+        review_dir = self.task_dir / "review"
+        capture_dir = review_dir / "capture"
+        manifest = json.loads((capture_dir / "manifest.json").read_text())
+        valid = {
+            "outcome": "verified",
+            "capture_id": manifest["capture_id"],
+            "coverage": "complete",
+            "gaps": [],
+        }
+        mismatches = [
+            ("outcome", {**valid, "outcome": "failed"}),
+            ("capture ID", {**valid, "capture_id": "different-capture"}),
+            ("coverage", {**valid, "coverage": "partial"}),
+            ("gaps", {**valid, "gaps": ["missing source"]}),
+        ]
+
+        for name, verification in mismatches:
+            with self.subTest(name=name):
+                completed = subprocess.CompletedProcess([], 0, json.dumps(verification), "")
+                with patch.object(PREFLIGHT.subprocess, "run", return_value=completed):
+                    with self.assertRaisesRegex(
+                        PREFLIGHT.PreflightError,
+                        "capture verifier did not verify complete matching coverage",
+                    ):
+                        PREFLIGHT.verify_capture_payload(review_dir, capture_dir, manifest)
+
     def test_markdown_finding_missing_from_sidecar_is_refused(self):
         self.write_review()
         review_path = self.task_dir / "review" / "review.md"
@@ -419,6 +447,10 @@ class IntegrationPreflightTests(unittest.TestCase):
         )
         for task_id, expected in allowlist.items():
             with self.subTest(task_id=task_id):
+                self.assertEqual(
+                    set(expected),
+                    set(PREFLIGHT.LEGACY_REVIEW_RECORD_FIELDS),
+                )
                 self.assertTrue(PREFLIGHT.legacy_review_record_matches(task_id, expected))
                 forged = dict(expected)
                 forged["review_markdown_sha256"] = "0" * 64
@@ -438,6 +470,72 @@ class IntegrationPreflightTests(unittest.TestCase):
             PREFLIGHT.legacy_review_precedent(task_id, observed, self.run_dir)
         )
 
+    def test_allowlisted_prechange_review_yields_ready_record_with_synthetic_pin(self):
+        self.write_review()
+        review_dir = self.task_dir / "review"
+        review_path = review_dir / "review.md"
+        review_path.write_text(
+            "Independent synthetic review. Both Standards and Spec axes are complete; "
+            "neither found an issue.\n"
+        )
+        evidence_path = review_dir / "review-evidence.json"
+        done_path = review_dir / "done.json"
+        evidence = json.loads(evidence_path.read_text())
+        capture = PREFLIGHT.find_capture(review_dir, evidence["capture_id"])
+        observed = {
+            "review_id": review_dir.name,
+            "base": capture["base"],
+            "head": capture["head"],
+            "capture_id": evidence["capture_id"],
+            "author_identity": evidence["author_identity"],
+            "reviewer_identity": evidence["reviewer_identity"],
+            "review_markdown_sha256": PREFLIGHT.sha256_file(review_path),
+            "review_evidence_sha256": PREFLIGHT.sha256_file(evidence_path),
+            "done_sha256": PREFLIGHT.sha256_file(done_path),
+            "capture_manifest_sha256": capture["manifest_sha256"],
+            "capture_complete_sha256": capture["complete_sha256"],
+            "finding_ids": {axis: [] for axis in PREFLIGHT.AXES},
+        }
+        precedent_review = {
+            field: observed[field]
+            for field in PREFLIGHT.LEGACY_REVIEW_SHARED_FIELDS
+        }
+        precedent_review.update({"review_path": review_dir.name, "finding_count": 0})
+        precedent_report = {
+            "outcome": "ready",
+            "candidates": [
+                {
+                    "task_id": "task-1",
+                    "status": "ready",
+                    "reviews": [precedent_review],
+                }
+            ],
+        }
+        report_dir = self.run_dir / "integration-preflight"
+        report_dir.mkdir()
+        report_path = report_dir / "synthetic-precedent.json"
+        report_path.write_text(json.dumps(precedent_report) + "\n")
+        precedent = {
+            "report": report_path.name,
+            "sha256": PREFLIGHT.sha256_file(report_path),
+        }
+
+        with (
+            patch.object(PREFLIGHT, "LEGACY_PRECHANGE_REVIEWS", {"task-1": observed}),
+            patch.object(PREFLIGHT, "LEGACY_PRECEDENT", precedent),
+        ):
+            records, diagnostics = PREFLIGHT.review_records(
+                self.task_dir,
+                "task-1",
+                self.run_dir / "workers.txt",
+            )
+
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["markdown_compatibility"], "allowlisted-pre-change")
+        self.assertEqual(records[0]["legacy_precedent_sha256"], precedent["sha256"])
+        self.assertEqual(records[0]["finding_count"], 0)
+
     def test_markdown_heading_finding_is_refused(self):
         self.write_review()
         review_path = self.task_dir / "review" / "review.md"
@@ -455,6 +553,62 @@ class IntegrationPreflightTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("unrecognized nonblank line in the Standards section", result.stdout)
+
+    def test_parser_refuses_specific_malformed_review_branches(self):
+        review_dir = self.task_dir / "review"
+        review_dir.mkdir()
+        review_path = review_dir / "review.md"
+        valid_empty_standards = "## Standards\nNo findings.\nSummary: findings=0; worst=none.\n"
+        valid_empty_spec = "## Spec\nNo findings.\nSummary: findings=0; worst=none.\n"
+        cases = {
+            "repeated axis section": (
+                valid_empty_standards + "\n## Standards\n",
+                "repeats the Standards section",
+            ),
+            "duplicate finding ID across axes": (
+                "## Standards\n- [S1] Finding.\nSummary: findings=1; worst=Finding.\n\n"
+                "## Spec\n- [S1] Duplicate finding.\n",
+                "repeats finding ID S1",
+            ),
+            "finding after No findings": (
+                "## Standards\nNo findings.\n- [S1] Finding.\n",
+                "has a finding after No findings.",
+            ),
+            "summary not last": (
+                valid_empty_standards + "Unexpected trailing text.\n",
+                "summary must be the last nonblank line in the Standards section",
+            ),
+            "missing summary": (
+                "## Standards\nNo findings.\n\n" + valid_empty_spec,
+                "lacks a Standards summary line",
+            ),
+            "empty axis without No findings": (
+                "## Standards\nSummary: findings=0; worst=none.\n",
+                "empty Standards summary requires No findings. and worst=none",
+            ),
+            "worst none with finding": (
+                "## Standards\n- [S1] Finding.\nSummary: findings=1; worst=none.\n",
+                "nonempty Standards summary requires a worst-issue description",
+            ),
+            "worst None variant with finding": (
+                "## Standards\n- [S1] Finding.\nSummary: findings=1; worst=None.\n",
+                "nonempty Standards summary requires a worst-issue description",
+            ),
+            "second title": (
+                "# Independent review\n# Extra title\n" + valid_empty_standards,
+                "unrecognized content outside its axis sections",
+            ),
+            "content before title": (
+                "Introductory text.\n# Independent review\n" + valid_empty_standards,
+                "unrecognized content outside its axis sections",
+            ),
+        }
+
+        for name, (markdown, diagnostic) in cases.items():
+            with self.subTest(name=name):
+                review_path.write_text(markdown)
+                with self.assertRaisesRegex(PREFLIGHT.PreflightError, diagnostic):
+                    PREFLIGHT.parse_review_markdown(review_dir)
 
     def test_other_heading_cannot_hide_a_finding_outside_axis_sections(self):
         self.write_review()

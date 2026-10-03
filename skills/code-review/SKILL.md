@@ -8,7 +8,9 @@ description: Review branches, PRs, fixed commits, or working changes against rep
 Report two independent axes: **Standards** checks documented conventions and a
 smell baseline; **Spec** checks the originating requirements. Review reports
 findings; it does not apply them. Completion means every applicable axis has
-reported its full findings or none, with skipped axes and blockers explicit.
+reported its full findings or none. Record skipped axes and blockers in the
+review result/report. Integration preflight requires both axes and accepts only
+the `review.md` format specified in §4.
 
 ## 1. Fix the review scope
 
@@ -67,8 +69,10 @@ missing-spec procedure, perform Standards inline; one axis needs no worker.
 
 For either axis, retain the complete finding list. If it fits under about 400
 words, return it whole. Otherwise save it under the active profile's output root
-and return its path plus a summary of at most 200 words. Request a missing result
-or report its blocker; worker lifecycle state does not substitute for findings.
+and include its path in the returned result/report beside a summary of at most
+200 words. Keep findings-file links and skip/blocker notes out of a
+gate-conformant `review.md`. Request a missing result or report its blocker;
+worker lifecycle state does not substitute for findings.
 
 ## 4. Present
 
@@ -100,7 +104,8 @@ Summary: findings=0; worst=none.
 
 Keep the axes separate without merging or reranking them. The final Summary line
 in each section gives its finding count and worst issue. Identify any skipped or
-blocked axis outside those sections. Summary limits never discard findings.
+blocked axis in the review result/report, outside those sections, and omit that
+note from a gate-conformant `review.md`. Summary limits never discard findings.
 
 Do not produce the older prose format. The preflight's bounded historical
 exception applies only to the exact, previously-ready batch9 review records for

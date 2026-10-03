@@ -39,6 +39,23 @@ LEGACY_PRECEDENT = {
     "report": "preflight-9706b575d1279316.json",
     "sha256": "9706b575d12793163f61b5120fcd728b74ee8a2b73961fa1b341b1cc272ea8a7",
 }
+# These fields occur in both the observed review pin and its precedent report
+# entry. Keep their comparison inventory in one place; only the observed pin
+# additionally records per-axis finding IDs.
+LEGACY_REVIEW_SHARED_FIELDS = (
+    "review_id",
+    "base",
+    "head",
+    "capture_id",
+    "author_identity",
+    "reviewer_identity",
+    "review_markdown_sha256",
+    "review_evidence_sha256",
+    "done_sha256",
+    "capture_manifest_sha256",
+    "capture_complete_sha256",
+)
+LEGACY_REVIEW_RECORD_FIELDS = (*LEGACY_REVIEW_SHARED_FIELDS, "finding_ids")
 LEGACY_PRECHANGE_REVIEWS = {
     "1131": {
         "review_id": "review",
@@ -442,7 +459,13 @@ def parse_review_markdown(review_dir):
 
 def legacy_review_record_matches(task_id, observed):
     expected = LEGACY_PRECHANGE_REVIEWS.get(str(task_id))
-    return expected is not None and observed == expected
+    fields = set(LEGACY_REVIEW_RECORD_FIELDS)
+    return (
+        expected is not None
+        and set(expected) == fields
+        and set(observed) == fields
+        and all(observed[field] == expected[field] for field in LEGACY_REVIEW_RECORD_FIELDS)
+    )
 
 
 def legacy_review_precedent(task_id, observed, run_dir):
@@ -476,22 +499,11 @@ def legacy_review_precedent(task_id, observed, run_dir):
         review
         for review in reviews
         if isinstance(review, dict)
-        and review.get("review_id") == expected["review_id"]
+        and all(
+            review.get(field) == expected[field]
+            for field in LEGACY_REVIEW_SHARED_FIELDS
+        )
         and review.get("review_path") == expected["review_id"]
-        and review.get("capture_id") == expected["capture_id"]
-        and review.get("base") == expected["base"]
-        and review.get("head") == expected["head"]
-        and review.get("author_identity") == expected["author_identity"]
-        and review.get("reviewer_identity") == expected["reviewer_identity"]
-        and review.get("review_markdown_sha256")
-        == expected["review_markdown_sha256"]
-        and review.get("review_evidence_sha256")
-        == expected["review_evidence_sha256"]
-        and review.get("done_sha256") == expected["done_sha256"]
-        and review.get("capture_manifest_sha256")
-        == expected["capture_manifest_sha256"]
-        and review.get("capture_complete_sha256")
-        == expected["capture_complete_sha256"]
         and review.get("finding_count") == 0
     ]
     if len(matching_reviews) != 1:
