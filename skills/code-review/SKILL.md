@@ -76,8 +76,8 @@ Use separate `## Standards` and `## Spec` headings. Preserve each axis's finding
 verbatim or lightly cleaned; link any complete findings file beside its summary.
 An optional single `#` title may precede them; do not add other section headings
 or prose outside the two axis sections.
-For integration preflight, every nonblank line in either axis section must use
-one of these exact forms:
+For new reviews used by integration preflight, every nonblank line in either
+axis section must use one of these exact forms:
 
 - `- [S1] <finding>` for a finding, with its stable ID also used in
   `review-evidence.json`;
@@ -101,6 +101,13 @@ Summary: findings=0; worst=none.
 Keep the axes separate without merging or reranking them. The final Summary line
 in each section gives its finding count and worst issue. Identify any skipped or
 blocked axis outside those sections. Summary limits never discard findings.
+
+Do not produce the older prose format. The preflight's bounded historical
+exception applies only to the exact, previously-ready batch9 review records for
+tasks 1131, 1132, and 1133; it pins their complete evidence and re-verifies each
+capture. Version-1 captures have no trustworthy creation timestamp, so no other
+prose review is treated as historical. Do not edit or recreate those records to
+use the exception.
 
 Before claiming the current checkout has been reviewed, run capture `check`.
 If source or authorities drifted, finish findings for the captured version and
