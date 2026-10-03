@@ -95,10 +95,13 @@ def check_applicability(profile_name, applicability):
         reason = text(entry["reason"], f"applicability.{anchor_name}.reason", 4096)
         # The reason is rendered inside the header's HTML comment; '-->' or a
         # line break in it could terminate or extend that comment and forge the
-        # artifact's provenance metadata.
-        if "-->" in reason or "\n" in reason or "\r" in reason:
-            invalid(f"applicability.{anchor_name}.reason must be a single line "
-                    f"without '-->' so it cannot break the generated header comment")
+        # artifact's provenance metadata. Refuse every character str.splitlines()
+        # would split a line on (LF, CR, VT, FF, NEL, the C0 FS/GS/RS separators,
+        # U+2028, U+2029) and any other non-printable character, so the reason
+        # is provably one printable line.
+        if "-->" in reason or not reason.isprintable():
+            invalid(f"applicability.{anchor_name}.reason must be a single printable "
+                    f"line without '-->' so it cannot break the generated header comment")
         for fact, allowed in anchor.requires.items():
             if entry[fact] not in allowed:
                 invalid(f"applicability.{anchor_name}.{fact} must be one of: {', '.join(allowed)}")

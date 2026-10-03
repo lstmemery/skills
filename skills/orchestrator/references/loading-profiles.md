@@ -48,8 +48,11 @@ needs a non-empty `reason` plus the anchor's required fact —
 `subdelegation: "none"`, `disposition: "coordinator-owned"`, or
 `tests: "none"` respectively. Unknown anchors, missing facts, or empty
 reasons are rejected with a nonzero status. A reason must also be a single
-line without `-->`: it is rendered inside the artifact header's HTML comment,
-so it must not be able to terminate or extend that comment.
+printable line without `-->`: it is rendered inside the artifact header's HTML
+comment, so it must not be able to terminate or extend that comment. Any
+character `str.splitlines()` would split a line on — including carriage
+return, vertical tab, form feed, NEL (U+0085), and U+2028/U+2029 — and any
+other non-printable character is refused.
 
 The generator is deterministic: the same sources and declaration produce
 byte-identical output, recorded with source and declaration SHA-256 digests in

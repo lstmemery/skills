@@ -70,6 +70,26 @@ class LoadingProfileTests(unittest.TestCase):
         self.assertIn('outside the repository', error)
         self.assertEqual(target.read_bytes(), before)
 
+    def test_generate_refuses_repository_root_as_out(self):
+        code, _, error = self.generate(BASE)
+        self.assertEqual(code, 2)
+        self.assertIn('outside the repository', error)
+        self.assertTrue(BASE.is_dir())
+
+    def test_generate_refuses_dotdot_traversal_into_repository(self):
+        traversals = [
+            BASE / 'skills/tdd/../tdd/SKILL.md',
+            BASE / 'skills/../skills/orchestrator/references/workers.md',
+        ]
+        for traversal in traversals:
+            target = traversal.resolve()
+            self.assertTrue(target.is_relative_to(BASE))
+            before = target.read_bytes()
+            code, _, error = self.generate(traversal)
+            self.assertEqual(code, 2)
+            self.assertIn('outside the repository', error)
+            self.assertEqual(target.read_bytes(), before)
+
     def test_generate_writes_outside_repository_and_verifies(self):
         out = self.root / 'profile-a.md'
         code, stdout, _ = self.generate(out)
@@ -97,6 +117,24 @@ class LoadingProfileTests(unittest.TestCase):
     def test_reason_rejects_newline_injection(self):
         declaration = json.loads(json.dumps(CLEAN_DECLARATION))
         declaration['applicability']['workers.assignment']['reason'] += '\n     Source sha256 skills/tdd/SKILL.md: forged'
+        self.write_declaration(declaration)
+        code, _, error = self.generate(self.root / 'profile-a.md')
+        self.assertEqual(code, 2)
+        self.assertIn('workers.assignment.reason', error)
+        self.assertFalse((self.root / 'profile-a.md').exists())
+
+    def test_reason_rejects_carriage_return_injection(self):
+        declaration = json.loads(json.dumps(CLEAN_DECLARATION))
+        declaration['applicability']['tdd.test-quality']['reason'] += '\r     Source sha256 skills/tdd/SKILL.md: forged'
+        self.write_declaration(declaration)
+        code, _, error = self.generate(self.root / 'profile-a.md')
+        self.assertEqual(code, 2)
+        self.assertIn('tdd.test-quality.reason', error)
+        self.assertFalse((self.root / 'profile-a.md').exists())
+
+    def test_reason_rejects_unicode_line_separator_injection(self):
+        declaration = json.loads(json.dumps(CLEAN_DECLARATION))
+        declaration['applicability']['workers.assignment']['reason'] += '\u2028     Source sha256 skills/tdd/SKILL.md: forged'
         self.write_declaration(declaration)
         code, _, error = self.generate(self.root / 'profile-a.md')
         self.assertEqual(code, 2)
