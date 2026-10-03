@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 from . import records
+from . import review_dispositions
 
 
 MAX_REVISION = 2**63 - 1
@@ -493,6 +494,12 @@ def build_parser():
 
     closeout_parser = commands.add_parser("check-closeout", help="require a terminal disposition for every worker")
     closeout_parser.add_argument("run_dir", type=Path)
+
+    sync_parser = commands.add_parser(
+        "sync-dispositions",
+        help="copy coordinator dispositions from review-response.md into review evidence",
+    )
+    sync_parser.add_argument("task_dir", type=Path)
     return parser
 
 
@@ -531,6 +538,13 @@ def main(argv=None):
             )
             record_disposition(args.worker_dir, disposition, replace=args.replace)
             print(f"RECORDED: {args.worker_dir / 'disposition.json'}")
+            return 0
+        if args.command == "sync-dispositions":
+            count = review_dispositions.sync_dispositions(args.task_dir)
+            if count:
+                print(f"SYNCED: {count} review evidence file(s)")
+            else:
+                print("SYNCED: dispositions already match review evidence")
             return 0
         count = check_closeout(args.run_dir)
         print(f"CLOSEOUT READY: {count} worker(s) have terminal dispositions.")
