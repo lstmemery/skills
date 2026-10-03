@@ -8,7 +8,9 @@ description: Review branches, PRs, fixed commits, or working changes against rep
 Report two independent axes: **Standards** checks documented conventions and a
 smell baseline; **Spec** checks the originating requirements. Review reports
 findings; it does not apply them. Completion means every applicable axis has
-reported its full findings or none, with skipped axes and blockers explicit.
+reported its full findings or none. Record skipped axes and blockers in the
+review result/report. Integration preflight requires both axes and accepts only
+the `review.md` format specified in §4.
 
 ## 1. Fix the review scope
 
@@ -67,16 +69,51 @@ missing-spec procedure, perform Standards inline; one axis needs no worker.
 
 For either axis, retain the complete finding list. If it fits under about 400
 words, return it whole. Otherwise save it under the active profile's output root
-and return its path plus a summary of at most 200 words. Request a missing result
-or report its blocker; worker lifecycle state does not substitute for findings.
+and include its path in the returned result/report beside a summary of at most
+200 words. Keep findings-file links and skip/blocker notes out of a
+gate-conformant `review.md`. Request a missing result or report its blocker;
+worker lifecycle state does not substitute for findings.
 
 ## 4. Present
 
 Use separate `## Standards` and `## Spec` headings. Preserve each axis's findings
-verbatim or lightly cleaned; link any complete findings file beside its summary.
-Keep the axes separate without merging or reranking them. End with each axis's
-finding count and its own worst issue, or “none”; identify any skipped or blocked
-axis. Summary limits never discard findings.
+verbatim or lightly cleaned; link any complete findings file beside its summary
+in the review result/report; keep the link out of a gate-conformant `review.md`.
+An optional single `#` title may precede them; do not add other section headings
+or prose outside the two axis sections.
+For new reviews used by integration preflight, every nonblank line in either
+axis section must use one of these exact forms:
+
+- `- [S1] <finding>` for a finding, with its stable ID also used in
+  `review-evidence.json`;
+- `No findings.` for an empty axis;
+- `Summary: findings=<count>; worst=<description|none>.` as the final line,
+  with the count matching the findings. Use `worst=none` only for an empty axis.
+
+Do not put prose, headings, or untagged list entries inside an axis section.
+For example:
+
+```markdown
+## Standards
+- [S1] **MAJOR · CONFIRMED** — Missing validation for captured payloads.
+Summary: findings=1; worst=Missing payload verification.
+
+## Spec
+No findings.
+Summary: findings=0; worst=none.
+```
+
+Keep the axes separate without merging or reranking them. The final Summary line
+in each section gives its finding count and worst issue. Identify any skipped or
+blocked axis in the review result/report, outside those sections, and omit that
+note from a gate-conformant `review.md`. Summary limits never discard findings.
+
+Do not produce the older prose format. The preflight's bounded historical
+exception applies only to the exact, previously-ready batch9 review records for
+tasks 1131, 1132, and 1133; it pins their complete evidence and re-verifies each
+capture. Version-1 captures have no trustworthy creation timestamp, so no other
+prose review is treated as historical. Do not edit or recreate those records to
+use the exception.
 
 Before claiming the current checkout has been reviewed, run capture `check`.
 If source or authorities drifted, finish findings for the captured version and
