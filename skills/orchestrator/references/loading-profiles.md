@@ -47,11 +47,16 @@ and `applicability` naming exactly the profile's anchors. Each anchor entry
 needs a non-empty `reason` plus the anchor's required fact —
 `subdelegation: "none"`, `disposition: "coordinator-owned"`, or
 `tests: "none"` respectively. Unknown anchors, missing facts, or empty
-reasons are rejected with a nonzero status.
+reasons are rejected with a nonzero status. A reason must also be a single
+line without `-->`: it is rendered inside the artifact header's HTML comment,
+so it must not be able to terminate or extend that comment.
 
 The generator is deterministic: the same sources and declaration produce
 byte-identical output, recorded with source and declaration SHA-256 digests in
-the artifact header. Sources are read, never modified. `verify` regenerates
+the artifact header. Sources are read, never modified: `generate --out`
+refuses output paths that resolve inside this repository, including through
+symlinks, so a mistyped output path cannot overwrite a tracked source.
+`verify` regenerates
 and byte-compares, so an edited or stale profile fails loudly. Keep the
 declaration beside the generated profile as part of the task's evidence.
 

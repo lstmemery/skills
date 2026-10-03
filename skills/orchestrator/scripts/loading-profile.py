@@ -92,7 +92,13 @@ def check_applicability(profile_name, applicability):
         entry = applicability[anchor_name]
         required = ["reason", *anchor.requires]
         fields(entry, required, label=f"applicability.{anchor_name}")
-        text(entry["reason"], f"applicability.{anchor_name}.reason", 4096)
+        reason = text(entry["reason"], f"applicability.{anchor_name}.reason", 4096)
+        # The reason is rendered inside the header's HTML comment; '-->' or a
+        # line break in it could terminate or extend that comment and forge the
+        # artifact's provenance metadata.
+        if "-->" in reason or "\n" in reason or "\r" in reason:
+            invalid(f"applicability.{anchor_name}.reason must be a single line "
+                    f"without '-->' so it cannot break the generated header comment")
         for fact, allowed in anchor.requires.items():
             if entry[fact] not in allowed:
                 invalid(f"applicability.{anchor_name}.{fact} must be one of: {', '.join(allowed)}")
@@ -219,7 +225,22 @@ def command_list(args):
     return 0
 
 
+def refuse_output_inside_repository(out):
+    """Refuse an --out path that resolves into the repository, before any write.
+
+    Sources are read, never modified (references/loading-profiles.md); the
+    resolved path must stay outside REPO_ROOT so a mistyped or symlinked
+    output path cannot overwrite a tracked source file.
+    """
+    resolved = Path(out).resolve()
+    if resolved == REPO_ROOT or REPO_ROOT in resolved.parents:
+        invalid(f"--out must resolve outside the repository ({REPO_ROOT}): "
+                f"{out} resolves to {resolved}")
+    return resolved
+
+
 def command_generate(args):
+    refuse_output_inside_repository(args.out)
     declaration, declaration_digest = load_declaration(args.declaration, args.profile)
     data = render_profile(args.profile, declaration, declaration_digest).encode("utf-8")
     atomic_bytes(args.out, data)
