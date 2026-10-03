@@ -68,7 +68,7 @@ must differ. Record both axes even when an axis has zero findings:
     "standards": {
       "status": "complete",
       "findings": [
-        {"id": "S1", "disposition": "fixed", "reason": "Corrected and verified."}
+        {"id": "S1", "disposition": "unresolved", "reason": "Awaiting coordinator disposition."}
       ]
     },
     "spec": {"status": "complete", "findings": []}
@@ -92,6 +92,21 @@ and `spec_findings`, each matching its axis in the sidecar. A revision
 `review-rN/` requires `new_findings` matching the total sidecar finding count
 and `unfixed` equal to `0`. All count fields are required in their respective
 review type; a missing count is invalid.
+
+**Ownership:** the independent reviewer owns `review.md`, `done.json`, capture
+evidence, and the initial `review-evidence.json`; every finding starts as
+`disposition: "unresolved"` until the coordinator records a decision. The
+coordinator owns terminal dispositions and reasons in `review-response.md` and
+syncs them into every matching sidecar before preflight:
+
+```sh
+python3 scripts/worker-records.py sync-dispositions RUN_DIR/TASK_ID
+```
+
+The helper requires exactly one response for every sidecar finding, refuses
+unknown or missing finding references before writing, and preserves the first
+pre-sync sidecar at `review-evidence.json.pre-disposition-sync`. Re-running it
+with the same response is safe.
 
 The preflight output is evidence of the check, not approval to integrate. It
 records the target head, candidate base/head, selected review captures, and
