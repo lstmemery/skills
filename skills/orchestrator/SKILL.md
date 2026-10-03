@@ -189,7 +189,11 @@ repurpose retained work as fallback.
 Read the active queue and the records touched by the current event. Ask workers
 for missing evidence through their return contract. Full transcripts, code
 reviews, implementation details, and exploratory findings stay in worker context
-or artifacts unless a specific coordination decision requires them.
+or artifacts unless a specific coordination decision requires them. For a
+bounded task where a known anchor section is genuinely irrelevant, generate its
+task-scoped loading profile per
+[loading profiles](references/loading-profiles.md); an omission there never
+suppresses a mandatory requirement.
 
 Checkpoint before each handoff and after material transitions. Renew the
 coordinator at safe command boundaries using the measured/configured context

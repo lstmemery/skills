@@ -58,18 +58,28 @@ acceptance of worker output.
   `pi`; register a missing process adapter when permitted, rather than substitute.
 - "omp-train" with no harness named means Claude Opus 5.5 at xhigh effort:
   `omp-train --claude -p "…"` (the jail's managed Claude settings pin that
-  model and effort). Deep research and shopping use such jailed Claude
-  workers unless the user names another runtime; use
-  `omp-train --harness codex exec --skip-git-repo-check` only when Codex is
-  named. The managed Herdr job helper's jail route is Codex-only (schema v1),
-  so launch jailed Claude work with the host pane-command route.
+  model and effort); that remains the jailed default for shopping. Deep
+  research, and an explicit no-harness `omp-train` for research work, uses
+  the jailed Codex research default instead: `gpt-6-astra` at max effort
+  (user instruction 2026-10-03; never substitute another model or effort).
+  Research workers keep their worker contract, including the mandatory
+  independent source/claim check and the same jail privacy guard.
+  The managed Herdr job helper's jail route is Codex-only (schema v1), so
+  jailed Codex research fits its `deep_research` route, while jailed Claude
+  work (shopping) launches with the host pane-command route. Exact jail
+  model selection there is unsupported until its separate catalog is
+  verified, so confirm at admission that the jail's runtime default is
+  `gpt-6-astra` at max effort; if it cannot be confirmed, hold the launch —
+  do not substitute.
   Within the managed helper, a named non-jail runtime is honoured by
   re-issuing the job as `task_kind: ordinary`; a runtime override on the jail
   route itself is refused, never converted.
-  On a host Herdr session, launch that as a pane command in its own workspace,
-  preserving the jail boundary. Shopping workers load skill `shopping`; deep
-  research workers follow their worker contract. Inside a jail, use only an
-  available in-jail route; never reach outward to a host Herdr session.
+  On a host Herdr session, launch jailed Codex research with the native route
+  for the exact `omp-train --harness codex exec --skip-git-repo-check`
+  process as a pane command in its own workspace — the host `codex` binary is
+  not the jail. Shopping workers load skill `shopping`; deep research workers
+  follow their worker contract. Inside a jail, use only an available in-jail
+  route; never reach outward to a host Herdr session.
 - "Luna agents" (or "luna workers") means the **Codex** harness running
   `gpt-6-luna` at **max** effort (`codex -m gpt-6-luna -c
   model_reasoning_effort=max`, Herdr kind `codex`), not pi. Use pi with
