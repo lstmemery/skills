@@ -100,7 +100,12 @@ def check_applicability(profile_name, applicability):
 
 
 def load_declaration(path, profile_name):
-    declaration = load_json(path)
+    try:
+        declaration = load_json(path)
+    except FileNotFoundError:
+        invalid(f"missing declaration file at {path}")
+    except OSError as error:
+        invalid(f"cannot read declaration at {path}: {error.strerror or error}")
     fields(declaration, ["schema_version", "task_id", "profile", "applicability"],
            label="declaration")
     version(declaration["schema_version"])
