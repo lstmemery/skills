@@ -64,34 +64,19 @@ launched no workers may omit the roster or use an empty `workers` array. An
 absent roster behaves as empty; discovered worker-shaped directories still block
 closeout if they are not registered.
 
-```json
-{
-  "task_id": "task-id",
-  "assignment_revision": 1,
-  "outcome": "ready",
-  "summary": "What was produced and what it establishes.",
-  "artifacts": [{"path": "artifact-path", "kind": "report"}],
-  "checks": [{"name": "check", "status": "passed", "evidence": "log-path"}],
-  "unresolved": [],
-  "next_action": "Present the artifact to the user."
-}
+Every worker brief and per-run CONTRACT must include the current result contract
+verbatim. Generate it from the shared validator in the orchestrator skill
+directory:
+
+```sh
+python3 scripts/worker-records.py schema --format md
 ```
 
-The result object has exactly these required fields: `task_id` (non-empty
-string), `assignment_revision` (positive integer matching the brief), `outcome`
-(`ready`, `blocked`, or `failed`), `summary` (non-empty string), `artifacts`
-(array of `{path, kind}` objects), `checks` (array of `{name, status, evidence}`
-objects), `unresolved` (array of non-empty strings), and `next_action` (non-empty
-string). Artifact paths and kinds, check names, and evidence values must be
-non-empty strings. Check status is `passed`, `failed`, or `not_run`; explain
-missing evidence explicitly. Unknown fields and duplicate JSON keys are invalid.
-A `ready` result needs at least one artifact. `blocked` and `failed` results need
-an explanatory unresolved item. Artifact and evidence locations must be
-accessible in the active profile.
-
-Repository-change results also include a `candidate` object with non-empty `repo`,
-`branch`, `base`, and `head` values. The shared validator requires this object
-when run with `--repository-changes` and validates it whenever it is present.
+Copy the complete Markdown output without rewriting its example, fields, or
+allowed values. This output is the result-record schema source for workers and
+coordinators; do not maintain a second prose or JSON copy in a task template.
+Artifact and evidence paths must also be accessible in the active profile; the
+coordinator checks that separately from structural validation.
 
 Validate each return before accepting it, passing the expected task identity:
 
@@ -105,6 +90,22 @@ python3 scripts/worker-records.py validate-result \
 
 Add `--repository-changes` for a repository assignment. The validator returns a
 clear error and nonzero status for a missing, malformed, or non-schema result.
+
+For a known benign legacy shape, preserve the worker's original file and
+normalize to a separate file. The command validates the normalized copy before
+writing it and prints a JSON audit of the changes to standard output:
+
+```sh
+python3 scripts/worker-records.py normalize-result \
+  "$WORKER_DIR/result.json" --output "$WORKER_DIR/result.normalized.json" \
+  --task-id "$TASK_ID" --revision "$REVISION" [--repository-changes]
+```
+
+Normalization handles only `candidate: null` on non-repository work, the
+`complete`/`completed` outcome synonyms, bare-string checks (marked `not_run`
+because they have no evidence), and artifact objects missing `kind` (filled as
+`artifact`). All other defects remain validation errors. Validate the normalized
+output with `validate-result` before accepting it.
 
 ## Terminal disposition and closeout
 
