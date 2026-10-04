@@ -8,12 +8,14 @@ description: Investigate broad comparisons, literature, landscapes, buy/build de
 Produce a source-grounded report whose material claims can be audited.
 Finish when the scoped questions are supported or explicitly unresolved,
 claims pass the shared evidence check, and the finished report is delivered
-through the active runtime's output and delivery contract. Load the runtime's
-durable user preferences for this step. Deliver by default unless the user's
+through the active runtime's output and delivery contract — or, under a
+runtime where delivery is coordinator-controlled (the jail), has reached the
+written, declared artifacts. Load the runtime's durable user preferences for
+this step. Deliver by default unless the user's
 current request explicitly opts out; do not ask again whether to send it. The
 research coordinator invokes delivery after synthesis and validation. Report
-only the state observed, and say the report was emailed only after the delivery
-helper verifies receipt.
+only the state observed, and say the report was emailed only after the
+delivery helper verifies receipt.
 
 Single facts and document lookups belong to `research`. Executing workers is a
 coordinator function: this thread owns scoping, synthesis, and release, and may
@@ -92,7 +94,9 @@ Before delivery, verify scope and slice coverage, evidence links and claim-check
 results, conflict dispositions, named gaps, and report date/filename. Use the
 runtime's delivery contract by default for the finished report only; plans,
 drafts, slice artifacts, and check notes are working material. Honor an explicit
-user opt-out. Report the delivery state actually observed. Say the report was
+user opt-out. Under a runtime where delivery is coordinator-controlled (the
+jail), finish at the written, declared artifacts; never attempt or claim
+delivery. Report the delivery state actually observed. Say the report was
 emailed only after the delivery helper verifies receipt. If the active runtime
 offers no delivery mechanism, report that gap and leave the finished report
 available.
