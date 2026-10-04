@@ -39,3 +39,4 @@ If approval or a route is unclear, save the retrospective and ask before acting.
 
 - [SOURCES.md](SOURCES.md) — session and run-record locations; redaction requirements.
 - [STEERING-SURFACES.md](STEERING-SURFACES.md) — Matt's steering surfaces and existing checks.
+- [PREP.md](PREP.md) — retro-prep digest-step builder contract and the corpus verification command.
