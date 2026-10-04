@@ -24,6 +24,8 @@ acceptance of worker output.
 - Delegate as much execution as possible. Use the coordinator for routing,
   task state, and user communication; delegate substantive reasoning and review.
   Fast models are preferred for coordinators. No exact model is pinned here.
+- Explicit model and effort requests remain fixed; change defaults only through
+  an accepted policy update backed by a task-class comparison.
 - Inside Herdr, place each worker in a new pane in its own new workspace; the
   managed path's topology is set and validated in
   [launch-policy.json](launch-policy.json). Preserve the user's focus. Support different harnesses across workers.
@@ -46,7 +48,8 @@ acceptance of worker output.
   exact commands, and a one-line reply format) and upload it with the
   `research-delivery` skill's PrivateBin step. Give the user the link and the
   reply format; do not wait to be asked. The doc must contain no secrets or
-  account numbers.
+  account numbers. [Unattended runs](references/unattended.md#decision-doc)
+  owns how it is built and checked against the ledger.
 - Maintain a compact task ledger and hand over to a fresh coordinator at safe
   boundaries before context gets large. Do not depend on a universal 200k trigger.
 - Keep personal orchestration policy in this skill and standalone tool settings;

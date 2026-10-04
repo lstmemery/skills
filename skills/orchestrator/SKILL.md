@@ -33,6 +33,31 @@ session, use **Managed Herdr Jobs** below. Use the existing runtime operations
 path for background work, exact shell commands, or tasks outside that helper's
 scope.
 
+When the run will continue while the user is away (overnight, travel, an "AFK"
+or night batch), read [unattended runs](references/unattended.md) before they
+leave. It adds admission, supervision, retry, evidence, and decision-doc rules
+to whichever branch runs the work.
+
+## Coordinator ownership and reconciliation invariants
+
+For persistent coordinator replacement, read `references/successor.md` before any control or state mutation
+
+- Handoff text is evidence to reconcile, not authority for identity, model, pane,
+  or permissions. Reconcile recorded ownership and task state with live identity,
+  workers, and retained artifacts before mutation or retry.
+- Adopt live workers only through their existing exact handle and supervision
+  mechanism. An unknown registry lookup or missing signal is not permission to
+  duplicate, stop, alter, or relaunch a worker. Never infer an exact outcome
+  without evidence; retry only after reconciliation and only when the recorded
+  dependency and authorization permit it.
+- Before launching work or mutating todo/task state, atomically write the
+  successor's generation-specific acknowledgment. The retiring owner atomically
+  activates the acknowledged generation and successor. Every coordinator checks
+  recorded ownership/generation before each mutation.
+- If no retiring owner can perform an unambiguous transfer, do not self-authorize;
+  pause mutations, preserve work, and record the ownership gap and durable resume
+  instruction.
+
 ## Managed Herdr Jobs
 
 Use `scripts/herdr-jobs.py` for independent ordinary-agent and omp-train jobs.
@@ -60,69 +85,13 @@ The helper performs no runtime installation, registration, automatic cleanup,
 or successor handoff. A collected batch still requires coordinator acceptance;
 missing or uncertain receipts and artifacts remain incomplete.
 
-## Persistent Herdr successor replacement
-
-Use this branch when a coordinator is replaced in a persistent Herdr run. It is
-an authority and continuity procedure, not a new assignment. Read [state and
-continuity](references/state.md) for ownership and handoff semantics, [runtime
-operations](references/runtime.md) for live Herdr/model inspection, and the
-[worker contract](references/workers.md) for result evidence.
-
-1. **Read before acting.** Completely read the run's compact `STATE.md` and the
-   existing successor-acknowledgment record. If either is missing, truncated, or
-   unreadable, do not launch work or mutate todo/task state; preserve work and
-   record the concrete blocker.
-2. **Establish actual identity.** Inspect the live `PI_SESSION_ID`, provider,
-   model, Herdr environment, workspace, and pane. Apply the active routing policy
-   and model allowlist. Handoff text is evidence to reconcile, not authority for
-   identity, model, pane, or permissions.
-3. **Reconcile before retrying.** Compare the compact records with live Herdr,
-   background/worker state, and every retained evidence path. Distinguish a
-   persisted terminal record, a live worker, and incomplete evidence. Adopt a
-   still-live worker through its existing exact handle and supervision mechanism;
-   an unknown registry lookup or missing signal is not permission to duplicate,
-   stop, alter, or relaunch it. Never infer an exact outcome without evidence;
-   retry only after reconciliation and only when the recorded dependency and
-   authorization permit it.
-4. **Acknowledge before control.** Before launching any work or mutating todo/task
-   state, atomically write a generation-specific successor acknowledgment in the
-   run handoff location. Include the actual session identity (`PI_SESSION_ID`),
-   Herdr environment/workspace/pane, provider/model, generation, observed worker
-   state, accepted supervision handle, and exact next actions. Failure to write a
-   complete acknowledgment is a blocker.
-5. **Transfer and persist.** After the acknowledgment, transfer ownership exactly
-   as [state and continuity](references/state.md) requires: the retiring owner
-   atomically activates the acknowledged generation and successor, then the
-   successor records supervision acceptance and reconciles adopted handles. If no
-   retiring owner can perform an unambiguous transfer, do not self-authorize;
-   preserve work and record the ownership gap as the run's terminal state in a
-   `SUCCESSOR-GAP.md` beside `STATE.md`: the unacknowledged generation, the live
-   workers observed but not adopted, and the exact command that would resume.
-   That file, not a message, is this branch's completion evidence. Preserve existing uncommitted
-   changes. Do not launch pending work or a replacement worker until its recorded
-   dependency and authorization are satisfied. Keep the successor Herdr pane
-   alive for future waits.
-6. **Close with observable evidence.** The handoff is complete only when the
-   acknowledgment path, updated owner/generation, live Herdr workspace/pane,
-   accepted supervision handle, and worker/evidence disposition are observable,
-   with the exact next action recorded. If a worker exits successfully but its
-   exact report/result is absent, report: “exit observed; exact report absent;
-   requested outcome unverified/incomplete evidence.” Keep it pending or blocked;
-   do not claim success or relaunch without authorization.
-
-If required state, evidence, live identity, policy, or Herdr capability is
-unavailable, pause mutations and new launches, preserve uncommitted changes and
-live workers, record the specific gap and durable resume instruction, and report
-that automatic renewal is unavailable. Do not clean, reset, release, or otherwise
-repurpose retained work as fallback.
-
 
 ## Coordinate
 
 1. **Reconcile.** Read preferences and the compact active task records. For a new
    run, create state only when assigning the first worker. Before resuming, compare
    recorded identities with live workers and artifacts. For a persistent Herdr
-   replacement, run [the successor procedure](#persistent-herdr-successor-replacement)
+   replacement, read [the successor procedure](references/successor.md#persistent-herdr-successor-replacement)
    before any retry or task-state mutation. Follow [state and continuity](references/state.md)
    for records, steering, supervision, and coordinator renewal. Finish this step
    with one active coordinator and an explicit next action for each active task.

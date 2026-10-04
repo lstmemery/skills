@@ -40,11 +40,31 @@ repository verification in addition to the selected review policy.
 ## Result record
 
 Before launch, register every worker in the run directory's `workers.json` and
-give it an output directory under that run. Workers write a small `result.json`
-in their task output folder and return its path. Large findings and logs remain
-separate artifacts. The roster records expected workers, and closeout also scans
-the run tree for worker-shaped directories containing `brief.md`, `result.json`,
-or `disposition.json`; an unrostered match blocks closeout.
+give it an output directory under that run. A logical task may have several
+launched attempts. Give each launch a unique worker `task_id` (for example,
+`audit-42-r1-a1`, `audit-42-r1-a2`), keep the logical task and assignment
+revision in `STATE.md`, and append one roster entry for each attempt. A retry
+keeps the same assignment revision but gets a new attempt ID and a fresh, empty
+directory; never change an earlier roster entry or reuse its directory. Record
+an append-only attempt entry in `STATE.md` with the attempt/worker ID, revision,
+UTC launch time, directory, disposition, and continuation count, and identify
+the current attempt there. The `task_id` in `result.json` is that attempt's
+worker ID; validate it against the corresponding roster entry so an earlier
+attempt cannot satisfy a later one. A same-worker continuation remains within
+the same attempt and directory and does not add a roster entry.
+
+Accept only result and artifact files inside the attempt directory. Require
+`result.json` and worker-created outputs to be written after launch; the empty
+directory and attempt-specific identity are the primary stale-file boundary, so
+mtime alone is not proof of provenance. A deliberately copied evidence file may
+retain its source mtime only when the worker identifies the source path and
+SHA-256 in its report, and the coordinator verifies that source and records the
+hash in disposition evidence. Treat any other pre-launch file as stale. Workers
+write a small `result.json` in their task output folder and return its path.
+Large findings and logs remain separate artifacts. The roster records expected
+attempts, and closeout also scans the run tree for worker-shaped directories
+containing `brief.md`, `result.json`, or `disposition.json`; an unrostered match
+blocks closeout.
 
 ```json
 {
@@ -145,15 +165,35 @@ review findings, and check evidence; do not place the patch in this JSON.
 
 ## Validate and recover
 
+A worker has finished only when its result record, its terminal output, and
+the exit of every process it started agree. If a worker ends its turn while a
+background process it started is still running, the task stays `running`:
+supervise that process to exit, then grade the result it produced. Briefs for
+unsupervised or headless workers say to run commands in the foreground and
+write the result record last, before the final message. Track child processes
+only through a handle the selected backend exposes (such as the jailed-worker
+process check in [runtime operations](runtime.md#herdr-launch)); if child exit
+cannot be observed, keep the task `running` or `blocked` rather than `done`.
+
 The coordinator checks task/revision identity, required fields, artifact access,
 and that the result accounts for the acceptance criteria. Delegate a substantive
 quality check when the task calls for one. A worker's assertion is not a substitute
 for the recorded test, diff, report, or other task-specific evidence.
 
-Request a corrected result once when fields or evidence are missing. If still
-incomplete, keep the task blocked or assign bounded recovery work; do not report
-it complete. After an ambiguous prompt/launch timeout, observe the existing
-worker before retrying. Resume the same worker when it is still the right owner.
+Treat a text-only stop with open acceptance items and no stated blocker as
+missing evidence. Continue the same worker through its existing session or
+handle, naming the open items; a request to correct missing fields or evidence
+uses this same continuation rule. A continuation reuses the current attempt and
+worker ID; it is not a new launch, attempt, or blind provider retry. Allow at
+most two automatic continuations per task total and record each against the
+current attempt in `STATE.md`. Never continue past a refusal, required approval,
+or capability gap; keep the task blocked with the reason. After the second
+continuation, if any acceptance item remains open, keep it incomplete/blocked
+with the reason and do not report it complete. If the existing worker cannot
+accept a continuation through its known handle, reconcile its state; do not
+launch another worker under this recovery rule. After an ambiguous
+prompt/launch timeout, observe the existing worker before any separately
+authorized retry. Resume the same worker when it is still the right owner.
 
 Changed user instructions increment the assignment revision. Results from an
 earlier revision remain evidence about earlier work, not completion of the new
