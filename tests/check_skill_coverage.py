@@ -3,14 +3,17 @@
 
 Fails when a skill has neither a runnable suite nor a recorded no-suite
 rationale, when claimed suite or trigger-fixture paths do not exist, when a
-skill with executable code hides behind a no-suite rationale, or when a
-routing-critical skill lacks valid positive and negative trigger fixtures.
+skill with executable code hides behind a no-suite rationale, when a
+routing-critical skill lacks valid positive and negative trigger fixtures, or
+when CONTRIBUTING.md's 'Full local check set' block and the registry
+disagree about per-skill suite directories.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 
 import trigger_schema
@@ -18,7 +21,13 @@ import trigger_schema
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = ROOT / "skills"
 REGISTRY_PATH = ROOT / "tests" / "skill-coverage.json"
+CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 SCRIPT_SUFFIXES = {".sh", ".bash"}
+CHECK_SET_LEAD_IN = "Full local check set"
+DISCOVER_LINE = re.compile(
+    r"^cd\s+(\S+)\s+&&\s+python3\s+-m\s+unittest\s+discover(?:\s.*)?$"
+)
+BLANKET_DISCOVER_ROOT = "tests"
 
 
 def skill_directories() -> list[str]:
@@ -108,6 +117,91 @@ def validate_entry(entry: dict, skill_dir: Path, errors: list[str]) -> None:
         errors.append(f"{label}: routing_critical must be a boolean")
 
 
+def full_check_set_block(text: str) -> list[str] | None:
+    """Lines of the fenced code block after CONTRIBUTING.md's 'Full local
+    check set' lead-in, or None when the section or its fenced block cannot
+    be found."""
+    lines = text.splitlines()
+    lead_in = next(
+        (i for i, line in enumerate(lines) if CHECK_SET_LEAD_IN in line), None
+    )
+    if lead_in is None:
+        return None
+    opening = next(
+        (i for i in range(lead_in, len(lines)) if lines[i].startswith("```")), None
+    )
+    if opening is None:
+        return None
+    block: list[str] = []
+    for line in lines[opening + 1 :]:
+        if line.startswith("```"):
+            return block
+        block.append(line)
+    return None
+
+
+def contributing_discover_dirs(block: list[str]) -> list[str]:
+    """The directories the block runs `python3 -m unittest discover` in."""
+    dirs = []
+    for line in block:
+        match = DISCOVER_LINE.match(line)
+        if match:
+            dirs.append(match.group(1).rstrip("/"))
+    return dirs
+
+
+def check_contributing_block(
+    entries: list, block: list[str] | None, errors: list[str]
+) -> None:
+    """Keep CONTRIBUTING.md's 'Full local check set' block and the registry
+    inventory from drifting apart. Every suite directory registered outside
+    tests/ needs a matching `cd <dir> && python3 -m unittest discover` line
+    in the block, and every discover line in the block must run a directory
+    some registry entry registers. Suites under tests/ need no individual
+    line: the block's `cd tests` discover line covers them."""
+    if block is None:
+        errors.append(
+            "CONTRIBUTING.md: no fenced code block found after the "
+            f"{CHECK_SET_LEAD_IN!r} lead-in; cannot cross-check the registry"
+        )
+        return
+
+    registered: dict[str, list[str]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("coverage") != "suite":
+            continue
+        name = str(entry.get("name", "<unnamed>"))
+        suites = entry.get("suites")
+        if not isinstance(suites, list):
+            continue
+        for suite in suites:
+            if not isinstance(suite, str) or not suite.strip():
+                continue
+            directory = suite.strip().rstrip("/")
+            if directory == BLANKET_DISCOVER_ROOT or directory.startswith(
+                BLANKET_DISCOVER_ROOT + "/"
+            ):
+                continue  # covered by the block's `cd tests` discover line
+            registered.setdefault(directory, []).append(name)
+
+    listed = list(dict.fromkeys(contributing_discover_dirs(block)))
+    for directory, names in sorted(registered.items()):
+        if directory not in listed:
+            errors.append(
+                f"CONTRIBUTING.md {CHECK_SET_LEAD_IN!r} block: registry suite "
+                f"{directory!r} (skill {', '.join(names)}) has no "
+                f"'cd {directory} && python3 -m unittest discover' line"
+            )
+    for directory in listed:
+        if directory == BLANKET_DISCOVER_ROOT or directory in registered:
+            continue
+        errors.append(
+            f"CONTRIBUTING.md {CHECK_SET_LEAD_IN!r} block: 'cd {directory} && "
+            f"python3 -m unittest discover' runs a suite directory no registry "
+            f"entry registers"
+        )
+
+
 def main() -> int:
     try:
         registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
@@ -145,6 +239,15 @@ def main() -> int:
         errors.append(
             f"skill {name!r}: missing from tests/skill-coverage.json; every skill needs "
             f"a suite or a recorded no-suite rationale"
+        )
+
+    try:
+        contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"CONTRIBUTING.md: cannot read {CONTRIBUTING_PATH}: {exc}")
+    else:
+        check_contributing_block(
+            entries, full_check_set_block(contributing), errors
         )
 
     if errors:
