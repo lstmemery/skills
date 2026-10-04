@@ -111,7 +111,7 @@ function expandSkill(command: string): string {
 }
 ```
 
-#### Guidance
+## Guidance
 
 Place each visual next to the short text it supports. Keep only the calls, files, props, states, and boundaries needed to answer the user's current question or the options to resolve the current discussion point.
 

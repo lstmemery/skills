@@ -14,7 +14,7 @@ Use this template for writing the PR body:
 ```markdown
 ## Summary
 
-<the problem and the behaviour change>
+<the problem and the behavior change>
 
 <optional: the smallest visual that clarifies this change>
 
@@ -41,7 +41,7 @@ Skip all preambles and keep prose brief. Use the user's domain language from `GL
 
 ### Summary
 
-Lead with the problem and the behaviour change: what was wrong or missing, and what behaves differently after the change.
+Lead with the problem and the behavior change: what was wrong or missing, and what behaves differently after the change.
 
 Add a visual only when it materially clarifies this change — the smallest view that makes the key point clear. When one does, read [references/visuals.md](references/visuals.md) for the menu of forms (pseudocode, call trees, component trees, file trees, Mermaid, diffs, whole blocks) and their placement guidance.
 
@@ -51,7 +51,7 @@ Report the checks actually run, with before and after when available. Never inve
 
 Screenshots are S-tier - when the environment is set up for it, the change is visual, and the screenshot comes from a real run.
 
-Execution-based evidence is A-tier. Test results, console output. Show the exact test that now fails and passes, using pseudocode.
+Execution-based evidence is A-tier. Test results, console output. Show the test that passes now; include the real failing-before run when one exists, and say so when it does not.
 
 ### Merge Danger
 
