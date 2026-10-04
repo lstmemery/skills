@@ -11,8 +11,10 @@ claims pass the shared evidence check, and the finished report is delivered
 through the active runtime's output and delivery contract. Load the runtime's
 durable user preferences for this step. Deliver by default unless the user's
 current request explicitly opts out; do not ask again whether to send it. The
-research coordinator invokes delivery after synthesis and validation. Report
-only the state observed, and say the report was emailed only after the delivery
+research coordinator invokes delivery after synthesis and validation. Under a
+profile where delivery is coordinator-controlled (the jail), finish at the
+written, declared artifacts; never attempt or claim delivery. Report only the
+state observed, and say the report was emailed only after the delivery
 helper verifies receipt.
 
 Single facts and document lookups belong to `research`. Executing workers is a
