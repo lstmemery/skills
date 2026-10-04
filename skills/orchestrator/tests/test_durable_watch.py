@@ -117,6 +117,7 @@ class DurableWatchTest(unittest.TestCase):
         route = f"http://127.0.0.1:{server.server_port}/test/topic"
         token_file = self.run_dir / "ntfy-token"
         token_file.write_text("unit-test-token\n", encoding="utf-8")
+        token_file.chmod(0o600)
         config.update({
             "notify": True,
             "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
@@ -179,6 +180,159 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(secret_path.read_text(encoding="utf-8").strip(), secret_url)
         config_text = (self.run_dir / durable_watch.CONFIG).read_text(encoding="utf-8")
         self.assertNotIn(secret_url, config_text)
+
+    def test_publish_refuses_token_files_without_private_permissions(self):
+        """S3: a group/world-readable or foreign-owned token file must fail closed."""
+        route = "https://notify.example.invalid/private-topic-test-1159"
+        token = "unit-test-token-value"
+
+        def configure(token_file):
+            config_path = self.run_dir / durable_watch.CONFIG
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.update({
+                "notify": True,
+                "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
+                "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
+                "ntfy_token_file": str(token_file),
+                "notification_title": "Orchestrator worker result",
+            })
+            durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
+            durable_watch.write_config(config_path, config)
+            token_file.write_text(token + "\n", encoding="utf-8")
+            (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
+
+        def reconcile_and_capture():
+            output = io.StringIO()
+            with redirect_stderr(output):
+                outcome = durable_watch.reconcile_once(self.run_dir)
+            return outcome, output.getvalue()
+
+        def assert_event_stays_redacted(outcome, errors):
+            self.assertEqual(len(outcome["new_events"]), 1)
+            self.assertNotIn(token, errors)
+            self.assertNotIn(route, errors)
+            for line in (self.run_dir / durable_watch.EVENTS).read_text(encoding="utf-8").splitlines():
+                self.assertNotIn(token, line)
+                self.assertNotIn(route, line)
+
+        # A group/world-readable token file is refused with no secret printed.
+        loose = self.run_dir / "loose-token"
+        configure(loose)
+        loose.chmod(0o644)
+        outcome, errors = reconcile_and_capture()
+        self.assertIn("ntfy token must be a mode-600 file owned by the current user", errors)
+        self.assertNotIn(str(loose), errors)
+        assert_event_stays_redacted(outcome, errors)
+
+        # A token file owned by another user is refused before it is read.
+        self.setUp()
+        foreign = self.run_dir / "foreign-token"
+        configure(foreign)
+        foreign.chmod(0o600)
+        with mock.patch.object(durable_watch.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(durable_watch.WatchError) as raised:
+                durable_watch.read_private_text(foreign, "ntfy token")
+        self.assertIn("owned by the current user", str(raised.exception))
+        self.assertNotIn(token, str(raised.exception))
+
+        # A missing token file stays redacted and still records the event.
+        self.setUp()
+        missing = self.run_dir / "absent-token"
+        configure(missing)
+        missing.unlink()
+        outcome, errors = reconcile_and_capture()
+        self.assertIn("ntfy token is unavailable", errors)
+        assert_event_stays_redacted(outcome, errors)
+
+    def test_secrets_never_reach_any_runtime_sink(self):
+        """SP3: arm and reconcile keep the route and token out of every runtime sink."""
+        received = []
+
+        class NtfyHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                response = json.dumps({"id": "sink-check-id"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format, *args):
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), NtfyHandler)
+        server_thread = Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(server.shutdown)
+        (self.run_dir / durable_watch.CONFIG).unlink()
+        route = f"http://127.0.0.1:{server.server_port}/test/private-topic-1159"
+        token = "unit-test-sink-token"
+        token_file = self.run_dir / "sink-token"
+        token_file.write_text(token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        args = type("Args", (), {
+            "run_dir": str(self.run_dir),
+            "tasks": ["task-a"],
+            "interval_seconds": 30,
+            "notification_title": "Orchestrator worker result",
+        })()
+        launched = []
+        launch_environments = []
+
+        def capture_systemd_run(command, **kwargs):
+            launched.append(command)
+            launch_environments.append(kwargs["env"])
+            return mock.Mock(returncode=0)
+
+        arm_output = io.StringIO()
+        with mock.patch.dict(os.environ, {"NTFY_URL": route, "NTFY_TOKEN_FILE": str(token_file)}, clear=True), \
+                mock.patch.object(durable_watch, "systemd_property", return_value="not-found"), \
+                mock.patch.object(durable_watch.subprocess, "run", side_effect=capture_systemd_run), \
+                redirect_stdout(arm_output):
+            self.assertEqual(durable_watch.command_arm(args), 0)
+
+        (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
+        reconcile_output = io.StringIO()
+        reconcile_errors = io.StringIO()
+        with redirect_stdout(reconcile_output), redirect_stderr(reconcile_errors):
+            durable_watch.reconcile_once(self.run_dir)
+        status_output = io.StringIO()
+        with redirect_stdout(status_output):
+            self.assertEqual(durable_watch.command_status(args), 0)
+
+        # systemd-run argv and --setenv values carry nothing secret; because the
+        # transient unit is built solely from that argv and environment, the
+        # generated unit text cannot contain the route or token either.
+        self.assertEqual(len(launched), 1)
+        argv = launched[0]
+        self.assertFalse(any(secret in value for value in argv for secret in (route, token)))
+        setenv_values = [value[len("--setenv="):] for value in argv if value.startswith("--setenv=")]
+        self.assertEqual(setenv_values, [])
+        self.assertFalse(any(secret in value for value in setenv_values for secret in (route, token)))
+        environment = launch_environments[0]
+        self.assertFalse(any(key.startswith(("NTFY_", "ORCH_WATCH_")) for key in environment))
+        self.assertFalse(any(secret in value for value in environment.values() for secret in (route, token)))
+
+        # Stored config, events/flag file lines, journald-bound log lines the
+        # script writes, reconcile stdout, and status output stay redacted.
+        sinks = {
+            "config": (self.run_dir / durable_watch.CONFIG).read_text(encoding="utf-8"),
+            "events": "".join((self.run_dir / durable_watch.EVENTS).read_text(encoding="utf-8").splitlines(keepends=True)),
+            "journal": reconcile_errors.getvalue(),
+            "reconcile_stdout": reconcile_output.getvalue(),
+            "arm_stdout": arm_output.getvalue(),
+            "status": status_output.getvalue(),
+        }
+        for flag in (self.run_dir / "flags").iterdir():
+            sinks[f"flag:{flag.name}"] = flag.read_text(encoding="utf-8")
+        for sink, text in sinks.items():
+            self.assertNotIn(route, text, sink)
+            self.assertNotIn(token, text, sink)
+        self.assertIn("ntfy accepted (HTTP 200; id=sink-check-id)", sinks["journal"])
+        self.assertEqual(received, [f"task-a wrote result.json in {self.run_dir.name}".encode("utf-8")])
 
     def test_disarm_clears_configuration_before_changed_watch_is_armed(self):
         durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, "https://notify.example.invalid/topic")

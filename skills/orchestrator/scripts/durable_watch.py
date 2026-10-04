@@ -66,7 +66,8 @@ def task_names(run_dir: Path, values: list[str]) -> list[str]:
     return names
 
 
-def write_config(path: Path, config: dict) -> None:
+def write_private_atomic(path: Path, serialize) -> None:
+    """Write through a private temporary file so readers never see partial content."""
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     temporary_path = None
@@ -74,52 +75,51 @@ def write_config(path: Path, config: dict) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as file:
             temporary_path = file.name
             os.fchmod(file.fileno(), 0o600)
-            json.dump(config, file, sort_keys=True, separators=(",", ":"))
-            file.write("\n")
+            serialize(file)
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary_path, path)
     finally:
         if temporary_path and os.path.exists(temporary_path):
             os.unlink(temporary_path)
+
+
+def write_config(path: Path, config: dict) -> None:
+    def serialize(file):
+        json.dump(config, file, sort_keys=True, separators=(",", ":"))
+        file.write("\n")
+
+    write_private_atomic(path, serialize)
 
 
 def write_private_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
-    temporary_path = None
-    try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as file:
-            temporary_path = file.name
-            os.fchmod(file.fileno(), 0o600)
-            file.write(value)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary_path, path)
-        os.chmod(path, 0o600)
-    finally:
-        if temporary_path and os.path.exists(temporary_path):
-            os.unlink(temporary_path)
+    def serialize(file):
+        file.write(value)
+        file.write("\n")
+
+    write_private_atomic(path, serialize)
 
 
-def read_private_text(path: Path) -> str:
+def read_private_text(path: Path, label: str) -> str:
+    """Read a regular file only when it is mode-600 and owned by the current user."""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as error:
-        raise WatchError("ntfy route is unavailable") from error
+        raise WatchError(f"{label} is unavailable") from error
     try:
         details = os.fstat(fd)
         if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600:
-            raise WatchError("ntfy route must be a mode-600 file")
+            raise WatchError(f"{label} must be a mode-600 file owned by the current user")
+        if details.st_uid != os.getuid():
+            raise WatchError(f"{label} must be a mode-600 file owned by the current user")
         with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as file:
             value = file.read().strip()
     except (OSError, UnicodeError) as error:
-        raise WatchError("ntfy route is unavailable") from error
+        raise WatchError(f"{label} is unavailable") from error
     finally:
         os.close(fd)
     if not value:
-        raise WatchError("ntfy route is unavailable")
+        raise WatchError(f"{label} is unavailable")
     return value
 
 
@@ -171,15 +171,14 @@ def publish(event: dict, config: dict) -> None:
     if not config.get("notify"):
         return
     try:
-        url = read_private_text(Path(config["ntfy_url_file"]))
+        url = read_private_text(Path(config["ntfy_url_file"]), "ntfy route")
         if hashlib.sha256(url.encode()).hexdigest() != config.get("ntfy_url_sha256"):
             raise WatchError("ntfy route does not match the stored watch config")
-        token_path = Path(config["ntfy_token_file"])
-        token = token_path.read_text(encoding="utf-8").strip()
-    except (KeyError, OSError, UnicodeError, WatchError):
-        print("durable-watch: ntfy route unavailable; event is recorded", file=sys.stderr)
+        token = read_private_text(Path(config["ntfy_token_file"]), "ntfy token")
+    except WatchError as error:
+        print(f"durable-watch: {error}; event is recorded", file=sys.stderr)
         return
-    if not token:
+    except (KeyError, OSError, UnicodeError):
         print("durable-watch: ntfy route unavailable; event is recorded", file=sys.stderr)
         return
     payload = f"{event['task_dir']} wrote result.json in {event['run_dir']}"
