@@ -38,6 +38,9 @@ RESULT_OUTCOMES = {"ready", "blocked", "failed"}
 CHECK_STATUSES = {"passed", "failed", "not_run"}
 OUTCOME_NORMALIZATIONS = {"complete": "ready", "completed": "ready"}
 WORKER_MARKERS = {"brief.md", "result.json", "disposition.json"}
+WORKER_DISCOVERY_EXCLUDED_NAMES = {"capture", "test-copy"}
+WORKER_DISCOVERY_EXCLUDED_PREFIXES = ("capture-", "test-copy-")
+WORKER_DISCOVERY_EXCLUDED_SUFFIXES = ("-repo",)
 OVERWRITE_MESSAGE = "disposition already exists: {path}; pass --replace to update it"
 
 
@@ -288,6 +291,15 @@ def _relative_directory(value, label):
     return Path(*parts)
 
 
+def _is_excluded_worker_discovery_subtree(directory):
+    return any(
+        name in WORKER_DISCOVERY_EXCLUDED_NAMES
+        or name.startswith(WORKER_DISCOVERY_EXCLUDED_PREFIXES)
+        or name.endswith(WORKER_DISCOVERY_EXCLUDED_SUFFIXES)
+        for name in directory.parts
+    )
+
+
 def _parse_roster(run_dir):
     roster_path = run_dir / "workers.json"
     if roster_path.is_symlink():
@@ -344,8 +356,11 @@ def _discover_worker_directories(run_root):
             traversable = []
             for name in directory_names:
                 directory = current_path / name
+                relative_directory = directory.relative_to(run_root)
+                if _is_excluded_worker_discovery_subtree(relative_directory):
+                    continue
                 if directory.is_symlink():
-                    symlink_directories.append(directory.relative_to(run_root))
+                    symlink_directories.append(relative_directory)
                 else:
                     traversable.append(name)
             directory_names[:] = traversable

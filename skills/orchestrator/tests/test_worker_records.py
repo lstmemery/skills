@@ -339,6 +339,79 @@ class WorkerRecordsTest(unittest.TestCase):
         self.assertIn("unrostered worker-shaped directory", process.stderr)
         self.assertIn("tasks/brief-only-worker", process.stderr)
 
+    def test_closeout_ignores_worker_shapes_inside_repository_copies_and_test_copies(self):
+        run_dir = self.root / "run"
+        registered_dir = run_dir / "tasks/worker-a"
+        registered_dir.mkdir(parents=True)
+        (registered_dir / "disposition.json").write_text(json.dumps({
+            "task_id": "worker-a",
+            "assignment_revision": 1,
+            "disposition": "completed",
+            "summary": "Finished.",
+            "evidence": "result.json",
+        }))
+        self.write_roster(run_dir, [self.roster_entry()])
+
+        old_task = run_dir / "tasks/reviewer/review/capture-source/.scratch/old-task"
+        old_task.mkdir(parents=True)
+        (old_task / "result.json").write_text("{}")
+        copied_fixture = run_dir / "tasks/reviewer/review/synthetic-repo/.pi/delegate/old-task"
+        copied_fixture.mkdir(parents=True)
+        (copied_fixture / "brief.md").write_text("Task: copied historical worker.\n")
+        test_fixture = (
+            run_dir
+            / "tasks/reviewer/review/test-copy/skills/orchestrator/tests/fixtures/task-1"
+        )
+        test_fixture.mkdir(parents=True)
+        (test_fixture / "disposition.json").write_text("{}")
+
+        docs = run_dir / "tasks/reviewer/review/capture-source/proxmox/docs"
+        docs.mkdir(parents=True)
+        outside = self.root / "outside-docs"
+        outside.mkdir()
+        (docs / "agents").symlink_to(outside, target_is_directory=True)
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("CLOSEOUT READY: 1 worker(s)", process.stdout)
+
+    def test_closeout_still_validates_rostered_worker_inside_repository_copy(self):
+        run_dir = self.root / "run"
+        worker_dir = run_dir / "tasks/reviewer/review/capture-input-repo/tasks/worker-a"
+        worker_dir.mkdir(parents=True)
+        self.write_roster(run_dir, [self.roster_entry(directory=(
+            "tasks/reviewer/review/capture-input-repo/tasks/worker-a"
+        ))])
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("missing disposition.json", process.stderr)
+        self.assertNotIn("unrostered worker-shaped directory", process.stderr)
+
+    def test_closeout_still_reports_symlinks_outside_excluded_subtrees(self):
+        run_dir = self.root / "run"
+        registered_dir = run_dir / "tasks/worker-a"
+        registered_dir.mkdir(parents=True)
+        (registered_dir / "disposition.json").write_text(json.dumps({
+            "task_id": "worker-a",
+            "assignment_revision": 1,
+            "disposition": "completed",
+            "summary": "Finished.",
+            "evidence": "result.json",
+        }))
+        self.write_roster(run_dir, [self.roster_entry()])
+        outside = self.root / "outside"
+        outside.mkdir()
+        (run_dir / "notes").mkdir()
+        (run_dir / "notes/external").symlink_to(outside, target_is_directory=True)
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("cannot inspect symlinked directory: notes/external", process.stderr)
+
     def test_no_roster_and_no_worker_directories_is_a_valid_empty_closeout(self):
         run_dir = self.root / "run"
         run_dir.mkdir()
