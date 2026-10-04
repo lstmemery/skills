@@ -63,7 +63,7 @@ must differ. Record both axes even when an axis has zero findings:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "1123",
   "author_identity": "worker-1123",
   "reviewer_identity": "reviewer-1123",
@@ -103,13 +103,15 @@ and `spec_findings`, each matching its axis in the sidecar. A revision
 and `unfixed` equal to `0`. All count fields are required in their respective
 review type; a missing count is invalid.
 
-New finding entries retain `id`, `disposition`, and (when rejected) `reason`,
-and also record `confidence` as `high`, `medium`, or `low`. Include a `reproducer`
-string with executable steps or a focused check; when no executable check
-applies, include `evidence` and `unresolved_assumption` strings instead. The
-preflight validates these fields when present. For backward compatibility,
-existing version-1 entries without this evidence metadata remain valid; new
-reviews must include it.
+New review-evidence sidecars use `schema_version: 2`. New finding entries retain
+`id`, `disposition`, and (when rejected) `reason`, and also record `confidence`
+as `high`, `medium`, or `low`. Include a `reproducer` string with executable
+steps or a focused check; when no executable check applies, include `evidence`
+and `unresolved_assumption` strings instead. The preflight requires and validates
+this metadata on every version-2 finding. For backward compatibility, existing
+version-1 entries without evidence metadata remain valid; metadata present in a
+version-1 entry is still validated. Do not write new findings in version-1
+sidecars.
 
 **Ownership:** the independent reviewer owns `review.md`, `done.json`, capture
 evidence, and the initial `review-evidence.json`; every finding starts as

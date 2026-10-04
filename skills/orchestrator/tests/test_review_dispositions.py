@@ -29,9 +29,9 @@ class ReviewDispositionsTest(unittest.TestCase):
             ]),
         }
 
-    def write_evidence(self, review_dir, findings):
+    def write_evidence(self, review_dir, findings, *, schema_version=1):
         evidence = {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "task_id": "task-a",
             "author_identity": "coder-a",
             "reviewer_identity": "reviewer-a",
@@ -84,6 +84,61 @@ class ReviewDispositionsTest(unittest.TestCase):
         for name, directory in (("review", self.review), ("review-r2", self.delta)):
             backup = directory / "review-evidence.json.pre-disposition-sync"
             self.assertEqual(backup.read_bytes(), originals[name])
+
+    def assert_sync_preserves_finding_evidence(self, schema_version):
+        original_finding = {
+            "id": "S1",
+            "disposition": "unresolved",
+            "reason": "Awaiting response.",
+            "confidence": "high",
+            "reproducer": "Run the focused check; observe the rejected metadata.",
+        }
+        self.write_evidence(
+            self.review, [original_finding], schema_version=schema_version
+        )
+        self.write_response(
+            "- `review/S1`: fixed — Corrected and verified.\n"
+            "- `review-r2/P1`: rejected — Outside this ticket's scope.\n"
+        )
+
+        process = self.call()
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(
+            self.read_evidence(self.review)["axes"]["standards"]["findings"][0],
+            {
+                "id": "S1",
+                "disposition": "fixed",
+                "reason": "Corrected and verified.",
+                "confidence": "high",
+                "reproducer": "Run the focused check; observe the rejected metadata.",
+            },
+        )
+
+    def test_sync_preserves_schema_v1_finding_evidence_metadata(self):
+        self.assert_sync_preserves_finding_evidence(schema_version=1)
+
+    def test_sync_preserves_schema_v2_finding_evidence_metadata(self):
+        self.assert_sync_preserves_finding_evidence(schema_version=2)
+
+    def test_schema_v2_finding_without_evidence_refuses_before_sync(self):
+        self.write_evidence(
+            self.review,
+            [{"id": "S1", "disposition": "unresolved", "reason": "Awaiting response."}],
+            schema_version=2,
+        )
+        self.write_response(
+            "- `review/S1`: fixed — Corrected and verified.\n"
+            "- `review-r2/P1`: rejected — Outside this ticket's scope.\n"
+        )
+        original = (self.review / "review-evidence.json").read_bytes()
+
+        process = self.call()
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("schema version 2 finding requires evidence metadata", process.stderr)
+        self.assertEqual((self.review / "review-evidence.json").read_bytes(), original)
+        self.assertFalse((self.review / "review-evidence.json.pre-disposition-sync").exists())
 
     def test_missing_finding_disposition_refuses_without_partial_updates(self):
         self.write_response("- `review/S1`: fixed — Corrected and verified.\n")

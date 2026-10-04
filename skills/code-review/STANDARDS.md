@@ -11,7 +11,8 @@ Report every documented-standard violation and baseline smell in the change:
   with no concrete consequence is labeled **SUGGESTION**, not a defect. Smells are
   judgement calls; repository standards override the baseline, so do not report
   a smell where a documented standard endorses the pattern.
-- In the matching stable-ID entry in `review-evidence.json`, record confidence
+- In the matching stable-ID entry in a new `review-evidence.json` sidecar with
+  `schema_version: 2`, record confidence
   (`high`, `medium`, or `low`) and a runnable reproducer or focused check. When
   no executable check applies, record the supporting evidence and unresolved
   assumption instead.

@@ -27,6 +27,7 @@ FINDING_EVIDENCE_FIELDS = frozenset(
     {"confidence", "reproducer", "evidence", "unresolved_assumption"}
 )
 FINDING_CONFIDENCE = frozenset({"high", "medium", "low"})
+REVIEW_EVIDENCE_SCHEMA_VERSIONS = frozenset({1, 2})
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
 MARKDOWN_LIST_ENTRY = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S.*$")
@@ -556,7 +557,7 @@ def review_records(task_dir, task_id, workers_path):
                 raise PreflightError(f"{review_dir.name} review evidence has unexpected fields")
             if (
                 type(evidence["schema_version"]) is not int
-                or evidence["schema_version"] != 1
+                or evidence["schema_version"] not in REVIEW_EVIDENCE_SCHEMA_VERSIONS
                 or str(evidence["task_id"]) != str(task_id)
             ):
                 raise PreflightError(f"{review_dir.name} review evidence has the wrong schema or task ID")
@@ -626,10 +627,16 @@ def review_records(task_dir, task_id, workers_path):
                     reason = finding.get("reason", "")
                     if not isinstance(reason, str) or (disposition == "rejected" and not reason.strip()):
                         raise PreflightError(f"{review_dir.name}/{finding_id} needs a rejection reason")
-                    if set(finding) & FINDING_EVIDENCE_FIELDS:
+                    has_evidence_metadata = bool(set(finding) & FINDING_EVIDENCE_FIELDS)
+                    if evidence["schema_version"] == 2 and not has_evidence_metadata:
+                        raise PreflightError(
+                            f"{review_dir.name}/{finding_id} schema version 2 finding "
+                            "requires evidence metadata"
+                        )
+                    if has_evidence_metadata:
                         confidence = finding.get("confidence")
                         reproducer = finding.get("reproducer")
-                        evidence = finding.get("evidence")
+                        supporting_evidence = finding.get("evidence")
                         assumption = finding.get("unresolved_assumption")
                         if type(confidence) is not str or confidence not in FINDING_CONFIDENCE:
                             raise PreflightError(
@@ -641,8 +648,9 @@ def review_records(task_dir, task_id, workers_path):
                             raise PreflightError(
                                 f"{review_dir.name}/{finding_id} has an invalid reproducer"
                             )
-                        if evidence is not None and (
-                            not isinstance(evidence, str) or not evidence.strip()
+                        if supporting_evidence is not None and (
+                            not isinstance(supporting_evidence, str)
+                            or not supporting_evidence.strip()
                         ):
                             raise PreflightError(
                                 f"{review_dir.name}/{finding_id} has invalid finding evidence"
@@ -656,8 +664,8 @@ def review_records(task_dir, task_id, workers_path):
                             )
                         has_reproducer = isinstance(reproducer, str) and bool(reproducer.strip())
                         has_unresolved_evidence = (
-                            isinstance(evidence, str)
-                            and bool(evidence.strip())
+                            isinstance(supporting_evidence, str)
+                            and bool(supporting_evidence.strip())
                             and isinstance(assumption, str)
                             and bool(assumption.strip())
                         )

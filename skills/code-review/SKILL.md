@@ -72,10 +72,11 @@ missing-spec procedure, perform Standards inline; one axis needs no worker.
   location, and state the concrete behavioral consequence.”
 
 For each finding on either axis, put its confidence and evidence under the same
-stable ID in `review-evidence.json`. Use a runnable `reproducer` for an
-executable failure or a focused check. When no executable check applies, use
-`evidence` and `unresolved_assumption` to show what supports the finding and
-what remains uncertain. Confidence values are `high`, `medium`, or `low`.
+stable ID in a new `review-evidence.json` sidecar with `schema_version: 2`. Use
+a runnable `reproducer` for an executable failure or a focused check. When no
+executable check applies, use `evidence` and `unresolved_assumption` to show
+what supports the finding and what remains uncertain. Confidence values are
+`high`, `medium`, or `low`.
 
 For either axis, retain the complete finding list. If it fits under about 400
 words, return it whole. Otherwise save it under the active profile's output root
