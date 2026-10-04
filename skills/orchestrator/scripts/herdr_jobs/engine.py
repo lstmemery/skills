@@ -8,7 +8,8 @@ import uuid
 
 from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
-                      integer, load_json, now, parse_json, read_regular, save, text, version)
+                      ensure_task_admitted, integer, load_json, now, parse_json, read_regular, save,
+                      text, version)
 from .retry import prepare_pi_run_profile
 from .transport import BudgetExpired, EffectUnknown, RateLimited
 
@@ -387,6 +388,8 @@ class Engine:
         return True
 
     def launch(self, job):
+        spec = job["spec"]
+        ensure_task_admitted(spec["task_kind"], spec["job_id"])
         while job["phase"] != "submitted" and job["pending_effect"] is None:
             if not self.acquire_admission(job):
                 return
