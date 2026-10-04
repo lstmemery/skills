@@ -13,6 +13,19 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Standalone script importing its sibling herdr_jobs package; inserting the
+# script directory keeps the import working both when run directly (python3
+# scripts/integration-preflight.py) and when loaded via importlib (tests).
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from herdr_jobs.review_evidence import (
+    FINDING_EVIDENCE_FIELDS,
+    REVIEW_EVIDENCE_SCHEMA_VERSIONS,
+    finding_evidence_error,
+)
+
 
 AXES = ("standards", "spec")
 EVIDENCE_NAME = "review-evidence.json"
@@ -552,7 +565,7 @@ def review_records(task_dir, task_id, workers_path):
                 raise PreflightError(f"{review_dir.name} review evidence has unexpected fields")
             if (
                 type(evidence["schema_version"]) is not int
-                or evidence["schema_version"] != 1
+                or evidence["schema_version"] not in REVIEW_EVIDENCE_SCHEMA_VERSIONS
                 or str(evidence["task_id"]) != str(task_id)
             ):
                 raise PreflightError(f"{review_dir.name} review evidence has the wrong schema or task ID")
@@ -600,7 +613,14 @@ def review_records(task_dir, task_id, workers_path):
                     raise PreflightError(f"{review_dir.name} {axis} review is incomplete")
                 axis_finding_ids = set()
                 for finding in findings:
-                    if not isinstance(finding, dict) or set(finding) - {"id", "disposition", "reason"} or not {"id", "disposition"} <= set(finding):
+                    allowed_finding_fields = {
+                        "id", "disposition", "reason", *FINDING_EVIDENCE_FIELDS
+                    }
+                    if (
+                        not isinstance(finding, dict)
+                        or set(finding) - allowed_finding_fields
+                        or not {"id", "disposition"} <= set(finding)
+                    ):
                         raise PreflightError(f"{review_dir.name} has a malformed finding")
                     finding_id = finding["id"]
                     disposition = finding["disposition"]
@@ -615,6 +635,11 @@ def review_records(task_dir, task_id, workers_path):
                     reason = finding.get("reason", "")
                     if not isinstance(reason, str) or (disposition == "rejected" and not reason.strip()):
                         raise PreflightError(f"{review_dir.name}/{finding_id} needs a rejection reason")
+                    error = finding_evidence_error(
+                        finding, review_dir.name, evidence["schema_version"]
+                    )
+                    if error is not None:
+                        raise PreflightError(error)
                     if dispositions.get((review_dir.name, finding_id)) != disposition:
                         raise PreflightError(f"missing recorded disposition for {review_dir.name}/{finding_id}")
                     finding_count += 1

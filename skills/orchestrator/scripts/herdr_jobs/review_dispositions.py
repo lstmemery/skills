@@ -7,6 +7,9 @@ import re
 import stat
 
 from . import records
+from . import review_evidence
+from .review_evidence import FINDING_EVIDENCE_FIELDS
+from .review_evidence import REVIEW_EVIDENCE_SCHEMA_VERSIONS
 
 
 AXES = ("standards", "spec")
@@ -62,6 +65,12 @@ def _review_directories(task_dir):
     return directories
 
 
+def _validate_finding_evidence(finding, review_name, schema_version):
+    error = review_evidence.finding_evidence_error(finding, review_name, schema_version)
+    if error is not None:
+        records.invalid(error)
+
+
 def _load_evidence(review_dir):
     evidence_path = review_dir / EVIDENCE_NAME
     try:
@@ -78,7 +87,7 @@ def _load_evidence(review_dir):
     if (
         not isinstance(evidence, dict)
         or type(evidence.get("schema_version")) is not int
-        or evidence["schema_version"] != 1
+        or evidence["schema_version"] not in REVIEW_EVIDENCE_SCHEMA_VERSIONS
     ):
         records.invalid(f"invalid {EVIDENCE_NAME} schema in {review_dir.name}")
     axes = evidence.get("axes")
@@ -98,12 +107,14 @@ def _load_evidence(review_dir):
             if (
                 not isinstance(finding, dict)
                 or not {"id", "disposition"} <= finding.keys()
-                or finding.keys() - {"id", "disposition", "reason"}
+                or finding.keys()
+                - {"id", "disposition", "reason", *FINDING_EVIDENCE_FIELDS}
             ):
                 records.invalid(f"{review_dir.name} has a malformed finding")
             finding_id = finding["id"]
             if not isinstance(finding_id, str) or not IDENTIFIER.fullmatch(finding_id):
                 records.invalid(f"{review_dir.name} has an invalid finding ID")
+            _validate_finding_evidence(finding, review_dir.name, evidence["schema_version"])
             key = (review_dir.name, finding_id)
             if key in finding_map:
                 records.invalid(f"{review_dir.name} repeats finding ID {finding_id}")

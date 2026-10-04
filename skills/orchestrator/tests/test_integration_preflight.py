@@ -77,6 +77,7 @@ class IntegrationPreflightTests(unittest.TestCase):
         self,
         name="review",
         *,
+        schema_version=1,
         base=None,
         head=None,
         reviewer="reviewer-1",
@@ -110,7 +111,7 @@ class IntegrationPreflightTests(unittest.TestCase):
             + "\n"
         )
         evidence = {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "task_id": "task-1",
             "author_identity": "coder-1",
             "reviewer_identity": reviewer,
@@ -244,6 +245,88 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(report["outcome"], "ready")
         self.assertEqual(report["candidates"][0]["head"], self.head)
         self.assertEqual(self.git("-C", str(self.repo), "rev-parse", "main"), self.base)
+
+    def test_finding_evidence_metadata_passes_without_changing_markdown_grammar(self):
+        self.write_review(
+            schema_version=2,
+            standards_findings=[
+                {
+                    "id": "S1",
+                    "disposition": "fixed",
+                    "reason": "Added the missing guard.",
+                    "confidence": "high",
+                    "reproducer": (
+                        "Run the focused test; expected result: the missing guard is "
+                        "exercised."
+                    ),
+                }
+            ],
+            spec_findings=[
+                {
+                    "id": "P1",
+                    "disposition": "rejected",
+                    "reason": "The behavior is outside the accepted requirements.",
+                    "confidence": "medium",
+                    "evidence": "The submitted specification has no requirement for this behavior.",
+                    "unresolved_assumption": "No linked follow-up requirement exists.",
+                }
+            ],
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "ready")
+
+    def test_legacy_schema_v1_finding_without_evidence_remains_valid(self):
+        self.write_review(
+            standards_findings=[
+                {"id": "S1", "disposition": "fixed", "reason": "Added the guard."}
+            ],
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "ready")
+
+    def test_partial_finding_evidence_metadata_is_rejected(self):
+        self.write_review(
+            standards_findings=[
+                {
+                    "id": "S1",
+                    "disposition": "fixed",
+                    "reason": "Added the missing guard.",
+                    "confidence": "high",
+                }
+            ]
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "needs a reproducer or evidence and unresolved assumption",
+            result.stdout,
+        )
+
+    def test_schema_v2_finding_requires_evidence_metadata(self):
+        self.write_review(
+            schema_version=2,
+            standards_findings=[
+                {"id": "S1", "disposition": "fixed", "reason": "Added the guard."}
+            ],
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["outcome"], "blocked")
+        self.assertIn(
+            "schema version 2 finding requires evidence metadata",
+            output["issues"][0]["issues"][0],
+        )
 
     def command(self, *extra, candidate="orch/task-1"):
         return subprocess.run(
