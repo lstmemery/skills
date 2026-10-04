@@ -20,6 +20,7 @@ Keep the implementation-versus-review boundary. The implementation agent has the
 Check these before suggesting a new guardrail:
 
 - Skills: `tools/skills-check.sh`, `tools/skills-lock.py --check`, and `tools/test_skills_lock.py`.
+- Retro prep: `skills/retro/scripts/retro_prep_digest.py verify --corpus CORPUS` — digest end-time coverage, empty-digest, and coordinator role checks per [PREP.md](../retro/PREP.md).
 - Orchestration: tests under `skills/orchestrator/tests/`.
 - PII jail: `tools/pii-jail/verify-jail.sh`, `tools/pii-jail/gate.sh`, and `tools/pii-jail/leak-scan.py`.
 - Code review: load and follow skill `code-review` for its standards, capture, and review workflow.
