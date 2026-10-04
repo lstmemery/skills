@@ -27,11 +27,11 @@
     },
     {
       "name": "diagnosing-bugs",
-      "coverage": "no-suite",
-      "suites": [],
+      "coverage": "suite",
+      "suites": ["tests/test_diagnosing_bugs_hitl_template.py"],
       "routing_critical": true,
       "triggers": "skills/diagnosing-bugs/tests/trigger-cases.json",
-      "rationale": "scripts/hitl-loop.template.sh is a non-executable template copied into consuming repos, which own its runtime behavior; no executable code ships in this repo. The observed-failure-scope routing boundary is guarded by trigger fixtures."
+      "rationale": null
     },
     {
       "name": "domain-modeling",
@@ -187,11 +187,11 @@
     },
     {
       "name": "wizard",
-      "coverage": "no-suite",
-      "suites": [],
+      "coverage": "suite",
+      "suites": ["tests/test_wizard_template.py"],
       "routing_critical": true,
       "triggers": "skills/wizard/tests/trigger-cases.json",
-      "rationale": "template.sh is a non-executable template for wizards generated into consuming repos, which own the generated output; no executable code ships here. The human-only-steps boundary is guarded by trigger fixtures."
+      "rationale": null
     },
     {
       "name": "writing-for-agents",

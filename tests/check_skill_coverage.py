@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import re
 import sys
+
+import trigger_schema
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = ROOT / "skills"
 REGISTRY_PATH = ROOT / "tests" / "skill-coverage.json"
-CASE_ID_RE = re.compile(r"[a-z0-9-]+")
+SCRIPT_SUFFIXES = {".sh", ".bash"}
 
 
 def skill_directories() -> list[str]:
@@ -29,15 +30,17 @@ def skill_directories() -> list[str]:
 
 
 def has_executable_code(skill_dir: Path) -> bool:
-    """Executable code is any .py file, or any file with the execute bit,
-    excluding files under a tests/ directory (the skill's own tests)."""
+    """Executable code is any .py file, any shell script, or any file with
+    the execute bit, excluding files under a tests/ directory (the skill's
+    own tests). Shell templates count: a skill carrying one must record a
+    suite that exercises the template in place, not a no-suite rationale."""
     for path in sorted(skill_dir.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(skill_dir)
         if "tests" in rel.parts:
             continue
-        if path.suffix == ".py":
+        if path.suffix == ".py" or path.suffix in SCRIPT_SUFFIXES:
             return True
         if path.stat().st_mode & 0o111:
             return True
@@ -53,46 +56,12 @@ def validate_trigger_fixture(path: Path, errors: list[str], label: str) -> None:
     except (OSError, json.JSONDecodeError) as exc:
         errors.append(f"{label}: unreadable fixture {path}: {exc}")
         return
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        errors.append(f"{label}: {path} must be a JSON object with version 1")
-        return
-    cases = payload.get("cases")
-    if not isinstance(cases, list) or not cases:
-        errors.append(f"{label}: {path} must have a non-empty cases array")
-        return
-    ids: set[str] = set()
-    prompts: set[str] = set()
-    counts = {"yes": 0, "no": 0}
-    for index, case in enumerate(cases):
-        where = f"{label}: {path} case {index}"
-        if not isinstance(case, dict):
-            errors.append(f"{where} must be an object")
-            continue
-        case_id = case.get("id")
-        activation = case.get("activation")
-        prompt = case.get("prompt")
-        if not isinstance(case_id, str) or not CASE_ID_RE.fullmatch(case_id):
-            errors.append(f"{where} has an invalid id (want kebab-case)")
-            continue
-        if case_id in ids:
-            errors.append(f"{where} duplicates id {case_id}")
-        ids.add(case_id)
-        if activation not in counts:
-            errors.append(f"{where} ({case_id}) activation must be 'yes' or 'no'")
-            continue
-        if not isinstance(prompt, str) or not prompt.strip():
-            errors.append(f"{where} ({case_id}) prompt must be non-empty text")
-            continue
-        normalized = " ".join(prompt.split()).casefold()
-        if normalized in prompts:
-            errors.append(f"{where} ({case_id}) duplicates an earlier prompt")
-        prompts.add(normalized)
-        counts[activation] += 1
-    if counts["yes"] < 1 or counts["no"] < 1:
-        errors.append(
-            f"{label}: {path} needs at least one positive and one negative case; "
-            f"found {counts['yes']} yes / {counts['no']} no"
-        )
+    # Schema validation is shared with skills/shopping/tests/run_triggers.py
+    # via tests/trigger_schema.py (single source of truth).
+    errors.extend(
+        f"{label}: {path} {problem}"
+        for problem in trigger_schema.schema_errors(payload)
+    )
 
 
 def validate_entry(entry: dict, skill_dir: Path, errors: list[str]) -> None:
