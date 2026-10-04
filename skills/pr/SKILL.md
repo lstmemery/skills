@@ -24,11 +24,11 @@ Use this template for writing the PR body:
 
 ## Merge Danger
 
-**Door:** <one-way or two-way>
+**Door:** <required: one-way or two-way>
 
 <optional: description>
 
-**Blast Radius:** <one-word description>
+**Blast Radius:** <required: one-word description>
 
 <optional: potential ramifications of merge>
 ```
