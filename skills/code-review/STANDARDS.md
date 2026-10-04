@@ -15,7 +15,9 @@ Report every documented-standard violation and baseline smell in the change:
   `schema_version: 2`, record confidence
   (`high`, `medium`, or `low`) and a runnable reproducer or focused check. When
   no executable check applies, record the supporting evidence and unresolved
-  assumption instead.
+  assumption instead. The owner of this field contract is the orchestrator
+  skill's `references/review.md`; when amending the fields, read it and keep
+  this bullet aligned with it.
 - Skip rules already enforced by tooling. Keep all other findings; the coordinator's
   summary limit does not limit the finding list.
 

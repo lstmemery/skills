@@ -111,7 +111,10 @@ and `unresolved_assumption` strings instead. The preflight requires and validate
 this metadata on every version-2 finding. For backward compatibility, existing
 version-1 entries without evidence metadata remain valid; metadata present in a
 version-1 entry is still validated. Do not write new findings in version-1
-sidecars.
+sidecars. This paragraph owns the finding-evidence field contract; the
+restatements in the code-review skill (`SKILL.md`, `STANDARDS.md`) point here,
+and both validators enforce it through the shared module
+`herdr_jobs/review_evidence.py`.
 
 **Ownership:** the independent reviewer owns `review.md`, `done.json`, capture
 evidence, and the initial `review-evidence.json`; every finding starts as
