@@ -24,6 +24,8 @@ acceptance of worker output.
 - Delegate as much execution as possible. Use the coordinator for routing,
   task state, and user communication; delegate substantive reasoning and review.
   Fast models are preferred for coordinators. No exact model is pinned here.
+- Explicit model and effort requests remain fixed; change defaults only through
+  an accepted policy update backed by a task-class comparison.
 - Inside Herdr, place each worker in a new pane in its own new workspace; the
   managed path's topology is set and validated in
   [launch-policy.json](launch-policy.json). Preserve the user's focus. Support different harnesses across workers.
