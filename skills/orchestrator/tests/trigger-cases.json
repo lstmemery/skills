@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "dispatch-and-supervise",
+      "activation": "yes",
+      "prompt": "Dispatch the parser implementation to a background worker and supervise it to completion."
+    },
+    {
+      "id": "read-delegated-result",
+      "activation": "yes",
+      "prompt": "Check on the delegated research task and read back its result."
+    },
+    {
+      "id": "human-review-handoff",
+      "activation": "yes",
+      "prompt": "Prepare a human review handoff for the finished branch."
+    },
+    {
+      "id": "resume-stopped-delegation",
+      "activation": "yes",
+      "prompt": "Resume yesterday's delegated refactor task from where it stopped."
+    },
+    {
+      "id": "review-changes-yourself",
+      "activation": "no",
+      "prompt": "Review my uncommitted changes yourself."
+    },
+    {
+      "id": "background-shell-no-agent",
+      "activation": "no",
+      "prompt": "Run the linters in the background while you fix the imports."
+    },
+    {
+      "id": "one-off-shell-command",
+      "activation": "no",
+      "prompt": "Run this migration script for me now."
+    }
+  ]
+}

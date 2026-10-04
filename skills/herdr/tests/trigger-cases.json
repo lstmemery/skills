@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "split-panes-run-checks",
+      "activation": "yes",
+      "prompt": "Use Herdr to split my terminal into three panes and run lint, typecheck, and tests in them."
+    },
+    {
+      "id": "switch-layout-focus-agent",
+      "activation": "yes",
+      "prompt": "In Herdr, switch to the stacked layout and focus the agent pane."
+    },
+    {
+      "id": "two-herdr-agents",
+      "activation": "yes",
+      "prompt": "Start two Herdr agents in separate panes for this refactor."
+    },
+    {
+      "id": "plain-background-run",
+      "activation": "no",
+      "prompt": "Run the test suite in the background while you edit the config."
+    },
+    {
+      "id": "parallel-agent-review",
+      "activation": "no",
+      "prompt": "Get two agents to review this in parallel."
+    },
+    {
+      "id": "herdr-env-question",
+      "activation": "no",
+      "prompt": "What does the HERDR_ENV variable do?"
+    }
+  ]
+}

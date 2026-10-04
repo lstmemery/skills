@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "feature-red-green",
+      "activation": "yes",
+      "prompt": "Add rate limiting to the API — write the failing test first, then make it pass."
+    },
+    {
+      "id": "bugfix-test-first",
+      "activation": "yes",
+      "prompt": "Fix this bug test-first: reproduce it with a failing test, then fix it."
+    },
+    {
+      "id": "draft-test-list",
+      "activation": "yes",
+      "prompt": "Before implementing the parser changes, draft the test list with me."
+    },
+    {
+      "id": "diagnose-red-suite",
+      "activation": "no",
+      "prompt": "The suite is red on main — figure out which change broke it."
+    },
+    {
+      "id": "prototype-skip-tests",
+      "activation": "no",
+      "prompt": "Spin up a quick prototype to check the interaction model; skip tests for now."
+    },
+    {
+      "id": "explain-mock-patch",
+      "activation": "no",
+      "prompt": "Explain how mock.patch differs from monkeypatch."
+    }
+  ]
+}

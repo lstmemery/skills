@@ -30,43 +30,30 @@ ROUTER_SYSTEM_PROMPT = (
     "before doing anything else. If none matches, do not load any skill. Do not complete the "
     "underlying task; stop after this routing decision."
 )
+EXPECTED_COUNTS = {"yes": 8, "no": 5}
+
+# Shared trigger-fixture schema validation: tests/trigger_schema.py is the
+# single source of truth, also used by the repo-wide coverage check
+# (tests/check_skill_coverage.py). This runner only adds the shopping-specific
+# exact case-count requirement below.
+_REPO_TESTS_DIR = SKILL_DIR.parents[1] / "tests"
+sys.path.insert(0, str(_REPO_TESTS_DIR))
+import trigger_schema  # noqa: E402
 
 
 def load_cases() -> list[dict[str, Any]]:
     payload = json.loads(CASES_FILE.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("trigger-cases.json must be a JSON object")
-    if payload.get("version") != 1 or not isinstance(payload.get("cases"), list):
-        raise ValueError("trigger-cases.json must have version 1 and a cases array")
+    problems = trigger_schema.schema_errors(payload)
+    if problems:
+        raise ValueError("trigger-cases.json " + "; ".join(problems))
 
-    cases = payload["cases"]
-    ids: set[str] = set()
-    prompts: set[str] = set()
-    counts = {"yes": 0, "no": 0}
-    for index, case in enumerate(cases):
-        if not isinstance(case, dict):
-            raise ValueError(f"case {index} must be an object")
-        case_id = case.get("id")
-        activation = case.get("activation")
-        prompt = case.get("prompt")
-        if not isinstance(case_id, str) or not re.fullmatch(r"[a-z0-9-]+", case_id):
-            raise ValueError(f"case {index} has an invalid id")
-        if case_id in ids:
-            raise ValueError(f"duplicate case id: {case_id}")
-        ids.add(case_id)
-        if not isinstance(activation, str) or activation not in counts:
-            raise ValueError(f"{case_id}: activation must be 'yes' or 'no'")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError(f"{case_id}: prompt must be non-empty text")
-        normalized_prompt = " ".join(prompt.split()).casefold()
-        if normalized_prompt in prompts:
-            raise ValueError(f"duplicate prompt for {case_id}")
-        prompts.add(normalized_prompt)
-        counts[activation] += 1
-
-    if counts != {"yes": 8, "no": 5}:
-        raise ValueError(f"expected 8 positive and 5 negative prompts; found {counts}")
-    return cases
+    counts = trigger_schema.count_activations(payload["cases"])
+    if counts != EXPECTED_COUNTS:
+        raise ValueError(
+            f"expected {EXPECTED_COUNTS['yes']} positive and {EXPECTED_COUNTS['no']} negative prompts; "
+            f"found {counts['yes']} yes / {counts['no']} no"
+        )
+    return payload["cases"]
 
 
 def walk_dicts(value: Any) -> Iterable[dict[str, Any]]:

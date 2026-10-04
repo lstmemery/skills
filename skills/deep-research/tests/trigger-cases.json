@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "compare-vector-dbs",
+      "activation": "yes",
+      "prompt": "Compare vector database options for our retrieval stack before the platform decision next quarter; I need the landscape and a recommendation."
+    },
+    {
+      "id": "literature-survey",
+      "activation": "yes",
+      "prompt": "Survey the recent literature on retrieval evaluation metrics and lay out where a small team should invest."
+    },
+    {
+      "id": "build-vs-buy",
+      "activation": "yes",
+      "prompt": "We're deciding between building and buying an observability stack. Investigate the options, pricing, and migration risk."
+    },
+    {
+      "id": "high-stakes-standardization",
+      "activation": "yes",
+      "prompt": "Before we standardize the whole org on one monorepo tool, investigate the candidates and the switching costs."
+    },
+    {
+      "id": "single-doc-lookup",
+      "activation": "no",
+      "prompt": "Look up the retry defaults in this HTTP client's docs and tell me what they are."
+    },
+    {
+      "id": "api-fact-question",
+      "activation": "no",
+      "prompt": "What is the GitHub API rate limit for authenticated requests, and where is it documented?"
+    },
+    {
+      "id": "diagnose-regression",
+      "activation": "no",
+      "prompt": "The importer started failing after Tuesday's deploy — find out why."
+    },
+    {
+      "id": "edit-readme-prose",
+      "activation": "no",
+      "prompt": "Tighten the intro of our README for clarity."
+    }
+  ]
+}

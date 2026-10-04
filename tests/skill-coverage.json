@@ -1,0 +1,213 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "code-review",
+      "coverage": "suite",
+      "suites": ["tests/test_capture.py", "tests/test_capture_secret_gate.py"],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": null
+    },
+    {
+      "name": "codebase-design",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only design guidance (SKILL.md plus DEEPENING, DESIGN-IT-TWICE, EXAMPLES references); no executable code. Applied through agent judgment in design sessions; the boundary with domain-modeling is guarded from the domain-modeling trigger fixtures."
+    },
+    {
+      "name": "deep-research",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/deep-research/tests/trigger-cases.json",
+      "rationale": "Prose-only research procedure (SKILL.md plus REFERENCE and MAINTENANCE); no executable code. The scope boundary with research is guarded by trigger fixtures."
+    },
+    {
+      "name": "diagnosing-bugs",
+      "coverage": "suite",
+      "suites": ["tests/test_diagnosing_bugs_hitl_template.py"],
+      "routing_critical": true,
+      "triggers": "skills/diagnosing-bugs/tests/trigger-cases.json",
+      "rationale": null
+    },
+    {
+      "name": "domain-modeling",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/domain-modeling/tests/trigger-cases.json",
+      "rationale": "Prose-only modeling guidance (SKILL.md plus ADR-FORMAT and CONTEXT-FORMAT references); no executable code. The routine-vocabulary-lookup refusal boundary is guarded by trigger fixtures."
+    },
+    {
+      "name": "grilling",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/grilling/tests/trigger-cases.json",
+      "rationale": "Prose-only interview procedure (SKILL.md plus QUESTION-FORMAT); no executable code. The explicit ask-to-be-grilled trigger is guarded by trigger fixtures."
+    },
+    {
+      "name": "grill-with-docs",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only wrapper pairing the grilling and domain-modeling skills; no executable code and no independent routing surface beyond the two skills it invokes."
+    },
+    {
+      "name": "handoff",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only compaction procedure; no executable code. Output quality is agent judgment over the current conversation, with no stable executable surface to regression-test."
+    },
+    {
+      "name": "herdr",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/herdr/tests/trigger-cases.json",
+      "rationale": "Prose-only command and control reference; the Herdr tool itself is external and exercised by its own project. The explicit-request gate (HERDR_ENV=1) is guarded by trigger fixtures."
+    },
+    {
+      "name": "implement",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only workflow from spec or tickets to a verified commit; verification tooling is repo-local at runtime, and no executable code ships in the skill."
+    },
+    {
+      "name": "orchestrator",
+      "coverage": "suite",
+      "suites": ["skills/orchestrator/tests", "tests/test_loading_profile.py"],
+      "routing_critical": true,
+      "triggers": "skills/orchestrator/tests/trigger-cases.json",
+      "rationale": null
+    },
+    {
+      "name": "pr",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only PR body template; no executable code."
+    },
+    {
+      "name": "prototype",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only guidance for throwaway exploratory builds; no executable code."
+    },
+    {
+      "name": "research",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/research/tests/trigger-cases.json",
+      "rationale": "Prose-only lookup recipe (SKILL.md plus EVIDENCE and REFERENCE); no executable code. The route-broad-work-to-deep-research boundary is guarded by trigger fixtures."
+    },
+    {
+      "name": "retro",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only session review procedure (SKILL.md plus SOURCES and STEERING-SURFACES); no executable code."
+    },
+    {
+      "name": "setup-matt-pocock-skills",
+      "coverage": "suite",
+      "suites": ["tests/test_tickets.py"],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": null
+    },
+    {
+      "name": "shopping",
+      "coverage": "suite",
+      "suites": ["skills/shopping/tests"],
+      "routing_critical": true,
+      "triggers": "skills/shopping/tests/trigger-cases.json",
+      "rationale": null
+    },
+    {
+      "name": "tdd",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/tdd/tests/trigger-cases.json",
+      "rationale": "Prose-only recipe (SKILL.md plus mocking and tests references); no executable code. The test-first scoping triggers are guarded by trigger fixtures."
+    },
+    {
+      "name": "teach",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only stateful seminar workspace procedure; no executable code."
+    },
+    {
+      "name": "to-spec",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only synthesis procedure; tracker publication runs through scripts installed by setup-matt-pocock-skills, which carries the suite."
+    },
+    {
+      "name": "to-tickets",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only ticket-splitting procedure; tracker publication runs through scripts installed by setup-matt-pocock-skills, which carries the suite."
+    },
+    {
+      "name": "tutor",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only tutoring loop (SKILL.md plus REFERENCE); no executable code."
+    },
+    {
+      "name": "wayfinder",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only decision-ticket map (SKILL.md plus CHART and WORK); no executable code."
+    },
+    {
+      "name": "wizard",
+      "coverage": "suite",
+      "suites": ["tests/test_wizard_template.py"],
+      "routing_critical": true,
+      "triggers": "skills/wizard/tests/trigger-cases.json",
+      "rationale": null
+    },
+    {
+      "name": "writing-for-agents",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only writing guidance (SKILL.md plus MAINTENANCE, RATIONALE, SKILL-MECHANICS); no executable code."
+    },
+    {
+      "name": "writing-for-humans",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": true,
+      "triggers": "skills/writing-for-humans/tests/trigger-cases.json",
+      "rationale": "Prose-only copy-editing guidance; no executable code. The leave-code-and-data-alone refusal boundary is guarded by trigger fixtures."
+    }
+  ]
+}
