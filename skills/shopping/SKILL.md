@@ -1,6 +1,6 @@
 ---
 name: shopping
-description: "Research a real purchase or current offer for a specific product, event ticket, or pass. Use for exact variant and delivered-cost comparisons, service fees, coupons or promo codes, cashback, eligibility, and “which should I buy?” choices. Includes one-item coupon checks and ticket or pass price comparisons. Exclude recipes, activity or restaurant recommendations, and educational product comparisons without a buying decision."
+description: "Research a concrete purchase or current offer. Use for exact variants, delivered costs, coupons or cashback, eligibility, or choosing what to buy; exclude recipes, outing recommendations, and research without a purchase decision."
 ---
 
 # Shopping
