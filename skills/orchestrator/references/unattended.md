@@ -93,16 +93,21 @@ a smaller or cheaper model, because sections a strong model could skip were
 load-bearing for a smaller one (F10: a smaller model omitted such sections).
 
 Use the strongest available boundary: the research jail for research, and a
-pinned commit with output outside the checkout for repository reads (see the
-[worker contract](workers.md#assignment)). A pinned commit and separate output
-directory give provenance, not write protection. Before dispatch, record whether
-the selected route enforces read-only source, from its observed mounts or
-sandbox mode rather than its name; where nothing enforces it, record the
-isolation gap and do not call the run read-only-enforced. After each repository-reading worker
-is terminal, compare the checkout's `HEAD` and `git status --porcelain` with the
-values recorded before launch; a difference quarantines that worker's result
-and becomes an Exceptions item. This check cannot detect a write that was later
-restored, so it supplements the boundary rather than replacing it.
+fresh, clean worktree pinned to the candidate commit with output outside the
+checkout for repository reads (see the [worker contract](workers.md#assignment)).
+A pinned commit and separate output directory give provenance, not write
+protection. Before dispatch, record whether the selected route enforces
+read-only source, from its observed mounts or sandbox mode rather than its name;
+where nothing enforces it, record the isolation gap and do not call the run
+read-only-enforced. Verify the worktree is clean with
+`git status --porcelain --untracked-files=all`, and record that output and its
+`HEAD` before launch. After each repository-reading worker is terminal, compare
+the checkout's `HEAD` and status with those launch values; a difference
+quarantines that worker's result and becomes an Exceptions item. The clean
+baseline makes persistent tracked edits and untracked additions visible even
+when the coordinator's own checkout is dirty. This check still cannot detect a
+write restored before the comparison or writes to ignored paths, so it
+supplements the boundary rather than replacing it.
 
 Apply the worker contract's [attempt isolation and freshness](workers.md#result-record)
 checks and its [completion barrier](workers.md#validate-and-recover) (F2: a
