@@ -91,7 +91,13 @@ rationale; a skill with executable code (including shell-script templates)
 is marked `no-suite`; a claimed suite path does not exist or resolves to no
 tests; a routing-critical skill has a missing or structurally invalid fixture
 file (malformed ids, wrong version, missing positive/negative cases), or
-lacks both positive and negative cases. `tests/test_skill_coverage.py` runs
+lacks both positive and negative cases; or the 'Full local check set' block
+below and the registry disagree about per-skill suite directories (a suite
+directory outside `tests/` with no matching
+`cd <dir> && python3 -m unittest discover` line, or such a line for a
+directory no registry entry registers — suites under `tests/` are covered by
+the `cd tests` line and are never required individually).
+`tests/test_skill_coverage.py` runs
 the same check inside `python3 -m unittest`, so a normal test run enforces
 the policy.
 
@@ -101,6 +107,7 @@ unittest from inside each):
 ```sh
 cd tests && python3 -m unittest discover
 cd skills/orchestrator/tests && python3 -m unittest discover
+cd skills/retro/tests && python3 -m unittest discover
 cd skills/shopping/tests && python3 -m unittest discover
 python3 skills/shopping/tests/run_triggers.py --validate-only
 python3 tests/check_skill_coverage.py
