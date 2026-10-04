@@ -26,6 +26,14 @@ claude plugins install lstmemery-skills
 Skills that assume per-repo configuration (issue tracker, triage labels, docs
 locations) want `setup-matt-pocock-skills` run once per repo — it is included.
 
+## Skill coverage
+
+Every skill carries a recorded coverage outcome — a runnable suite or an
+explicit no-suite rationale — and routing-critical skills carry positive and
+negative trigger fixtures. The policy lives in
+[CONTRIBUTING.md](CONTRIBUTING.md); `python3 tests/check_skill_coverage.py`
+enforces it.
+
 ## Provenance
 
 Every skill is one of: **original** (written here), **adapted** (started from

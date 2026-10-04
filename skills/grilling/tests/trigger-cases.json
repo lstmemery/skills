@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "explicit-grill-request",
+      "activation": "yes",
+      "prompt": "Grill me on my plan to migrate the monolith to services before I write the spec."
+    },
+    {
+      "id": "grilled-until-weakness",
+      "activation": "yes",
+      "prompt": "I want to be grilled about this database choice until the weak points show."
+    },
+    {
+      "id": "relentless-stress-test",
+      "activation": "yes",
+      "prompt": "Stress-test my startup idea with relentless questioning."
+    },
+    {
+      "id": "job-interview-practice",
+      "activation": "no",
+      "prompt": "Ask me practice interview questions about React so I can prep for my job interview."
+    },
+    {
+      "id": "clarifying-then-implement",
+      "activation": "no",
+      "prompt": "Ask me any clarifying questions you need, then implement the ticket as specced."
+    },
+    {
+      "id": "essay-argument-feedback",
+      "activation": "no",
+      "prompt": "Give me feedback on the argument structure of this essay."
+    },
+    {
+      "id": "branch-correctness-review",
+      "activation": "no",
+      "prompt": "Review this branch for correctness issues."
+    }
+  ]
+}

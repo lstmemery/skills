@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "docs-behaviour-question",
+      "activation": "yes",
+      "prompt": "Check the Celery docs and tell me how task retries interact with acks_late."
+    },
+    {
+      "id": "api-limits-lookup",
+      "activation": "yes",
+      "prompt": "Find the current rate limits for the Anthropic API and cite where you got them."
+    },
+    {
+      "id": "single-rfc-reading",
+      "activation": "yes",
+      "prompt": "Read this RFC and summarize what it requires for backpressure handling."
+    },
+    {
+      "id": "installed-version-lookup",
+      "activation": "yes",
+      "prompt": "Look up whether our installed Click version supports the group option we're using."
+    },
+    {
+      "id": "broad-database-comparison",
+      "activation": "no",
+      "prompt": "Compare Postgres, MySQL, and SQLite for our analytics workload before we commit."
+    },
+    {
+      "id": "buy-vs-build-landscape",
+      "activation": "no",
+      "prompt": "Research the build-vs-buy landscape for session recording tools and recommend one."
+    },
+    {
+      "id": "diagnose-ci-failure",
+      "activation": "no",
+      "prompt": "Why does this test pass locally but fail in CI? Find the cause."
+    },
+    {
+      "id": "copy-edit-release-note",
+      "activation": "no",
+      "prompt": "Copy-edit this release note for clarity."
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "vaultwarden-cutover-wizard",
+      "activation": "yes",
+      "prompt": "Build a wizard for the Vaultwarden cutover — the token entry steps need me at the keyboard."
+    },
+    {
+      "id": "dashboard-sso-wizard",
+      "activation": "yes",
+      "prompt": "Generate a step-by-step wizard for the dashboard SSO setup; I'll do the browser parts myself."
+    },
+    {
+      "id": "dns-cutover-gates",
+      "activation": "yes",
+      "prompt": "Make a wizard for the DNS cutover with check gates before each human step."
+    },
+    {
+      "id": "run-dry-run-directly",
+      "activation": "no",
+      "prompt": "Just run the DNS dry-run script yourself; it's an ordinary shell command."
+    },
+    {
+      "id": "issue-tracker-setup",
+      "activation": "no",
+      "prompt": "Set up the triage labels and issue tracker config for this repo."
+    },
+    {
+      "id": "unattended-automation",
+      "activation": "no",
+      "prompt": "Write a Python script that syncs the backups nightly and put it on a timer."
+    }
+  ]
+}

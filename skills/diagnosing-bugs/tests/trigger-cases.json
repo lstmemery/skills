@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "crash-with-traceback",
+      "activation": "yes",
+      "prompt": "Since the 3.12 upgrade, the worker crashes on startup with KeyError: 'queue' — here's the traceback; find the cause."
+    },
+    {
+      "id": "latency-regression",
+      "activation": "yes",
+      "prompt": "API p99 latency doubled after Tuesday's deploy. Diagnose the regression."
+    },
+    {
+      "id": "branch-only-test-failure",
+      "activation": "yes",
+      "prompt": "This test fails only on main, never on my branch. Work out what's different."
+    },
+    {
+      "id": "consumer-device-fault",
+      "activation": "no",
+      "prompt": "My car Bluetooth audio keeps cutting out, but calls stay connected."
+    },
+    {
+      "id": "environment-setup-howto",
+      "activation": "no",
+      "prompt": "How do I set up a fresh virtualenv for this project?"
+    },
+    {
+      "id": "retry-module-design",
+      "activation": "no",
+      "prompt": "Design the interface for a retry helper module, including its test seams."
+    },
+    {
+      "id": "parser-tests-first",
+      "activation": "no",
+      "prompt": "Add tests for the parser module before I change it."
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "tighten-readme-intro",
+      "activation": "yes",
+      "prompt": "Tighten this README intro for clarity, and keep my voice."
+    },
+    {
+      "id": "release-notes-quotes-intact",
+      "activation": "yes",
+      "prompt": "Copy-edit these release notes; leave the quoted issue text untouched."
+    },
+    {
+      "id": "blog-clarity-keep-claims",
+      "activation": "yes",
+      "prompt": "Make this blog post easier to follow without changing what it claims."
+    },
+    {
+      "id": "refactor-function-readability",
+      "activation": "no",
+      "prompt": "Refactor this function for readability."
+    },
+    {
+      "id": "agent-facing-docs",
+      "activation": "no",
+      "prompt": "Rewrite the harness config docs so an agent can follow them exactly."
+    },
+    {
+      "id": "fix-results-table-numbers",
+      "activation": "no",
+      "prompt": "Correct the numbers in this results table."
+    }
+  ]
+}

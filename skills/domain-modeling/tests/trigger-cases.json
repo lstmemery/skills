@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "term-means-three-things",
+      "activation": "yes",
+      "prompt": "'Project' means three different things across billing and shipping; help us resolve the ownership and boundaries."
+    },
+    {
+      "id": "adr-for-context-split",
+      "activation": "yes",
+      "prompt": "Draft an ADR for splitting the orders context out of the monolith."
+    },
+    {
+      "id": "context-map-before-refactor",
+      "activation": "yes",
+      "prompt": "Map the contexts between support and fulfillment before we refactor the intake flow."
+    },
+    {
+      "id": "routine-glossary-lookup",
+      "activation": "no",
+      "prompt": "What does 'SKU' mean in our project glossary?"
+    },
+    {
+      "id": "cache-module-design",
+      "activation": "no",
+      "prompt": "Design the module interface for the cache layer, including its test seams."
+    },
+    {
+      "id": "function-variable-renaming",
+      "activation": "no",
+      "prompt": "Rename the confusing variables in this function for readability."
+    }
+  ]
+}
