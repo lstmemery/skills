@@ -38,9 +38,9 @@ RESULT_OUTCOMES = {"ready", "blocked", "failed"}
 CHECK_STATUSES = {"passed", "failed", "not_run"}
 OUTCOME_NORMALIZATIONS = {"complete": "ready", "completed": "ready"}
 WORKER_MARKERS = {"brief.md", "result.json", "disposition.json"}
-WORKER_DISCOVERY_EXCLUDED_NAMES = {"capture", "test-copy"}
-WORKER_DISCOVERY_EXCLUDED_PREFIXES = ("capture-", "test-copy-")
-WORKER_DISCOVERY_EXCLUDED_SUFFIXES = ("-repo",)
+REPOSITORY_COPY_MARKER = ".git"
+CAPTURE_MANIFEST_NAME = "manifest.json"
+CAPTURE_COMPLETION_MARKER = "COMPLETE"
 OVERWRITE_MESSAGE = "disposition already exists: {path}; pass --replace to update it"
 
 
@@ -291,12 +291,20 @@ def _relative_directory(value, label):
     return Path(*parts)
 
 
-def _is_excluded_worker_discovery_subtree(directory):
-    return any(
-        name in WORKER_DISCOVERY_EXCLUDED_NAMES
-        or name.startswith(WORKER_DISCOVERY_EXCLUDED_PREFIXES)
-        or name.endswith(WORKER_DISCOVERY_EXCLUDED_SUFFIXES)
-        for name in directory.parts
+def _is_capture_or_repository_copy(directory):
+    """Report whether evidence in the directory itself marks it as copied material.
+
+    Discovery may only skip a subtree when the directory carries copy evidence:
+    a git checkout or linked worktree marker (``.git`` file or directory), or a
+    capture written by the local code-review convention (``manifest.json`` plus
+    the ``COMPLETE`` marker). Directory names such as ``capture`` or ``*-repo``
+    are never evidence, so a live worker with such a name is still discovered.
+    """
+    if (directory / REPOSITORY_COPY_MARKER).exists():
+        return True
+    return (
+        (directory / CAPTURE_MANIFEST_NAME).is_file()
+        and (directory / CAPTURE_COMPLETION_MARKER).is_file()
     )
 
 
@@ -357,10 +365,10 @@ def _discover_worker_directories(run_root):
             for name in directory_names:
                 directory = current_path / name
                 relative_directory = directory.relative_to(run_root)
-                if _is_excluded_worker_discovery_subtree(relative_directory):
-                    continue
                 if directory.is_symlink():
                     symlink_directories.append(relative_directory)
+                elif _is_capture_or_repository_copy(directory):
+                    continue
                 else:
                     traversable.append(name)
             directory_names[:] = traversable
