@@ -202,6 +202,15 @@ class WorkerRecordsTest(unittest.TestCase):
         """Register a real linked git worktree of the repository at the path."""
         self.git("worktree", "add", "--quiet", str(directory), cwd=repository)
 
+    def make_docs_symlink(self, subtree_root):
+        """Mirror the live run shape: proxmox/docs/agents linked outside the run."""
+        docs = subtree_root / "proxmox/docs"
+        docs.mkdir(parents=True)
+        outside = self.root / "outside-docs"
+        outside.mkdir(exist_ok=True)
+        (docs / "agents").symlink_to(outside, target_is_directory=True)
+        return docs / "agents"
+
     def test_missing_result_is_rejected_for_brief_only_fixture(self):
         worker_dir = self.root / "tasks/brief-only-worker"
         worker_dir.mkdir(parents=True)
@@ -388,11 +397,7 @@ class WorkerRecordsTest(unittest.TestCase):
         copied_fixture = checkout / ".pi/delegate/old-task"
         copied_fixture.mkdir(parents=True)
         (copied_fixture / "brief.md").write_text("Task: copied historical worker.\n")
-        docs = checkout / "proxmox/docs"
-        docs.mkdir(parents=True)
-        outside = self.root / "outside-docs"
-        outside.mkdir()
-        (docs / "agents").symlink_to(outside, target_is_directory=True)
+        self.make_docs_symlink(checkout)
 
         process = self.call("check-closeout", run_dir)
 
@@ -416,6 +421,89 @@ class WorkerRecordsTest(unittest.TestCase):
         for name in ("reviewer-repo", "capture", "test-copy-7"):
             self.assertIn(f"tasks/{name}", process.stderr)
 
+    def test_closeout_reports_unrostered_worker_with_git_checkout_at_its_root(self):
+        run_dir = self.root / "run"
+        self.register_completed_worker(run_dir)
+        worker_dir = run_dir / "tasks/cloner-worker"
+        self.make_git_checkout(worker_dir)
+        (worker_dir / "brief.md").write_text(
+            "Task: real unrostered worker that cloned into its own root.\n"
+        )
+        (worker_dir / "result.json").write_text("{}")
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("unrostered worker-shaped directory", process.stderr)
+        self.assertIn("tasks/cloner-worker", process.stderr)
+
+    def test_closeout_reports_unrostered_worker_with_gitfile_at_its_root(self):
+        run_dir = self.root / "run"
+        self.register_completed_worker(run_dir)
+        source = self.root / "captured-repository"
+        self.make_git_checkout(source)
+        worker_dir = run_dir / "tasks/worktree-worker"
+        self.make_git_worktree(source, worker_dir)
+        (worker_dir / "brief.md").write_text(
+            "Task: real unrostered worker registered as a linked worktree.\n"
+        )
+        (worker_dir / "result.json").write_text("{}")
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("unrostered worker-shaped directory", process.stderr)
+        self.assertIn("tasks/worktree-worker", process.stderr)
+
+    def test_closeout_reports_unrostered_worker_with_capture_markers_at_its_root(self):
+        run_dir = self.root / "run"
+        self.register_completed_worker(run_dir)
+        worker_dir = run_dir / "tasks/capture-worker"
+        worker_dir.mkdir(parents=True)
+        (worker_dir / "manifest.json").write_text('{"capture_id": "synthetic"}\n')
+        (worker_dir / "COMPLETE").write_text("synthetic\n")
+        (worker_dir / "brief.md").write_text(
+            "Task: real unrostered worker with capture markers at its root.\n"
+        )
+        (worker_dir / "result.json").write_text("{}")
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("unrostered worker-shaped directory", process.stderr)
+        self.assertIn("tasks/capture-worker", process.stderr)
+
+    def test_closeout_reports_evidence_carrying_worker_below_the_tasks_root(self):
+        run_dir = self.root / "run"
+        self.register_completed_worker(run_dir)
+        worker_dir = run_dir / "tasks/reviewer/review/embedded-worker"
+        self.make_git_checkout(worker_dir)
+        (worker_dir / "brief.md").write_text(
+            "Task: unrostered worker nested deeper than the tasks root.\n"
+        )
+        (worker_dir / "result.json").write_text("{}")
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("unrostered worker-shaped directory", process.stderr)
+        self.assertIn("tasks/reviewer/review/embedded-worker", process.stderr)
+
+    def test_rostered_worker_with_copy_evidence_at_its_root_is_validated_not_reported(self):
+        run_dir = self.root / "run"
+        worker_dir = run_dir / "tasks/cloner-worker"
+        self.make_git_checkout(worker_dir)
+        (worker_dir / "brief.md").write_text(
+            "Task: rostered worker that cloned into its own root.\n"
+        )
+        self.write_roster(run_dir, [self.roster_entry("cloner-worker")])
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("missing disposition.json", process.stderr)
+        self.assertNotIn("unrostered worker-shaped directory", process.stderr)
+
     def test_closeout_ignores_real_worktree_in_realistic_run_layout(self):
         run_dir = self.root / "run"
         self.register_completed_worker(run_dir, task_id="regate-1144-1146")
@@ -433,11 +521,7 @@ class WorkerRecordsTest(unittest.TestCase):
         )
         copied_fixture.mkdir(parents=True)
         shutil.copyfile(FIXTURES / "brief-only/brief.md", copied_fixture / "brief.md")
-        docs = worktree / "proxmox/docs"
-        docs.mkdir(parents=True)
-        outside = self.root / "outside-docs"
-        outside.mkdir()
-        (docs / "agents").symlink_to(outside, target_is_directory=True)
+        self.make_docs_symlink(worktree)
 
         process = self.call("check-closeout", run_dir)
 
