@@ -211,6 +211,12 @@ class WorkerRecordsTest(unittest.TestCase):
         (docs / "agents").symlink_to(outside, target_is_directory=True)
         return docs / "agents"
 
+    def make_capture_markers(self, directory):
+        """Mark the directory as a code-review capture copy (manifest + COMPLETE)."""
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text('{"capture_id": "synthetic"}\n')
+        (directory / "COMPLETE").write_text("synthetic\n")
+
     def test_missing_result_is_rejected_for_brief_only_fixture(self):
         worker_dir = self.root / "tasks/brief-only-worker"
         worker_dir.mkdir(parents=True)
@@ -385,9 +391,7 @@ class WorkerRecordsTest(unittest.TestCase):
         self.register_completed_worker(run_dir)
 
         capture = run_dir / "tasks/reviewer/review/capture"
-        capture.mkdir(parents=True)
-        (capture / "manifest.json").write_text('{"capture_id": "synthetic"}\n')
-        (capture / "COMPLETE").write_text("synthetic\n")
+        self.make_capture_markers(capture)
         captured_task = capture / ".scratch/old-task"
         captured_task.mkdir(parents=True)
         (captured_task / "result.json").write_text("{}")
@@ -459,9 +463,7 @@ class WorkerRecordsTest(unittest.TestCase):
         run_dir = self.root / "run"
         self.register_completed_worker(run_dir)
         worker_dir = run_dir / "tasks/capture-worker"
-        worker_dir.mkdir(parents=True)
-        (worker_dir / "manifest.json").write_text('{"capture_id": "synthetic"}\n')
-        (worker_dir / "COMPLETE").write_text("synthetic\n")
+        self.make_capture_markers(worker_dir)
         (worker_dir / "brief.md").write_text(
             "Task: real unrostered worker with capture markers at its root.\n"
         )
