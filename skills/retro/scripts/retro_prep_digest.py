@@ -10,8 +10,11 @@ mechanical, so the next corpus build cannot repeat them quietly:
 
 - Digests must cover through the session end timestamp; truncation
   (timeline or span ending before the listed session end) fails loudly.
-- Every digest must have a non-zero timeline; empty digests are flagged
-  in the report and, with `--write`, in index.md itself.
+- Every listed session must have a digest and every digest a non-zero
+  timeline; a listed session without a digest fails verify unless
+  `--allow-missing-digests` is passed for intentionally digest-less
+  builds, and empty digests are flagged in the report and, with
+  `--write`, in index.md itself.
 - Role is inferred from the /orchestrator invocation in the session's
   user turns rather than the first prompt; index.md coordinator rows
   must match that inference (`--write` corrects them).
@@ -22,13 +25,13 @@ table every build already writes) and the per-session digests under
 transcripts, this script verifies what it shipped.
 
 Usage:
-  retro_prep_digest.py verify --corpus DIR [--write] [--require-digests]
+  retro_prep_digest.py verify --corpus DIR [--write] [--allow-missing-digests]
       [--grace-minutes N] [--report PATH]
   retro_prep_digest.py derive-role [--text TEXT]   # text on stdin
 
 Exit codes: 0 all checks passed, 1 fatal usage/parse error, 2 check
-failures found (truncated or empty digest, coordinator role mismatch,
-span clip).
+failures found (truncated or empty digest, listed session without a
+digest, coordinator role mismatch, span clip).
 """
 
 import argparse
@@ -39,14 +42,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 
 DEFAULT_GRACE_MINUTES = 2
-
-# A digest without any timeline entry this many minutes past the listed
-# session end is truncated. Symmetric tolerance for entries past the end
-# (clock skew between builder reads).
-DEFAULT_GRACE = timedelta(minutes=DEFAULT_GRACE_MINUTES)
 
 # Role inference: user turns are scanned for orchestrator invocation and
 # worker-dispatch patterns, not just the first prompt. Ordered; the
@@ -62,14 +60,12 @@ ROLE_PATTERNS = (
         r"|work autonomously to completion", re.IGNORECASE)),
 )
 
-TIMELINE_HEADER_RE = re.compile(r"^###\s+\d{1,2}:\d{2}:\d{2}", re.MULTILINE)
 ENTRY_TIME_RE = re.compile(r"^###\s+(\d{1,2}):(\d{2}):(\d{2})")
 DATETIME_RE = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s*([A-Za-z0-9+\-:/]+))?")
 SPAN_LINE_RE = re.compile(r"^\s*-\s*Session span:\s*(.+)$", re.MULTILINE)
 SPAN_TO_RE = re.compile(r"\s+to\s+")
 USER_TURN_TITLE_RE = re.compile(r"^###\s+\S+\s+.*user turn", re.IGNORECASE)
-FENCE_RE = re.compile(r"^```")
 
 
 def norm_role(cell):
@@ -170,8 +166,10 @@ def parse_index(path):
                 break  # table ended
             continue
         cells = split_row(line.strip().strip("|"))
-        if len(cells) < len(headers):
-            raise ValueError(f"{path}:{i + 1}: row has {len(cells)} cells, expected {len(headers)}")
+        if len(cells) != len(headers):
+            raise ValueError(
+                f"{path}:{i + 1}: row has {len(cells)} cells, expected {len(headers)} "
+                f"(an unescaped pipe in a cell shifts the columns)")
         record = dict(zip(headers, cells))
         end = parse_naive(record.get("End in window", ""))
         if end is None:
@@ -208,7 +206,7 @@ def parse_digest(path):
             digest.span_end = parse_naive(parts[1])
     lines = text.splitlines()
     in_timeline, in_user_turn, in_user_body = False, False, False
-    body = []
+    body, fence_depth = [], 0
     for line in lines:
         if line.startswith("## "):
             in_timeline = line.strip().lower() == "## timeline"
@@ -227,11 +225,20 @@ def parse_digest(path):
             continue
         if in_user_turn:
             if line.startswith("```"):
-                if in_user_body:
+                # A closing fence never carries an info string, so a
+                # ```lang line inside a verbatim prompt opens a nested
+                # block rather than ending the capture.
+                info = line[3:].strip()
+                if not in_user_body:
+                    in_user_body = True
+                    fence_depth = 0
+                elif info:
+                    fence_depth += 1
+                elif fence_depth:
+                    fence_depth -= 1
+                else:
                     digest.user_turn_bodies.append("\n".join(body))
                     in_user_turn = in_user_body = False
-                else:
-                    in_user_body = True
                 continue
             if in_user_body:
                 body.append(line)
@@ -274,13 +281,13 @@ def last_entry_datetime(digest, session_end):
                     session_end.day) + timedelta(seconds=seconds)
 
 
-def check_session(row, sessions_dir, grace, require_digests):
+def check_session(row, sessions_dir, grace, allow_missing_digests):
     check = SessionCheck(row=row)
     check.role_index = row.role
     path = find_digest(sessions_dir, row)
     if path is None:
         check.status = "NO-DIGEST"
-        if require_digests:
+        if not allow_missing_digests:
             check.problems.append("no digest file found for listed session")
         return check
     check.digest_path = str(path)
@@ -335,14 +342,27 @@ def check_session(row, sessions_dir, grace, require_digests):
 
 
 def annotate_index(path, checks):
-    """Rewrite index.md: fix coordinator role rows, flag empty digests."""
+    """Rewrite index.md: fix coordinator role rows, flag empty digests.
+
+    The Role cell is resolved from the header row by name, matching
+    parse_index, so tables with any column after Role are annotated in
+    the right cell.
+    """
     by_line = {c.row.line_no: c for c in checks}
     lines = path.read_text(encoding="utf-8").splitlines()
+    role_col = None
+    for line in lines:
+        if line.startswith("|") and "Session ID" in line and "Role" in line:
+            headers = [c.strip() for c in split_row(line.strip().strip("|"))]
+            role_col = headers.index("Role")
+            break
+    if role_col is None:
+        raise ValueError(f"{path}: no index table header containing Session ID and Role")
     for line_no, check in by_line.items():
         if check.status == "OK" and check.role_derived == check.role_index:
             continue
         cells = split_row(lines[line_no - 1].strip().strip("|"))
-        role_cell = cells[-1]
+        role_cell = cells[role_col]
         if check.status == "EMPTY":
             role_cell = f"{role_cell} [empty-digest]".strip()
         role_fixable = (check.role_derived
@@ -352,7 +372,7 @@ def annotate_index(path, checks):
                                               check.role_derived))
         if role_fixable:
             role_cell = f"{check.role_derived} (was: {check.role_index})"
-        cells[-1] = role_cell
+        cells[role_col] = role_cell
         lines[line_no - 1] = "| " + " | ".join(cells) + " |"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return sum(1 for c in checks
@@ -386,21 +406,20 @@ def render_report(checks):
 
 def cmd_verify(args):
     corpus = Path(args.corpus)
-    index_path = corpus / args.index
-    sessions_dir = Path(args.sessions_dir) if args.sessions_dir else corpus / "sessions"
+    index_path = corpus / "index.md"
+    sessions_dir = corpus / "sessions"
     rows = parse_index(index_path)
     grace = timedelta(minutes=args.grace_minutes)
-    checks = [check_session(row, sessions_dir, grace, args.require_digests)
+    checks = [check_session(row, sessions_dir, grace, args.allow_missing_digests)
               for row in rows]
     report_text, failed = render_report(checks)
-    missing = sum(1 for c in checks
-                  if c.status == "NO-DIGEST" and c.problems) if args.require_digests else 0
+    missing = sum(1 for c in checks if c.status == "NO-DIGEST" and c.problems)
     print(report_text)
     if args.report:
         payload = {
             "version": VERSION,
             "grace_minutes": args.grace_minutes,
-            "require_digests": args.require_digests,
+            "allow_missing_digests": args.allow_missing_digests,
             "sessions": [{
                 "session_id": c.row.session_id,
                 "harness": c.row.harness,
@@ -425,7 +444,9 @@ def cmd_verify(args):
     if failed or missing:
         print(f"VERIFY FAILED: {failed} session(s) with truncated or empty digests "
               f"or coordinator role mismatches"
-              + (f"; {missing} listed session(s) without a digest" if missing else ""),
+              + (f"; {missing} listed session(s) without a digest "
+                 f"(pass --allow-missing-digests for digest-less builds)"
+                 if missing else ""),
               file=sys.stderr)
         return 2
     return 0
@@ -444,13 +465,12 @@ def main(argv=None):
 
     verify = sub.add_parser("verify", help="check a built corpus against the digest guarantees")
     verify.add_argument("--corpus", required=True, help="corpus directory containing index.md and sessions/")
-    verify.add_argument("--index", default="index.md", help="index file name inside --corpus")
-    verify.add_argument("--sessions-dir", help="override digest directory (default CORPUS/sessions)")
     verify.add_argument("--grace-minutes", type=int, default=DEFAULT_GRACE_MINUTES,
                         help=f"tolerated gap between last timeline entry and session end "
                              f"(default {DEFAULT_GRACE_MINUTES})")
-    verify.add_argument("--require-digests", action="store_true",
-                        help="also fail for listed sessions without any digest")
+    verify.add_argument("--allow-missing-digests", action="store_true",
+                        help="report listed sessions without digests instead of failing "
+                             "(default: every listed session needs a digest)")
     verify.add_argument("--report", help="write JSON coverage report to this path")
     verify.add_argument("--write", action="store_true",
                         help="annotate index.md: correct coordinator roles, flag empty digests")

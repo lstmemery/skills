@@ -237,17 +237,18 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(2, code, out)
         self.assertIn("no 'Session span", out)
 
-    def test_missing_digest_ok_by_default_required_with_flag(self):
+    def test_missing_digest_fails_by_default_opt_out_with_flag(self):
         self.build_index()
         make_digest(self.root, 'claude-code', self.sid_coord,
                     start='2026-10-02 14:27:30 PDT', end='2026-10-02 15:07:55 PDT',
                     entries=['15:07:00'], user_turns=['You are the /orchestrator.'])
         code, out = self.verify()
-        self.assertEqual(0, code, out)
-        self.assertIn('no digest: 2', out)
-        code, out = self.verify('--require-digests')
         self.assertEqual(2, code, out)
         self.assertIn('no digest file found', out)
+        self.assertIn('no digest: 2', out)
+        code, out = self.verify('--allow-missing-digests')
+        self.assertEqual(0, code, out)
+        self.assertIn('no digest: 2', out)
 
     def test_timeline_entry_past_end_within_grace_passes(self):
         # Session crossing midnight: last entry 00:03 belongs to the next day.
@@ -291,6 +292,54 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(0, code, out)
         self.assertIn('note: worker dispatch found', out)
 
+    def test_nested_fence_in_user_turn_does_not_truncate_role_evidence(self):
+        # A verbatim prompt that contains its own fenced block must not end
+        # the captured user-turn body; role evidence after the inner fence
+        # still drives derive_role.
+        make_index(self.root, [
+            ('claude-code', self.sid_coord,
+             '2026-10-02 02:17:22 PDT', '2026-10-02 14:24:18 PDT', 'interactive'),
+        ])
+        body = ('Run this:\n\n```python\nprint("hi")\n```\n\n'
+                'You are the /orchestrator. Land #1132')
+        make_digest(self.root, 'claude-code', self.sid_coord,
+                    start='2026-10-02 02:17:22 PDT', end='2026-10-02 14:24:18 PDT',
+                    entries=['02:17:30', '14:24:00'], user_turns=[body, 'bump'])
+        code, out = self.verify()
+        self.assertEqual(2, code, out)
+        self.assertIn('does not match orchestrator-invocation', out)
+        path = next((self.root / 'sessions').glob('*.md'))
+        # Fence markers are markup, not prompt text; the nested block's
+        # content and everything after it (the role evidence) is captured.
+        self.assertEqual(
+            ['Run this:\n\nprint("hi")\n\nYou are the /orchestrator. Land #1132',
+             'bump'],
+            MOD.parse_digest(path).user_turn_bodies)
+
+    def test_write_targets_role_column_when_table_has_trailing_column(self):
+        lines = [
+            '# index', '',
+            '| Harness | Session ID | Start | End in window | Size | '
+            'First user prompt (redacted) | Role | Notes |',
+            '|---|---|---|---|---:|---|---|---|',
+            f'| claude-code | `{self.sid_coord}` | 2026-10-02 02:17:22 PDT | '
+            '2026-10-02 14:24:18 PDT | 1,000 B | first prompt | interactive | keep me |',
+        ]
+        (self.root / 'index.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        make_digest(self.root, 'claude-code', self.sid_coord,
+                    start='2026-10-02 02:17:22 PDT', end='2026-10-02 14:24:18 PDT',
+                    entries=['02:17:30', '14:24:00'],
+                    user_turns=['You are the /orchestrator. Land #1132'])
+        code, _ = self.verify('--write')
+        self.assertEqual(2, code)  # the corrected row is still reported once
+        row = [ln for ln in (self.root / 'index.md').read_text(encoding='utf-8').splitlines()
+               if self.sid_coord in ln][0]
+        cells = MOD.split_row(row.strip().strip('|'))
+        self.assertEqual('coordinator (was: interactive)', cells[6])
+        self.assertEqual('keep me', cells[7])
+        code, out = self.verify()
+        self.assertEqual(0, code, out)
+
     def test_grace_minutes_option(self):
         make_index(self.root, [
             ('claude-code', self.sid_inter,
@@ -327,6 +376,23 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertEqual('interactive', rows[0].role)
         self.assertEqual('choice a | choice b', rows[0].first_prompt)
+
+    def test_overlong_index_row_fails(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        make_index(root, [
+            ('claude-code', 'abc-123',
+             '2026-10-02 02:17:22 PDT', '2026-10-02 14:24:18 PDT', 'interactive'),
+        ])
+        # An unescaped pipe in the prompt cell adds a column; parse must
+        # refuse instead of silently shifting Role/End onto other cells.
+        text = (root / 'index.md').read_text(encoding='utf-8')
+        text = text.replace('first prompt', 'choice a | choice b')
+        (root / 'index.md').write_text(text, encoding='utf-8')
+        with self.assertRaises(ValueError) as ctx:
+            MOD.parse_index(root / 'index.md')
+        self.assertIn('cells, expected', str(ctx.exception))
 
     def test_parse_digest_extracts_user_turn_bodies(self):
         tmp = tempfile.TemporaryDirectory()

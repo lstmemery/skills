@@ -19,7 +19,8 @@ session.
 3. **Role comes from the invocation, not the first prompt.** Scan every user
    turn for `You are the /orchestrator` (coordinator) and worker-dispatch
    patterns (`You are a worker/code reviewer/read-only reviewer`,
-   `parent-dispatched worker task`, `Read and execute your brief`). Coordinator
+   `parent-dispatched worker task`, `Read and execute your brief` or
+   `Read and execute /…`, `Work autonomously to completion`). Coordinator
    wins over worker. A session whose first prompt looks interactive but which
    contains an orchestrator invocation is a coordinator session.
 
@@ -44,9 +45,12 @@ python3 skills/retro/scripts/retro_prep_digest.py verify --corpus CORPUS --repor
   `coordinator (was: <old>)` and empty digests are flagged
   `[empty-digest]`. Treat `--write` as a triage aid, not a substitute for
   rebuilding the affected digests.
-- Sessions without digests are reported (`NO-DIGEST`) but pass by default,
-  matching the build policy (only interactive/coordinator and friction-heavy
-  worker sessions get digests). Pass `--require-digests` to fail on them.
+- Every listed session must have a digest: a listed session with no digest
+  file fails verify (`NO-DIGEST`, exit `2`). This is the R-09 acceptance
+  default. Pass `--allow-missing-digests` only when a build intentionally
+  omits digests (the build policy gives digests to interactive/coordinator
+  and friction-heavy worker sessions); those sessions are then reported
+  without failing.
 
 `derive-role` classifies one prompt text from stdin (`role` TAB `basis`) and is
 the same logic the verifier applies to digest user turns.
