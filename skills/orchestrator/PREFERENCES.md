@@ -46,7 +46,8 @@ acceptance of worker output.
   exact commands, and a one-line reply format) and upload it with the
   `research-delivery` skill's PrivateBin step. Give the user the link and the
   reply format; do not wait to be asked. The doc must contain no secrets or
-  account numbers.
+  account numbers. [Unattended runs](references/unattended.md#decision-doc)
+  owns how it is built and checked against the ledger.
 - Maintain a compact task ledger and hand over to a fresh coordinator at safe
   boundaries before context gets large. Do not depend on a universal 200k trigger.
 - Keep personal orchestration policy in this skill and standalone tool settings;

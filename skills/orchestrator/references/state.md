@@ -112,7 +112,9 @@ remaining work needs the user, checkpoint those decisions and return them.
 
 Herdr terminal persistence alone cannot wake a stopped coordinator. A killed
 session can be reconciled from records on restart, but automatic recovery exists
-only if a tested runtime mechanism provides it. State the actual guarantee.
+only if a tested runtime mechanism provides it. State the actual guarantee. For
+a run that continues while the user is away, [unattended runs](unattended.md)
+owns the out-of-session supervision requirement and its recorded gap.
 
 ## Renew early
 

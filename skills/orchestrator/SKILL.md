@@ -33,6 +33,11 @@ session, use **Managed Herdr Jobs** below. Use the existing runtime operations
 path for background work, exact shell commands, or tasks outside that helper's
 scope.
 
+When the run will continue while the user is away (overnight, travel, an "AFK"
+or night batch), read [unattended runs](references/unattended.md) before they
+leave. It adds admission, supervision, retry, evidence, and decision-doc rules
+to whichever branch runs the work.
+
 ## Managed Herdr Jobs
 
 Use `scripts/herdr-jobs.py` for independent ordinary-agent and omp-train jobs.

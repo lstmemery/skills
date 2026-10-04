@@ -40,7 +40,11 @@ repository verification in addition to the selected review policy.
 ## Result record
 
 Before launch, register every worker in the run directory's `workers.json` and
-give it an output directory under that run. Workers write a small `result.json`
+give it an output directory under that run. Each attempt, including a retry,
+gets a fresh, empty directory; never point a new attempt at an earlier one's
+folder. Record the launch time, and accept only result and artifact files inside
+that attempt's directory and modified after its launch. A file left by an
+earlier run is stale evidence, not output. Workers write a small `result.json`
 in their task output folder and return its path. Large findings and logs remain
 separate artifacts. The roster records expected workers, and closeout also scans
 the run tree for worker-shaped directories containing `brief.md`, `result.json`,
@@ -144,6 +148,16 @@ Repository changes also require the candidate record in
 review findings, and check evidence; do not place the patch in this JSON.
 
 ## Validate and recover
+
+A worker has finished only when its result record, its terminal output, and
+the exit of every process it started agree. If a worker ends its turn while a
+background process it started is still running, the task stays `running`:
+supervise that process to exit, then grade the result it produced. Briefs for
+unsupervised or headless workers say to run commands in the foreground and
+write the result record last, before the final message. Track child processes
+only through a handle the selected backend exposes (such as the jailed-worker
+process check in [runtime operations](runtime.md#herdr-launch)); if child exit
+cannot be observed, keep the task `running` or `blocked` rather than `done`.
 
 The coordinator checks task/revision identity, required fields, artifact access,
 and that the result accounts for the acceptance criteria. Delegate a substantive
