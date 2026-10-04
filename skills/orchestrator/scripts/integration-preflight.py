@@ -13,6 +13,19 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Standalone script importing its sibling herdr_jobs package; inserting the
+# script directory keeps the import working both when run directly (python3
+# scripts/integration-preflight.py) and when loaded via importlib (tests).
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from herdr_jobs.review_evidence import (
+    FINDING_EVIDENCE_FIELDS,
+    REVIEW_EVIDENCE_SCHEMA_VERSIONS,
+    finding_evidence_error,
+)
+
 
 AXES = ("standards", "spec")
 EVIDENCE_NAME = "review-evidence.json"
@@ -23,11 +36,6 @@ FINDING_LINE = re.compile(
     r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
 )
 IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
-FINDING_EVIDENCE_FIELDS = frozenset(
-    {"confidence", "reproducer", "evidence", "unresolved_assumption"}
-)
-FINDING_CONFIDENCE = frozenset({"high", "medium", "low"})
-REVIEW_EVIDENCE_SCHEMA_VERSIONS = frozenset({1, 2})
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
 MARKDOWN_LIST_ENTRY = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S.*$")
@@ -627,53 +635,11 @@ def review_records(task_dir, task_id, workers_path):
                     reason = finding.get("reason", "")
                     if not isinstance(reason, str) or (disposition == "rejected" and not reason.strip()):
                         raise PreflightError(f"{review_dir.name}/{finding_id} needs a rejection reason")
-                    has_evidence_metadata = bool(set(finding) & FINDING_EVIDENCE_FIELDS)
-                    if evidence["schema_version"] == 2 and not has_evidence_metadata:
-                        raise PreflightError(
-                            f"{review_dir.name}/{finding_id} schema version 2 finding "
-                            "requires evidence metadata"
-                        )
-                    if has_evidence_metadata:
-                        confidence = finding.get("confidence")
-                        reproducer = finding.get("reproducer")
-                        supporting_evidence = finding.get("evidence")
-                        assumption = finding.get("unresolved_assumption")
-                        if type(confidence) is not str or confidence not in FINDING_CONFIDENCE:
-                            raise PreflightError(
-                                f"{review_dir.name}/{finding_id} has invalid finding confidence"
-                            )
-                        if reproducer is not None and (
-                            not isinstance(reproducer, str) or not reproducer.strip()
-                        ):
-                            raise PreflightError(
-                                f"{review_dir.name}/{finding_id} has an invalid reproducer"
-                            )
-                        if supporting_evidence is not None and (
-                            not isinstance(supporting_evidence, str)
-                            or not supporting_evidence.strip()
-                        ):
-                            raise PreflightError(
-                                f"{review_dir.name}/{finding_id} has invalid finding evidence"
-                            )
-                        if assumption is not None and (
-                            not isinstance(assumption, str) or not assumption.strip()
-                        ):
-                            raise PreflightError(
-                                f"{review_dir.name}/{finding_id} has an invalid unresolved "
-                                "assumption"
-                            )
-                        has_reproducer = isinstance(reproducer, str) and bool(reproducer.strip())
-                        has_unresolved_evidence = (
-                            isinstance(supporting_evidence, str)
-                            and bool(supporting_evidence.strip())
-                            and isinstance(assumption, str)
-                            and bool(assumption.strip())
-                        )
-                        if not (has_reproducer or has_unresolved_evidence):
-                            raise PreflightError(
-                                f"{review_dir.name}/{finding_id} needs a reproducer or "
-                                "evidence and unresolved assumption"
-                            )
+                    error = finding_evidence_error(
+                        finding, review_dir.name, evidence["schema_version"]
+                    )
+                    if error is not None:
+                        raise PreflightError(error)
                     if dispositions.get((review_dir.name, finding_id)) != disposition:
                         raise PreflightError(f"missing recorded disposition for {review_dir.name}/{finding_id}")
                     finding_count += 1

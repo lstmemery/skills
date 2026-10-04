@@ -7,14 +7,12 @@ import re
 import stat
 
 from . import records
+from . import review_evidence
+from .review_evidence import FINDING_EVIDENCE_FIELDS
+from .review_evidence import REVIEW_EVIDENCE_SCHEMA_VERSIONS
 
 
 AXES = ("standards", "spec")
-FINDING_EVIDENCE_FIELDS = frozenset(
-    {"confidence", "reproducer", "evidence", "unresolved_assumption"}
-)
-FINDING_CONFIDENCE = frozenset({"high", "medium", "low"})
-REVIEW_EVIDENCE_VERSIONS = frozenset({1, 2})
 FINDING_LINE = re.compile(
     r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
     r"(?P<disposition>fixed|rejected)\s+—\s+(?P<reason>\S.*)$"
@@ -68,42 +66,9 @@ def _review_directories(task_dir):
 
 
 def _validate_finding_evidence(finding, review_name, schema_version):
-    has_metadata = bool(finding.keys() & FINDING_EVIDENCE_FIELDS)
-    finding_id = finding["id"]
-    if schema_version == 2 and not has_metadata:
-        records.invalid(
-            f"{review_name}/{finding_id} schema version 2 finding requires evidence metadata"
-        )
-    if not has_metadata:
-        return
-
-    confidence = finding.get("confidence")
-    reproducer = finding.get("reproducer")
-    evidence = finding.get("evidence")
-    assumption = finding.get("unresolved_assumption")
-    if type(confidence) is not str or confidence not in FINDING_CONFIDENCE:
-        records.invalid(f"{review_name}/{finding_id} has invalid finding confidence")
-    if reproducer is not None and (
-        not isinstance(reproducer, str) or not reproducer.strip()
-    ):
-        records.invalid(f"{review_name}/{finding_id} has an invalid reproducer")
-    if evidence is not None and (not isinstance(evidence, str) or not evidence.strip()):
-        records.invalid(f"{review_name}/{finding_id} has invalid finding evidence")
-    if assumption is not None and (
-        not isinstance(assumption, str) or not assumption.strip()
-    ):
-        records.invalid(f"{review_name}/{finding_id} has an invalid unresolved assumption")
-    has_reproducer = isinstance(reproducer, str) and bool(reproducer.strip())
-    has_unresolved_evidence = (
-        isinstance(evidence, str)
-        and bool(evidence.strip())
-        and isinstance(assumption, str)
-        and bool(assumption.strip())
-    )
-    if not (has_reproducer or has_unresolved_evidence):
-        records.invalid(
-            f"{review_name}/{finding_id} needs a reproducer or evidence and unresolved assumption"
-        )
+    error = review_evidence.finding_evidence_error(finding, review_name, schema_version)
+    if error is not None:
+        records.invalid(error)
 
 
 def _load_evidence(review_dir):
@@ -122,7 +87,7 @@ def _load_evidence(review_dir):
     if (
         not isinstance(evidence, dict)
         or type(evidence.get("schema_version")) is not int
-        or evidence["schema_version"] not in REVIEW_EVIDENCE_VERSIONS
+        or evidence["schema_version"] not in REVIEW_EVIDENCE_SCHEMA_VERSIONS
     ):
         records.invalid(f"invalid {EVIDENCE_NAME} schema in {review_dir.name}")
     axes = evidence.get("axes")
