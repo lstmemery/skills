@@ -115,11 +115,11 @@
     },
     {
       "name": "retro",
-      "coverage": "no-suite",
-      "suites": [],
+      "coverage": "suite",
+      "suites": ["skills/retro/tests"],
       "routing_critical": false,
       "triggers": null,
-      "rationale": "Prose-only session review procedure (SKILL.md plus SOURCES and STEERING-SURFACES); no executable code."
+      "rationale": null
     },
     {
       "name": "setup-matt-pocock-skills",
