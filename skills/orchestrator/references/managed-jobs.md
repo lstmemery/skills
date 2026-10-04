@@ -35,7 +35,7 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string` |
 
-Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary`, `deep_research`, or `shopping`; the coordinator supplies it explicitly. Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
+Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command route `omp-train --claude` documented in [PREFERENCES.md](../PREFERENCES.md). Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
 
 `retry_override` is an optional run-level object, pinned in `state.json` and
 applied only to matching workers in that run. Pi accepts `max_retries` (0–100)
@@ -95,7 +95,7 @@ allocator exits unsuccessfully after `get`, reconcile `treehouse status --json`
 before another allocation attempt. The helper never retries and emits a record
 only after allocation and verification succeed.
 
-Ordinary runtime has no invented default: either set a settled default in policy or supply an explicit current-request override. The override instruction leads the worker prompt as the current user instruction. A runtime override on an `ordinary` job selects that Herdr-agent runtime. On a `deep_research` or `shopping` job it may only restate the policy runtime; naming a different one is refused (`decision_needed`) rather than converting the job out of its isolation route. When the user explicitly names another runtime for research or shopping work, re-issue it as `task_kind: ordinary`. Exact unavailable runtimes/models produce an actionable failure, without substitution. Exact models are checked against discovery and pinned. Exact jail model selection is unsupported until its separate catalog is verified; omit the model for the jail runtime default. For admission, an explicit `provider` override wins; otherwise the provider comes from the resolved model ID prefix or the runtime ID. The model key is the resolved model ID, or `default` when no model was requested.
+Ordinary runtime has no invented default: either set a settled default in policy or supply an explicit current-request override. The override instruction leads the worker prompt as the current user instruction. A runtime override on an `ordinary` job selects that Herdr-agent runtime. On a `deep_research` job it may only restate the policy runtime; naming a different one is refused (`decision_needed`) rather than converting the job out of its isolation route. When the user explicitly names another runtime for deep-research work, re-issue it as `task_kind: ordinary`. Exact unavailable runtimes/models produce an actionable failure, without substitution. Exact models are checked against discovery and pinned. Exact jail model selection is unsupported until its separate catalog is verified; omit the model for the jail runtime default. For admission, an explicit `provider` override wins; otherwise the provider comes from the resolved model ID prefix or the runtime ID. The model key is the resolved model ID, or `default` when no model was requested.
 
 ## State and recovery
 
@@ -135,7 +135,7 @@ The helper appends exact output instructions and generated identities to each wo
 
 Outcome is `complete`, `partial`, `blocked`, or `failed`; unresolved items are strings. Artifact paths are bounded relative paths and may not traverse symlinks. The collector hashes and copies the receipt and artifacts into a revision directory, preserving old revisions. The receipt's existence or valid structure does not establish factual correctness.
 
-Research/shopping artifacts keep their content contracts. Receipts and intermediate artifacts are internal state, not publication payloads. The final-report delivery contract remains separate.
+Deep-research artifacts keep their content contracts. Receipts and intermediate artifacts are internal state, not publication payloads. The final-report delivery contract remains separate.
 
 ## Results, effects, and fallback
 
