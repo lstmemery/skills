@@ -17,24 +17,35 @@ disposition and `check-closeout` passes.
 Findings are proposals. An unattended worker's approval to act comes only from
 a later user reply naming its item.
 
-The ranked rules and failure evidence behind this file are in
-`~/agents/research/afk-orchestration-reliability-2026-10-03.md`; failure numbers
-(F1–F10) below refer to its case list. Values marked *starting* are design
-choices to calibrate from run outcomes, not measured optima.
+The F-number references below summarize supplied case observations inline;
+they are examples, not measured population rates. Values marked *starting* are
+design choices to calibrate from run outcomes, not measured optima.
 
 ## Admit the night
 
 Before dispatch, record a `Night budget` block in `STATE.md`:
 
 ```text
-Night budget: window <start–end local>; max concurrent <n>; per-task wall clock <min>;
-transient retries <n per task>; decision items <n>; supervision <mechanism + handle, or gap>
+Night budget: night_id <YYYY-MM-DD in profile timezone>; status <admitted|closed>;
+reservation <run-root>/.night-admission/<night_id>.lock; window <start–end local + zone>;
+max concurrent <n>; per-task wall clock <min>; transient retries <n per task>;
+decision items <n>; supervision <mechanism + handle, or gap>
 ```
 
-Confirm the local time is inside the window and that no other run for this
-night is active; refuse a late catch-up start or a duplicate night. The
-coordinator enforces the per-task wall clock itself: at the limit, inspect the
-worker, stop it by its owned identity per
+Use the active profile's run root. Confirm the local time is inside the window,
+then reserve the night atomically by creating its `.lock` directory with an
+exclusive `mkdir`; record the run ID and `STATE.md` path in the reservation.
+If it already exists, refuse admission unless it names this same run being
+resumed; an unreadable or different owner's reservation blocks admission until
+that run is reconciled. After reserving, scan sibling run directories for a
+`STATE.md` with the same `night_id`. Any matching budget whose status is not
+`closed` is active, even if it has no launched workers yet; refuse the duplicate
+and release only the reservation this admission attempt just created. Keep an
+admitted run's reservation until every worker is terminal and `check-closeout`
+passes, then set the budget status to `closed` and remove its reservation.
+Never clear a stale reservation without reconciling its recorded run. Refuse a
+late catch-up start. The coordinator enforces the per-task wall clock itself:
+at the limit, inspect the worker, stop it by its owned identity per
 [runtime operations](runtime.md#observe-stop-and-clean-up), and record it
 `failed` with the timeout as reason. Add a token or turn cap only when the
 selected runtime enforces one, and name that mechanism.
@@ -46,14 +57,15 @@ periodic maintenance. Write a `queued` row for every admitted task before the
 first launch. *Starting* values: up to two transient retries per task, and a
 decision-item cap the user can review in one sitting (about five). When the
 decision cap is reached, stop dispatching tasks that could add decisions;
-leave them queued for the next run rather than growing the morning queue (F8).
+leave them queued for the next run rather than growing the morning queue (F8:
+  coordinator context/quota proved scarcer than worker quota).
 
 ## Supervision that outlives the coordinator
 
 In-session cron jobs, background watchers, and timer tools end with the
 coordinator session, and some cap their own runtime (a background watcher
 stopped at its 2-hour cap during an earlier night run). Workers then keep
-running unsupervised (F1).
+running unsupervised (F1: in-session timers also vanish with the coordinator).
 
 Durable supervision requires a mechanism outside the coordinator session — for
 example a host systemd user timer running a finite reconcile pass over
@@ -70,7 +82,7 @@ Do not describe in-session timers as overnight supervision.
 Spend coordinator context on the ledger, not on evidence. Open a worker's report
 only to verify or compile it, and renew the coordinator per
 [state and continuity](state.md#renew-early) rather than letting a long night
-accumulate in one context (F8).
+accumulate in one context (F8: coordinator context/quota was the scarce resource).
 
 ## Workers
 
@@ -78,7 +90,7 @@ Unattended workers are read-only except for their own attempt directory.
 Changes to live systems or repositories are staged as reviewable commands in the
 report, never applied. Give each worker the full brief: do not trim sections for
 a smaller or cheaper model, because sections a strong model could skip were
-load-bearing for a smaller one (F10).
+load-bearing for a smaller one (F10: a smaller model omitted such sections).
 
 Use the strongest available boundary: the research jail for research, and a
 pinned commit with output outside the checkout for repository reads (see the
@@ -93,10 +105,13 @@ and becomes an Exceptions item. This check cannot detect a write that was later
 restored, so it supplements the boundary rather than replacing it.
 
 Apply the worker contract's [attempt isolation and freshness](workers.md#result-record)
-checks and its [completion barrier](workers.md#validate-and-recover) (F2, F4).
-When accepting an artifact, record its SHA-256 in the disposition evidence and
-compile the doc from those bytes. Launch counts only when the worker is observed working, per
-[runtime operations](runtime.md#herdr-launch) (F5).
+checks and its [completion barrier](workers.md#validate-and-recover) (F2: a
+worker turn ended while its background driver still ran; F4: a shared output
+folder exposed an earlier run's artifact). When accepting an artifact, record
+its SHA-256 in the disposition evidence and compile the doc from those bytes.
+Launch counts only when the worker is observed working, per
+[runtime operations](runtime.md#herdr-launch) (F5: a terminal warning overlay
+swallowed a prompt that appeared to send).
 
 ## Failures and retries
 
@@ -108,16 +123,22 @@ Classify each failure before acting on it:
   [runtime operations](runtime.md#provider-admission), within the task's
   retry budget and the night window.
 - **Anything else** — schema, provenance, policy, premise, or fact-check
-  failure: do not retry. (A known benign legacy result shape is normalized and
-  revalidated per [the worker contract](workers.md#result-record) first; only
-  what still fails counts as a schema failure.) Mark the task `blocked` or `failed`, keep its last
-  error and evidence, and list it under Exceptions.
+  failure: do not launch a new attempt or retry the provider. First normalize a
+  known benign legacy result shape and revalidate it per
+  [the worker contract](workers.md#result-record). If required fields or
+  acceptance evidence are missing, use only the bounded same-worker correction
+  or continuation allowed by [Validate and recover](workers.md#validate-and-recover);
+  that repairs the current attempt's evidence and is not a task retry. After
+  that allowance is exhausted, or when correction is ineligible, mark the task
+  `blocked` or `failed`, keep its last error and evidence, and list it under
+  Exceptions.
 
-When a provider fails three consecutive launches (*starting* value; F7 observed
-3 failures in 6 attempts, not a consecutive streak), stop new launches on that
-provider for the rest of the night and record it. One
-endpoint failing while another succeeds is a routing fact for the doc, not a
-reason to change a requested harness or model.
+When three failed launches occur within the latest six attempts on a provider
+(*starting* window; F7 observed 3 failures in 6 attempts, including scattered
+failures), stop new launches on that provider for the rest of the night and
+record it. One endpoint failing while another succeeded 4/4 in the same case
+(F7) is a routing fact for the doc, not a reason to change a requested harness
+or model.
 
 ## Evidence gate
 

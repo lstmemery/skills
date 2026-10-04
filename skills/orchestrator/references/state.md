@@ -49,6 +49,11 @@ wait-for-upstream decision and were assigned a read-only upstream recheck.
 Run: <id>; updated: <UTC>; owner: <harness + actual session/pane identity>
 Generation: <positive integer>; phase: <active|transferring>
 Supervision: <mechanism + handle + last observation, or explicit gap>
+Night budget (unattended only): <night ID + profile timezone; status admitted|closed;
+  window; concurrency; per-task wall clock; transient retries; decision-item cap;
+  supervision; reservation path>
+Attempts (append-only): <attempt ID/task_id + assignment revision + launch time UTC;
+  directory; disposition; continuation count; current attempt or none>
 Premise checks: <task + source + checked-at UTC + observed value + verdict, or none>
 
 Task | Revision | Status | Worker/location | Brief/result | Next action
@@ -61,6 +66,11 @@ Retained resources: <task + worktree/lease + review location + cleanup condition
 
 The brief owns scope, acceptance, dependencies, and authority; the result owns
 artifact/check evidence. Link these rather than copying them into the ledger.
+For an unattended run, fill its `Night budget` before dispatch and append one
+`Attempts` entry for each worker launch. Never replace earlier attempt entries;
+identify the current attempt by its exact worker `task_id` from `workers.json`.
+A same-worker continuation updates that attempt's continuation count without
+creating a new attempt.
 Record exact harness and actual backend IDs, model or `unknown`, cwd, and any
 worktree/base/lease identity in the task's location record; long records may live
 beside the brief. A new queued task has no worker yet. Unknown values stay

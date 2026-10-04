@@ -40,15 +40,31 @@ repository verification in addition to the selected review policy.
 ## Result record
 
 Before launch, register every worker in the run directory's `workers.json` and
-give it an output directory under that run. Each attempt, including a retry,
-gets a fresh, empty directory; never point a new attempt at an earlier one's
-folder. Record the launch time, and accept only result and artifact files inside
-that attempt's directory and modified after its launch. A file left by an
-earlier run is stale evidence, not output. Workers write a small `result.json`
-in their task output folder and return its path. Large findings and logs remain
-separate artifacts. The roster records expected workers, and closeout also scans
-the run tree for worker-shaped directories containing `brief.md`, `result.json`,
-or `disposition.json`; an unrostered match blocks closeout.
+give it an output directory under that run. A logical task may have several
+launched attempts. Give each launch a unique worker `task_id` (for example,
+`audit-42-r1-a1`, `audit-42-r1-a2`), keep the logical task and assignment
+revision in `STATE.md`, and append one roster entry for each attempt. A retry
+keeps the same assignment revision but gets a new attempt ID and a fresh, empty
+directory; never change an earlier roster entry or reuse its directory. Record
+an append-only attempt entry in `STATE.md` with the attempt/worker ID, revision,
+UTC launch time, directory, disposition, and continuation count, and identify
+the current attempt there. The `task_id` in `result.json` is that attempt's
+worker ID; validate it against the corresponding roster entry so an earlier
+attempt cannot satisfy a later one. A same-worker continuation remains within
+the same attempt and directory and does not add a roster entry.
+
+Accept only result and artifact files inside the attempt directory. Require
+`result.json` and worker-created outputs to be written after launch; the empty
+directory and attempt-specific identity are the primary stale-file boundary, so
+mtime alone is not proof of provenance. A deliberately copied evidence file may
+retain its source mtime only when the worker identifies the source path and
+SHA-256 in its report, and the coordinator verifies that source and records the
+hash in disposition evidence. Treat any other pre-launch file as stale. Workers
+write a small `result.json` in their task output folder and return its path.
+Large findings and logs remain separate artifacts. The roster records expected
+attempts, and closeout also scans the run tree for worker-shaped directories
+containing `brief.md`, `result.json`, or `disposition.json`; an unrostered match
+blocks closeout.
 
 ```json
 {
