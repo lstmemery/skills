@@ -75,7 +75,7 @@ against coordinator death. Record it and its last observation in the
 `Supervision: in-session only (gap)` and tell the user before they leave what
 happens if the coordinator stops: running workers continue, nobody grades
 their results, and the morning resume reconciles through the active branch's
-normal procedure — [the successor procedure](../SKILL.md#persistent-herdr-successor-replacement)
+normal procedure — [the successor procedure](successor.md#persistent-herdr-successor-replacement)
 when replacing a coordinator in a persistent Herdr run.
 Do not describe in-session timers as overnight supervision.
 
