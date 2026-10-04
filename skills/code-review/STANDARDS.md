@@ -5,10 +5,16 @@ Use the exact change and standards-source list supplied by the coordinator.
 
 Report every documented-standard violation and baseline smell in the change:
 
-- Cite a documented standard by file and rule, and locate the offending file/hunk.
-- Name each baseline smell and quote its hunk. Smells are judgement calls, never
-  hard violations. Repository standards override the baseline; suppress a smell
-  where a documented standard endorses the pattern.
+- A confirmed finding line names the changed file and location, cites the
+  documented standard by file and rule, and states the concrete behavioral or
+  maintenance consequence. Name each baseline smell and locate its hunk. A smell
+  with no concrete consequence is labeled **SUGGESTION**, not a defect. Smells are
+  judgement calls; repository standards override the baseline, so do not report
+  a smell where a documented standard endorses the pattern.
+- In the matching stable-ID entry in `review-evidence.json`, record confidence
+  (`high`, `medium`, or `low`) and a runnable reproducer or focused check. When
+  no executable check applies, record the supporting evidence and unresolved
+  assumption instead.
 - Skip rules already enforced by tooling. Keep all other findings; the coordinator's
   summary limit does not limit the finding list.
 

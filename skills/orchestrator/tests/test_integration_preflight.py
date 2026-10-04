@@ -245,6 +245,57 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(report["candidates"][0]["head"], self.head)
         self.assertEqual(self.git("-C", str(self.repo), "rev-parse", "main"), self.base)
 
+    def test_finding_evidence_metadata_passes_without_changing_markdown_grammar(self):
+        self.write_review(
+            standards_findings=[
+                {
+                    "id": "S1",
+                    "disposition": "fixed",
+                    "reason": "Added the missing guard.",
+                    "confidence": "high",
+                    "reproducer": (
+                        "Run the focused test; expected result: the missing guard is "
+                        "exercised."
+                    ),
+                }
+            ],
+            spec_findings=[
+                {
+                    "id": "P1",
+                    "disposition": "rejected",
+                    "reason": "The behavior is outside the accepted requirements.",
+                    "confidence": "medium",
+                    "evidence": "The submitted specification has no requirement for this behavior.",
+                    "unresolved_assumption": "No linked follow-up requirement exists.",
+                }
+            ],
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "ready")
+
+    def test_partial_finding_evidence_metadata_is_rejected(self):
+        self.write_review(
+            standards_findings=[
+                {
+                    "id": "S1",
+                    "disposition": "fixed",
+                    "reason": "Added the missing guard.",
+                    "confidence": "high",
+                }
+            ]
+        )
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "needs a reproducer or evidence and unresolved assumption",
+            result.stdout,
+        )
+
     def command(self, *extra, candidate="orch/task-1"):
         return subprocess.run(
             [

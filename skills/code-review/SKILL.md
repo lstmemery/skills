@@ -60,12 +60,22 @@ missing-spec procedure, perform Standards inline; one axis needs no worker.
 - **Standards:** the reviewer reads [STANDARDS.md](STANDARDS.md) and the repository
   standards. Pass the reference path when accessible, otherwise its full content.
   The coordinator need not load this reference unless performing that axis itself.
+  Each confirmed finding line names the changed location, violated standard, and
+  concrete behavioral or maintenance consequence. Label a baseline smell with
+  no concrete consequence **SUGGESTION**, not a defect.
   When the change is Python and skill `python-expert-best-practices-code-review`
   is installed, this axis also applies its rules; where a rule restates a
   tooling check, the tooling result decides and the rule is not re-reported.
 - **Spec:** give only the review inputs and spec for this brief: “Report missing
   or partial requirements, unrequested behavior, and requirements implemented
-  incorrectly. Quote the spec support for each finding and locate the file/hunk.”
+  incorrectly. On each finding line, quote its spec support, identify the changed
+  location, and state the concrete behavioral consequence.”
+
+For each finding on either axis, put its confidence and evidence under the same
+stable ID in `review-evidence.json`. Use a runnable `reproducer` for an
+executable failure or a focused check. When no executable check applies, use
+`evidence` and `unresolved_assumption` to show what supports the finding and
+what remains uncertain. Confidence values are `high`, `medium`, or `low`.
 
 For either axis, retain the complete finding list. If it fits under about 400
 words, return it whole. Otherwise save it under the active profile's output root

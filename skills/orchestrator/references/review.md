@@ -72,7 +72,13 @@ must differ. Record both axes even when an axis has zero findings:
     "standards": {
       "status": "complete",
       "findings": [
-        {"id": "S1", "disposition": "unresolved", "reason": "Awaiting coordinator disposition."}
+        {
+          "id": "S1",
+          "disposition": "unresolved",
+          "reason": "Awaiting coordinator disposition.",
+          "confidence": "high",
+          "reproducer": "Run the focused command; observe the missing validation."
+        }
       ]
     },
     "spec": {"status": "complete", "findings": []}
@@ -96,6 +102,14 @@ and `spec_findings`, each matching its axis in the sidecar. A revision
 `review-rN/` requires `new_findings` matching the total sidecar finding count
 and `unfixed` equal to `0`. All count fields are required in their respective
 review type; a missing count is invalid.
+
+New finding entries retain `id`, `disposition`, and (when rejected) `reason`,
+and also record `confidence` as `high`, `medium`, or `low`. Include a `reproducer`
+string with executable steps or a focused check; when no executable check
+applies, include `evidence` and `unresolved_assumption` strings instead. The
+preflight validates these fields when present. For backward compatibility,
+existing version-1 entries without this evidence metadata remain valid; new
+reviews must include it.
 
 **Ownership:** the independent reviewer owns `review.md`, `done.json`, capture
 evidence, and the initial `review-evidence.json`; every finding starts as

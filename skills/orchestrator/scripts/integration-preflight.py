@@ -23,6 +23,10 @@ FINDING_LINE = re.compile(
     r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
 )
 IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
+FINDING_EVIDENCE_FIELDS = frozenset(
+    {"confidence", "reproducer", "evidence", "unresolved_assumption"}
+)
+FINDING_CONFIDENCE = frozenset({"high", "medium", "low"})
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
 MARKDOWN_LIST_ENTRY = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S.*$")
@@ -600,7 +604,14 @@ def review_records(task_dir, task_id, workers_path):
                     raise PreflightError(f"{review_dir.name} {axis} review is incomplete")
                 axis_finding_ids = set()
                 for finding in findings:
-                    if not isinstance(finding, dict) or set(finding) - {"id", "disposition", "reason"} or not {"id", "disposition"} <= set(finding):
+                    allowed_finding_fields = {
+                        "id", "disposition", "reason", *FINDING_EVIDENCE_FIELDS
+                    }
+                    if (
+                        not isinstance(finding, dict)
+                        or set(finding) - allowed_finding_fields
+                        or not {"id", "disposition"} <= set(finding)
+                    ):
                         raise PreflightError(f"{review_dir.name} has a malformed finding")
                     finding_id = finding["id"]
                     disposition = finding["disposition"]
@@ -615,6 +626,46 @@ def review_records(task_dir, task_id, workers_path):
                     reason = finding.get("reason", "")
                     if not isinstance(reason, str) or (disposition == "rejected" and not reason.strip()):
                         raise PreflightError(f"{review_dir.name}/{finding_id} needs a rejection reason")
+                    if set(finding) & FINDING_EVIDENCE_FIELDS:
+                        confidence = finding.get("confidence")
+                        reproducer = finding.get("reproducer")
+                        evidence = finding.get("evidence")
+                        assumption = finding.get("unresolved_assumption")
+                        if type(confidence) is not str or confidence not in FINDING_CONFIDENCE:
+                            raise PreflightError(
+                                f"{review_dir.name}/{finding_id} has invalid finding confidence"
+                            )
+                        if reproducer is not None and (
+                            not isinstance(reproducer, str) or not reproducer.strip()
+                        ):
+                            raise PreflightError(
+                                f"{review_dir.name}/{finding_id} has an invalid reproducer"
+                            )
+                        if evidence is not None and (
+                            not isinstance(evidence, str) or not evidence.strip()
+                        ):
+                            raise PreflightError(
+                                f"{review_dir.name}/{finding_id} has invalid finding evidence"
+                            )
+                        if assumption is not None and (
+                            not isinstance(assumption, str) or not assumption.strip()
+                        ):
+                            raise PreflightError(
+                                f"{review_dir.name}/{finding_id} has an invalid unresolved "
+                                "assumption"
+                            )
+                        has_reproducer = isinstance(reproducer, str) and bool(reproducer.strip())
+                        has_unresolved_evidence = (
+                            isinstance(evidence, str)
+                            and bool(evidence.strip())
+                            and isinstance(assumption, str)
+                            and bool(assumption.strip())
+                        )
+                        if not (has_reproducer or has_unresolved_evidence):
+                            raise PreflightError(
+                                f"{review_dir.name}/{finding_id} needs a reproducer or "
+                                "evidence and unresolved assumption"
+                            )
                     if dispositions.get((review_dir.name, finding_id)) != disposition:
                         raise PreflightError(f"missing recorded disposition for {review_dir.name}/{finding_id}")
                     finding_count += 1
