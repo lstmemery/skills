@@ -111,7 +111,7 @@ class TransportTest(unittest.TestCase):
         if argv[:3] == ["herdr", "pane", "split"]:
             return b'{"result":{"pane":{"pane_id":"old:1"}}}'
         if argv[:3] == ["herdr", "pane", "move"]:
-            return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"}}}}'
+            return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"},"workspace":{"workspace_id":"workspace:1"}}}}'
         return b'{"result":{}}'
 
     def test_exact_runtime_is_not_substituted(self):
@@ -191,7 +191,8 @@ class TransportTest(unittest.TestCase):
 
     def test_pane_ids_come_from_response_and_prompt_remains_one_argument(self):
         self.assertEqual(self.adapter.effect("split", self.job, ""), {"pane_id": "old:1"})
-        self.assertEqual(self.adapter.effect("move", self.job, ""), {"pane_id": "moved:1"})
+        moved = self.adapter.effect("move", self.job, "")
+        self.assertEqual(moved, {"pane_id": "moved:1", "workspace_id": "workspace:1"})
         prompt = "Literal 'quotes' and $(echo nope)\nNext line"
         fake = FakeHerdr()
         with patch("herdr_jobs.transport.command", fake.command):
@@ -211,6 +212,59 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "codex",
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
+
+    def test_pi_zai_start_passes_provider_model_and_effort_to_the_agent(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="pi", provider="zai", route={"mode": "agent", "runtime": "pi"},
+                         override={"effort": "high"})
+        self.job["resolved_model"] = "glm-5.3-flash"
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "pi",
+                                 "--pane", "moved:1", "--", "--provider", "zai", "--model",
+                                 "glm-5.3-flash", "--thinking", "high"])
+
+    def test_codex_effort_is_scoped_to_the_prompt_bearing_start(self):
+        fake = FakeHerdr(start_code=1)
+        self.spec["override"] = {"effort": "max"}
+        self.job["resolved_model"] = "native-id"
+        self.adapter.observe = lambda job: {"state": "working", "identity_verified": True,
+                                            "prompt_verified": True}
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(result["prompt_submitted"], True)
+        self.assertEqual(start[-5:], ["-m", "native-id", "-c", "model_reasoning_effort=max", "Assigned work"])
+
+    def test_non_codex_startup_dialog_is_reported_as_blocked(self):
+        self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
+        self.agent.update(state="working", kind="pi")
+        self.pane_output = "Trust and continue to access this project"
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "blocked")
+        self.assertFalse(observation["identity_verified"])
+        self.assertIn("dialog", observation["launch_issue"])
+
+    def test_finish_closes_only_the_recorded_workspace_id(self):
+        self.job["workspace_id"] = "workspace:1"
+        calls = []
+
+        def fake_command(argv, deadline, cwd=None):
+            calls.append(argv)
+            return 0, b"closed", b""
+
+        with patch("herdr_jobs.transport.command", fake_command):
+            result = self.adapter.close_workspace(self.job)
+
+        self.assertEqual(result, {"closed": True, "workspace_id": "workspace:1"})
+        self.assertEqual(calls, [["herdr", "workspace", "close", "workspace:1"]])
 
     def test_codex_retry_override_is_scoped_to_the_fresh_launch_arguments(self):
         fake = FakeHerdr(start_code=1)

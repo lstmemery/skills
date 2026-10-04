@@ -59,13 +59,25 @@ class JobsTest(unittest.TestCase):
             manifest["concurrency"] = concurrency
         self.manifest.write_text(json.dumps(manifest))
 
+    def write_add_job(self, job_id="job-added", task_id="task-added", revision=1,
+                      runtime="pi", provider="zai", model="glm-5.3-flash", effort="high"):
+        add_manifest = self.root / "add-manifest.json"
+        job = {"job_id": job_id, "name": "Incremental fixture", "task_kind": "ordinary",
+               "task_file": str(self.task), "cwd": str(self.root),
+               "output_expectation": "A fixture report.", "writes_repository": False,
+               "worker_result": {"task_id": task_id, "assignment_revision": revision},
+               "override": {"runtime": runtime, "provider": provider, "model": model,
+                            "effort": effort, "instruction": f"Use {runtime} with {model}."}}
+        add_manifest.write_text(json.dumps({"schema_version": 1, "request_id": "test-request", "jobs": [job]}))
+        self.manifest = add_manifest
+
     def configure(self, **kwargs):
         self.fixture.write_text(json.dumps({"request_id": "test-request", **kwargs}))
 
     def argv(self, operation="run", real=False, **kwargs):
         args = [sys.executable, "-B", str(SCRIPT if real else DRIVER), operation,
                 "--run-dir", str(self.run), "--host-contract", str(self.fixture), "--wait-seconds", "0.3"]
-        if operation == "run":
+        if operation in ("run", "add"):
             args += ["--manifest", str(self.manifest), "--policy", str(self.policy)]
         for key, value in kwargs.items():
             args += ["--" + key.replace("_", "-")]
@@ -166,6 +178,96 @@ class JobsTest(unittest.TestCase):
         code, result = self.call("status", real=True, wait_seconds=0)
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
         self.assertEqual(self.events(), before)
+
+    def test_add_appends_one_worker_to_a_persistent_run_without_replaying_old_jobs(self):
+        self.call()
+        prior_state = self.state()
+        prior_attempt = prior_state["jobs"][0]["attempt_id"]
+        self.write_add_job()
+
+        code, result = self.call("add", wait_seconds=1)
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        state = self.state()
+        self.assertEqual([job["spec"]["job_id"] for job in state["jobs"]], ["job0", "job-added"])
+        self.assertEqual(state["jobs"][0]["attempt_id"], prior_attempt)
+        self.assertEqual(sum(event["action"] == "start" and event["job_id"] == "job0"
+                             for event in self.events()), 1)
+        self.assertEqual(state["jobs"][1]["provider"], "zai")
+        self.assertEqual(state["jobs"][1]["resolved_model"], "glm-5.3-flash")
+
+    def test_add_rejects_duplicate_job_or_worker_identity(self):
+        self.call()
+        self.write_add_job()
+        self.call("add")
+        code, result = self.call("add")
+
+        self.assertEqual((code, result["error"]), (3, "conflict"))
+        self.assertIn("job_id already exists", result["message"])
+        self.assertEqual(sum(event["action"] == "start" and event["job_id"] == "job-added"
+                             for event in self.events()), 1)
+
+    def test_add_rejects_duplicate_worker_identity_even_with_a_new_job_id(self):
+        self.call()
+        self.write_add_job()
+        self.call("add")
+        self.write_add_job(job_id="job-another", task_id="task-added")
+        code, result = self.call("add")
+
+        self.assertEqual((code, result["error"]), (3, "conflict"))
+        self.assertIn("worker task/revision already exists", result["message"])
+        self.assertFalse(any(event["job_id"] == "job-another" for event in self.events()))
+
+    def test_worker_finish_validates_result_records_disposition_releases_and_closes(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "task-finish", "assignment_revision": 2}
+        self.manifest.write_text(json.dumps(manifest))
+        self.call()
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["finish_complete"]), (0, True))
+        self.assertEqual(result["jobs"][0]["worker_disposition"], "completed")
+        self.assertTrue(result["jobs"][0]["workspace_closed"])
+        output = Path(self.state()["jobs"][0]["host_output"])
+        disposition = json.loads((output / "disposition.json").read_text())
+        self.assertEqual((disposition["task_id"], disposition["assignment_revision"],
+                          disposition["disposition"]), ("task-finish", 2, "completed"))
+        self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
+        self.assertEqual(self.call("finish")[1]["finish_complete"], True)
+        self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
+
+    def test_finish_refuses_an_unsettled_pane_and_keeps_it_open(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "task-wait", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "working"})
+        self.call()
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["finish_complete"]), (10, False))
+        self.assertIn("not settled", result["finish"]["jobs"]["job0"]["issue"])
+        self.assertFalse(any(event["action"] == "workspace_close" for event in self.events()))
+
+    def test_visible_working_marker_is_required_when_no_receipt_landed(self):
+        self.configure(jobs={"job0": "unverified_working"})
+
+        code, result = self.call()
+
+        self.assertEqual((code, result["batch_state"]), (10, "partial"))
+        self.assertFalse(result["jobs"][0]["settled"])
+        self.assertIn("visible Working marker", result["jobs"][0]["issue"])
+
+    def test_non_codex_startup_dialog_is_detected_before_sending_the_task_prompt(self):
+        self.write_jobs(1, runtime="pi", provider="zai", model="glm-5.3-flash")
+        self.configure(jobs={"job0": "blocked"})
+
+        code, result = self.call()
+
+        self.assertEqual((code, result["batch_state"]), (10, "partial"))
+        self.assertIn("dialog", result["jobs"][0]["issue"])
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
     def test_large_valid_batch_state_can_resume(self):
         self.write_jobs(6)

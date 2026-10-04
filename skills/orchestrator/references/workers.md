@@ -21,6 +21,14 @@ coding workers. Delegate a bounded execution task, not coordinator authority.
 Workers may request another assignment or report a dependency; the coordinator
 retains queue ownership and records any approved further delegation.
 
+Prepare Herdr fleets as manifests and launch them through the canonical
+`scripts/herdr-jobs.py` tool: `run` for the initial batch, `add` for one more
+assignment in the same persistent run, `resume` to observe results and settled
+panes, and `finish` to validate worker records, disposition, release leases, and
+close owned workspaces. Keep coordinator task folders to briefs and manifests;
+the helper owns launch state, receipts, results, and collected artifacts. Do not
+copy launcher, watcher, or finish scripts into task folders.
+
 For a read-only review of an existing candidate, share its pinned source and put
 review output outside that checkout. If the reviewer needs to edit source or run
 commands that change checkout files, give it separate isolation first. Preserve

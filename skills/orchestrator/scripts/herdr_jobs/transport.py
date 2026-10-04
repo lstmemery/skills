@@ -226,11 +226,29 @@ class NativeTransport:
                          f"projects.{json.dumps(spec['cwd'])}.trust_level=\"trusted\""]
                 if job["resolved_model"] is not None:
                     argv += ["-m", job["resolved_model"]]
+                effort = (spec.get("override") or {}).get("effort")
+                if effort is not None:
+                    argv += ["-c", f"model_reasoning_effort={effort}"]
                 if job.get("retry_override") and "provider_id" in job["retry_override"]:
                     argv += codex_retry_cli_args(job["retry_override"])
                 argv.append(prompt)
+            elif spec["route"]["runtime"] == "pi":
+                runtime_args = []
+                if spec.get("provider") is not None:
+                    runtime_args += ["--provider", spec["provider"]]
+                if job["resolved_model"] is not None:
+                    runtime_args += ["--model", job["resolved_model"]]
+                effort = (spec.get("override") or {}).get("effort")
+                if effort is not None:
+                    runtime_args += ["--thinking", effort]
+                if runtime_args:
+                    argv += ["--", *runtime_args]
             elif job["resolved_model"] is not None:
-                argv += ["--", "--model", job["resolved_model"]]
+                runtime_args = ["--model", job["resolved_model"]]
+                effort = (spec.get("override") or {}).get("effort")
+                if effort is not None:
+                    runtime_args += ["--effort", effort]
+                argv += ["--", *runtime_args]
         elif action == "prompt":
             argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
         elif action == "jail":
@@ -282,7 +300,15 @@ class NativeTransport:
             if action == "split":
                 return {"pane_id": text(at(result, ["result", "pane", "pane_id"]), "pane ID", 200)}
             if action == "move":
-                return {"pane_id": text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)}
+                moved = at(result, ["result", "move_result"])
+                pane_id = text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)
+                workspace = moved.get("workspace") if isinstance(moved, dict) else None
+                workspace_id = (workspace.get("workspace_id") if isinstance(workspace, dict) else None)
+                workspace_id = workspace_id or (moved.get("workspace_id") if isinstance(moved, dict) else None)
+                response = {"pane_id": pane_id}
+                if workspace_id is not None:
+                    response["workspace_id"] = text(workspace_id, "workspace ID", 512)
+                return response
             return {}
         except RateLimited:
             raise
@@ -329,11 +355,10 @@ class NativeTransport:
             terminal = self.read([self.herdr, "pane", "read", job["pane_id"],
                                   "--source", "visible", "--lines", "200"])
             output = self.terminal_output(terminal)
-            if codex:
-                dialog = self.codex_dialog(output)
-                if dialog:
-                    return {"state": "blocked", "identity_verified": False,
-                            "prompt_verified": False, "launch_issue": dialog}
+            dialog = self.startup_dialog(output, codex=codex)
+            if dialog:
+                return {"state": "blocked", "identity_verified": False,
+                        "prompt_verified": False, "launch_issue": dialog}
         result = self.read([self.herdr, "agent", "get", job["pane_id"]])
         paths = self.binding["paths"]
         pane = at(result, paths["agent_pane_id"])
@@ -352,6 +377,9 @@ class NativeTransport:
         if rate_limit is not None:
             observation["rate_limit"] = rate_limit
         if codex:
+            observation["prompt_verified"] = (observation["state"] == "working"
+                                               and "working" in output.casefold())
+        elif agent_route:
             observation["prompt_verified"] = (observation["state"] == "working"
                                                and "working" in output.casefold())
         return observation
@@ -389,3 +417,29 @@ class NativeTransport:
         if trust_dialog:
             return "Codex is showing a trust dialog; inspect and resolve it manually before relaunching"
         return None
+
+    @classmethod
+    def startup_dialog(cls, output, *, codex=False):
+        if codex:
+            dialog = cls.codex_dialog(output)
+            if dialog:
+                return dialog
+        text_lower = output.casefold()
+        if any(phrase in text_lower for phrase in (
+            "continue without trusting", "trust and continue", "trust this folder",
+            "trust this directory", "trust this project", "press enter to confirm",
+            "authentication required", "sign in to continue",
+        )):
+            return "worker startup is waiting on a trust or authentication dialog; resolve it manually"
+        return None
+
+    def close_workspace(self, job):
+        workspace_id = job.get("workspace_id")
+        if not workspace_id:
+            raise JobError("unavailable_capability", "the move response had no verified workspace ID to close")
+        code, _, error_output = command([self.herdr, "workspace", "close", workspace_id], self.deadline)
+        if code:
+            detail = error_output.decode("utf-8", "replace").strip()
+            suffix = f": {detail[:300]}" if detail else ""
+            raise JobError("unavailable_capability", f"workspace close exited {code}{suffix}")
+        return {"closed": True, "workspace_id": workspace_id}

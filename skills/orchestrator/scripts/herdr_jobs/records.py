@@ -133,6 +133,13 @@ def validate_writer_intent(job, label="job"):
     return job["writes_repository"]
 
 
+def worker_result_record(value):
+    fields(value, ["task_id", "assignment_revision"], label="worker_result")
+    text(value["task_id"], "worker_result.task_id", 200)
+    integer(value["assignment_revision"], "worker_result.assignment_revision", 1, 2**63 - 1)
+    return value
+
+
 def retry_override_record(value):
     fields(value, [], ["pi", "codex"], "retry_override")
     if not value:
@@ -234,10 +241,11 @@ def prepare(manifest_path, policy_path):
         invalid("jobs must contain 1–128 independent jobs")
     jobs = []
     seen = set()
+    worker_results = set()
     for job in manifest["jobs"]:
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
-               ["override", "repository_worktree"], "job")
+               ["override", "repository_worktree", "worker_result"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -252,7 +260,7 @@ def prepare(manifest_path, policy_path):
         model = None
         override = job.get("override")
         if override is not None:
-            fields(override, ["instruction"], ["runtime", "model", "provider"], "override")
+            fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
             if "runtime" in override:
                 named = identifier(override["runtime"], "override runtime")
@@ -263,6 +271,10 @@ def prepare(manifest_path, policy_path):
                 route = {"mode": route["mode"], "runtime": named}
             if "model" in override:
                 model = text(override["model"], "model", 200)
+            if "effort" in override:
+                effort = text(override["effort"], "effort", 32)
+                if re.fullmatch(r"[A-Za-z0-9_-]+", effort) is None:
+                    invalid("effort must be a simple runtime value")
             if "provider" in override:
                 provider = text(override["provider"], "provider", 100)
                 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
@@ -289,6 +301,12 @@ def prepare(manifest_path, policy_path):
                 invalid(f"{job_id}: repository worktree path cannot be canonicalized")
             if cwd != recorded_path:
                 invalid(f"{job_id}: cwd must equal repository_worktree.path")
+        if "worker_result" in job:
+            worker_result_record(job["worker_result"])
+            identity = (job["worker_result"]["task_id"], job["worker_result"]["assignment_revision"])
+            if identity in worker_results:
+                invalid(f"duplicate worker_result identity: {identity[0]} revision {identity[1]}")
+            worker_results.add(identity)
         jobs.append({**job, "task_file": task_path, "cwd": cwd,
                      "task": task, "route": route, "model": model,
                      "provider": provider, "kind": policy["runtime_kinds"][runtime]})

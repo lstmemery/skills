@@ -27,17 +27,36 @@ class FakeHost:
     def preflight(self, request, existing=None, status_only=False):
         if self.fixture.get("preflight_error"):
             raise JobError("unavailable_capability", self.fixture["preflight_error"])
+        models = ({job["spec"]["job_id"]: job["resolved_model"] for job in existing["jobs"]
+                   if job["resolved_model"] is not None} if existing else {})
+        models.update({job["job_id"]: job["model"] for job in request["jobs"] if job["model"]})
         return {"session_id": self.fixture.get("session_id", "fixture-session"),
-                "models": {job["job_id"]: job["model"] for job in request["jobs"] if job["model"]},
+                "models": models,
                 "binding": {"jail_export": {"host_root": str(self.path.parent / "export"), "worker_root": "/worker-workspace"}}}
 
     def receipt(self, job, mode):
         output = Path(job["host_output"])
         output.mkdir(parents=True, exist_ok=True)
-        (output / "result.md").write_text("Independent fixture result.\n")
+        worker = job["spec"].get("worker_result")
+        if worker:
+            (output / "worker-report.md").write_text("Independent fixture result.\n")
+            result = {"task_id": worker["task_id"],
+                      "assignment_revision": worker["assignment_revision"],
+                      "outcome": "ready", "summary": "Fixture worker completed.",
+                      "artifacts": [{"path": "worker-report.md", "kind": "report"}],
+                      "checks": [{"name": "fixture", "status": "passed", "evidence": "fixture"}],
+                      "unresolved": [], "next_action": "Review the fixture result."}
+            if job["spec"]["writes_repository"]:
+                result["candidate"] = {"repo": "fixture/repo", "branch": "fixture-branch",
+                                        "base": "a" * 40, "head": "b" * 40}
+            save(output / "result.json", result)
+            artifact_paths = ["result.json", "worker-report.md"]
+        else:
+            (output / "result.md").write_text("Independent fixture result.\n")
+            artifact_paths = ["result.md"]
         receipt = {"schema_version": 1, "request_id": self.fixture["request_id"],
                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
-                   "outcome": "complete", "artifacts": ["result.md"], "unresolved": []}
+                   "outcome": "complete", "artifacts": artifact_paths, "unresolved": []}
         if mode == "stale":
             receipt["attempt_id"] = "another-attempt"
         elif mode == "missing_artifact":
@@ -54,7 +73,7 @@ class FakeHost:
             receipt["unresolved"] = ["Synthetic failure"]
         if mode == "malformed":
             (output / "receipt.json").write_text("not JSON")
-        elif mode not in ("missing", "working", "blocked", "ambiguous"):
+        elif mode not in ("missing", "working", "blocked", "ambiguous", "unverified_working"):
             save(output / "receipt.json", receipt)
 
     def effect(self, action, job, prompt):
@@ -98,7 +117,8 @@ class FakeHost:
         if action == "split":
             return {"pane_id": f"old:{job['spec']['job_id']}"}
         if action == "move":
-            return {"pane_id": f"moved:{job['spec']['job_id']}"}
+            return {"pane_id": f"moved:{job['spec']['job_id']}",
+                    "workspace_id": f"workspace:{job['spec']['job_id']}"}
         if codex_start:
             self.event("prompt_verified", job)
             return {"prompt_submitted": True}
@@ -116,10 +136,24 @@ class FakeHost:
                     "rate_limit": {"retry_after_seconds": delay, "source": source}}
         if mode == "exited_jail":
             return {"state": "exited", "identity_verified": True, "exit_code": 0}
-        lifecycle = "blocked" if mode == "blocked" else "working" if mode in ("working", "ambiguous") else "done"
+        prompt_seen = any(item["job_id"] == job["spec"]["job_id"]
+                          and item["attempt_id"] == job["attempt_id"]
+                          and item["action"] in ("prompt", "prompt_verified", "jail")
+                          for item in self.events)
+        before_prompt = job["phase"] == "ready" and not prompt_seen
+        lifecycle = ("blocked" if mode == "blocked" else "idle" if before_prompt else
+                     "working" if mode in ("working", "ambiguous", "unverified_working") else "done")
         observation = {"state": lifecycle, "identity_verified": True}
-        if job["spec"]["route"]["mode"] == "agent" and job["spec"]["route"]["runtime"] == "codex":
-            observation["prompt_verified"] = lifecycle == "working" and mode != "ambiguous"
+        if job["spec"]["route"]["mode"] == "agent":
+            observation["prompt_verified"] = lifecycle == "working" and mode not in ("ambiguous", "unverified_working")
             if lifecycle == "blocked":
-                observation["launch_issue"] = "Codex is showing a trust or resume dialog"
+                observation["launch_issue"] = ("Codex is showing a trust or resume dialog"
+                                                if job["spec"]["route"]["runtime"] == "codex"
+                                                else "worker startup is waiting on a trust dialog")
         return observation
+
+    def close_workspace(self, job):
+        self.event("workspace_close", job)
+        if self.fixture.get("close_workspace_error"):
+            raise JobError("unavailable_capability", self.fixture["close_workspace_error"])
+        return {"closed": True, "workspace_id": job.get("workspace_id")}
