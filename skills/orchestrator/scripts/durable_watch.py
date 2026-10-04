@@ -9,16 +9,21 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 
 PREFIX = "orch-watch-"
 CONFIG = Path(".durable-watch/config.json")
+NTFY_URL_FILE = Path(".durable-watch/ntfy-url")
 LOCK = Path(".durable-watch/reconcile.lock")
 EVENTS = Path("flags/events.jsonl")
 VERSION = 1
@@ -63,10 +68,12 @@ def task_names(run_dir: Path, values: list[str]) -> list[str]:
 
 def write_config(path: Path, config: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as file:
             temporary_path = file.name
+            os.fchmod(file.fileno(), 0o600)
             json.dump(config, file, sort_keys=True, separators=(",", ":"))
             file.write("\n")
             file.flush()
@@ -75,6 +82,45 @@ def write_config(path: Path, config: dict) -> None:
     finally:
         if temporary_path and os.path.exists(temporary_path):
             os.unlink(temporary_path)
+
+
+def write_private_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as file:
+            temporary_path = file.name
+            os.fchmod(file.fileno(), 0o600)
+            file.write(value)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+def read_private_text(path: Path) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise WatchError("ntfy route is unavailable") from error
+    try:
+        details = os.fstat(fd)
+        if not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600:
+            raise WatchError("ntfy route must be a mode-600 file")
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as file:
+            value = file.read().strip()
+    except (OSError, UnicodeError) as error:
+        raise WatchError("ntfy route is unavailable") from error
+    finally:
+        os.close(fd)
+    if not value:
+        raise WatchError("ntfy route is unavailable")
+    return value
 
 
 def read_config(run_dir: Path) -> dict:
@@ -121,26 +167,54 @@ def recorded(events: Path) -> set[tuple[str, str]]:
 
 
 def publish(event: dict, config: dict) -> None:
-    """Send the shared publisher's title/body/priority payload, best-effort."""
+    """Publish one ntfy message without exposing secrets in process arguments."""
     if not config.get("notify"):
         return
-    publisher = Path(config.get("publisher", ""))
-    if not os.environ.get("NTFY_URL") or not publisher.is_file() or not os.access(publisher, os.X_OK):
+    try:
+        url = read_private_text(Path(config["ntfy_url_file"]))
+        if hashlib.sha256(url.encode()).hexdigest() != config.get("ntfy_url_sha256"):
+            raise WatchError("ntfy route does not match the stored watch config")
+        token_path = Path(config["ntfy_token_file"])
+        token = token_path.read_text(encoding="utf-8").strip()
+    except (KeyError, OSError, UnicodeError, WatchError):
         print("durable-watch: ntfy route unavailable; event is recorded", file=sys.stderr)
         return
-    payload = (
-        "Orchestrator worker result\n"
-        f"{event['task_dir']} wrote result.json in {event['run_dir']}\n3\n"
+    if not token:
+        print("durable-watch: ntfy route unavailable; event is recorded", file=sys.stderr)
+        return
+    payload = f"{event['task_dir']} wrote result.json in {event['run_dir']}"
+    request = urllib.request.Request(
+        url,
+        data=payload.encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Title": config.get("notification_title", "Orchestrator worker result"),
+            "Priority": "3",
+            "Content-Type": "text/plain; charset=utf-8",
+        },
+        method="POST",
     )
     try:
-        result = subprocess.run(
-            [str(publisher)], input=payload, text=True, capture_output=True,
-            check=False, timeout=45, env=os.environ.copy(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        result = None
-    if result is None or result.returncode != 0:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            status = response.status
+            response_body = response.read(65536)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        response_body = error.read(65536)
+    except (OSError, TimeoutError, urllib.error.URLError):
         print("durable-watch: ntfy publish failed; event is recorded", file=sys.stderr)
+        return
+    if not 200 <= status < 300:
+        print(f"durable-watch: ntfy publish failed (HTTP {status}); event is recorded", file=sys.stderr)
+        return
+    try:
+        message_id = json.loads(response_body.decode("utf-8")).get("id")
+    except (AttributeError, UnicodeError, json.JSONDecodeError):
+        message_id = None
+    if isinstance(message_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", message_id):
+        print(f"durable-watch: ntfy accepted (HTTP {status}; id={message_id})", file=sys.stderr)
+    else:
+        print(f"durable-watch: ntfy accepted (HTTP {status})", file=sys.stderr)
 
 
 def reconcile_once(run_dir: Path) -> dict:
@@ -223,12 +297,18 @@ def stop_units(run_dir: Path, service: bool = False, nonblocking: bool = False) 
         raise WatchError("systemd refused the stop request")
 
 
-def ntfy_url(args: argparse.Namespace) -> str | None:
-    value = args.ntfy_url or os.environ.get("ORCH_WATCH_NTFY_URL") or os.environ.get("NTFY_URL")
+def ntfy_url() -> str | None:
+    value = os.environ.get("ORCH_WATCH_NTFY_URL") or os.environ.get("NTFY_URL")
     if not value:
         return None
-    parsed = urlsplit(value)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError as error:
+        raise WatchError("ntfy URL must be a valid http(s) URL without embedded credentials") from error
+    if (parsed.scheme not in ("http", "https") or not hostname or parsed.username or parsed.password
+            or any(character in value for character in "\r\n\t ")):
         raise WatchError("ntfy URL must be an http(s) URL without embedded credentials")
     return value
 
@@ -238,18 +318,22 @@ def command_arm(args: argparse.Namespace) -> int:
     if not run_dir.is_dir() or args.interval_seconds < 1:
         raise WatchError("run directory must exist and interval must be positive")
     tasks = task_names(run_dir, args.tasks)
-    url = ntfy_url(args)
+    url = ntfy_url()
     publisher_value = os.environ.get("ORCH_WATCH_NTFY_PUBLISHER")
     publisher = Path(publisher_value).expanduser() if publisher_value else (
         Path.home() / "agents" / "claude-settings" / "ntfy" / "publisher.sh"
     )
+    token_value = os.environ.get("NTFY_TOKEN_FILE")
+    token_file = Path(token_value).expanduser() if token_value else publisher.resolve().parents[2] / "keys" / "ntfy-machines-token"
     config = {
         "schema_version": VERSION,
         "tasks": tasks,
         "interval_seconds": args.interval_seconds,
         "notify": url is not None,
         "ntfy_url_sha256": hashlib.sha256(url.encode()).hexdigest() if url else None,
-        "publisher": str(publisher.resolve()),
+        "ntfy_url_file": str((run_dir / NTFY_URL_FILE).resolve()),
+        "ntfy_token_file": str(token_file.resolve()),
+        "notification_title": args.notification_title,
     }
     timer = unit_base(run_dir) + ".timer"
     load_state = systemd_property(timer, "LoadState")
@@ -261,6 +345,8 @@ def command_arm(args: argparse.Namespace) -> int:
         raise WatchError("this run already has a different watch configuration; disarm before changing it")
     if load_state != "not-found" and not config_path.exists():
         raise WatchError("an existing watcher unit has no run configuration; disarm it before re-arming")
+    if url:
+        write_private_text(run_dir / NTFY_URL_FILE, url)
     if active_state in ("active", "activating", "reloading"):
         print(f"already armed: {timer}")
         return 0
@@ -279,13 +365,14 @@ def command_arm(args: argparse.Namespace) -> int:
             "--on-active=1s", f"--on-unit-active={args.interval_seconds}s",
             "--timer-property=AccuracySec=1s",
         ]
-        if url:
-            command.append(f"--setenv=NTFY_URL={url}")
         command.extend([
             sys.executable, "-B", str(Path(__file__).resolve()), "reconcile", str(run_dir),
         ])
     try:
-        result = subprocess.run(command, capture_output=True, check=False, timeout=15)
+        systemd_run_env = os.environ.copy()
+        for name in ("NTFY_URL", "ORCH_WATCH_NTFY_URL", "NTFY_TOKEN", "NTFY_TOKEN_FILE", "NTFY_PASSWORD"):
+            systemd_run_env.pop(name, None)
+        result = subprocess.run(command, capture_output=True, check=False, timeout=15, env=systemd_run_env)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise WatchError("could not arm the systemd watcher") from error
     if result.returncode != 0:
@@ -328,6 +415,11 @@ def command_status(args: argparse.Namespace) -> int:
 def command_disarm(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).resolve(strict=True)
     stop_units(run_dir, service=True)
+    try:
+        (run_dir / NTFY_URL_FILE).unlink(missing_ok=True)
+        (run_dir / CONFIG).unlink(missing_ok=True)
+    except OSError as error:
+        raise WatchError("could not clear durable watch configuration") from error
     print(f"disarmed: {unit_base(run_dir)}")
     return 0
 
@@ -339,7 +431,7 @@ def parser() -> argparse.ArgumentParser:
     arm.add_argument("run_dir")
     arm.add_argument("tasks", nargs="+", help="task directories relative to the run directory")
     arm.add_argument("--interval-seconds", type=int, default=30)
-    arm.add_argument("--ntfy-url", help="ntfy URL; defaults to ORCH_WATCH_NTFY_URL or NTFY_URL")
+    arm.add_argument("--notification-title", default="Orchestrator worker result")
     arm.set_defaults(handler=command_arm)
     for name, handler in (("reconcile", command_reconcile), ("status", command_status), ("disarm", command_disarm)):
         command = commands.add_parser(name)

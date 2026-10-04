@@ -254,9 +254,13 @@ systemd user timer for the run directory. It reconciles the listed task
 directories every 30 seconds, records each newly observed `result.json` once
 in `flags/events.jsonl`, and stops itself after every listed task has a
 `disposition.json`. It survives the shell that armed it; it still requires the
-user's systemd manager to remain running. If `NTFY_URL` is set, it publishes
-through the shared `claude-settings/ntfy/publisher.sh` route. Notifications are
-best-effort; the event file is the durable record.
+user's systemd manager to remain running. If `NTFY_URL` or
+`ORCH_WATCH_NTFY_URL` is set while arming, the URL is saved in a mode-600 file
+under `.durable-watch/`; the transient unit receives only the run directory.
+Reconcile reads the URL at runtime and uses the same private token file as the
+shared `claude-settings/ntfy/publisher.sh` sender. Notifications are
+best-effort; the event file is the durable record. `disarm` stops the units and
+clears the stored watch config and URL so changed settings can be armed again.
 
 ```sh
 RUN_DIR=/absolute/path/to/run
@@ -269,10 +273,12 @@ python3 -B skills/orchestrator/scripts/durable_watch.py disarm "$RUN_DIR"
 Pass task directory names relative to the run directory. Repeating `arm` with
 the same configuration is safe and reuses the existing timer. `status` reports
 the exact timer and each task's result/disposition presence. `disarm` stops the
-timer and its active reconcile service; normal completion disarms the timer
-automatically. `arm` accepts `--ntfy-url` or the `ORCH_WATCH_NTFY_URL` /
-`NTFY_URL` environment variable when notification routing differs from the
-shared publisher's configuration.
+timer and its active reconcile service, then removes its config; normal
+completion disarms the timer automatically but leaves the config until an
+explicit `disarm`. Set `ORCH_WATCH_NTFY_URL` or `NTFY_URL` in the environment
+for `arm` when notification routing differs from the shared publisher's
+default. The URL is never passed as a command-line argument or copied into the
+transient unit environment.
 
 ## CLI launch and observation
 

@@ -1,10 +1,14 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 import io
 import json
 import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+import stat
 import sys
 import tempfile
+from threading import Thread
 import unittest
 from unittest import mock
 
@@ -85,30 +89,119 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(result, 0)
         stop.assert_called_once_with(self.run_dir.resolve(), nonblocking=True)
 
-    def test_new_result_uses_the_configured_ntfy_publisher_once(self):
-        publisher = self.run_dir / "publisher"
-        capture = self.run_dir / "published.txt"
-        publisher.write_text("#!/bin/sh\ncat > \"$PUBLISHER_CAPTURE\"\n", encoding="utf-8")
-        publisher.chmod(0o755)
+    def test_new_result_uses_the_private_ntfy_route_once(self):
+        received = []
+
+        class NtfyHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                received.append((self.path, dict(self.headers), body))
+                response = json.dumps({"id": "test-message-id"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format, *args):
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), NtfyHandler)
+        server_thread = Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(server.shutdown)
         config_path = self.run_dir / durable_watch.CONFIG
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        config.update({"notify": True, "publisher": str(publisher)})
+        route = f"http://127.0.0.1:{server.server_port}/test/topic"
+        token_file = self.run_dir / "ntfy-token"
+        token_file.write_text("unit-test-token\n", encoding="utf-8")
+        config.update({
+            "notify": True,
+            "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
+            "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
+            "ntfy_token_file": str(token_file),
+            "notification_title": "Orchestrator worker result",
+        })
+        durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
         durable_watch.write_config(config_path, config)
         (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
 
-        with mock.patch.dict(os.environ, {
-            "NTFY_URL": "https://notify.example.invalid/orchestrator-test",
-            "PUBLISHER_CAPTURE": str(capture),
-        }):
+        output = io.StringIO()
+        with redirect_stderr(output):
             first = durable_watch.reconcile_once(self.run_dir)
             second = durable_watch.reconcile_once(self.run_dir)
 
         self.assertEqual(len(first["new_events"]), 1)
         self.assertEqual(second["new_events"], [])
-        self.assertEqual(
-            capture.read_text(encoding="utf-8"),
-            "Orchestrator worker result\ntask-a wrote result.json in run\n3\n",
-        )
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "/test/topic")
+        self.assertEqual(received[0][1]["Authorization"], "Bearer unit-test-token")
+        self.assertEqual(received[0][1]["Title"], "Orchestrator worker result")
+        self.assertEqual(received[0][1]["Priority"], "3")
+        self.assertEqual(received[0][2], b"task-a wrote result.json in run")
+        self.assertIn("ntfy accepted (HTTP 200; id=test-message-id)", output.getvalue())
+        self.assertNotIn(route, output.getvalue())
+        self.assertNotIn("unit-test-token", output.getvalue())
+
+    def test_arm_keeps_notification_route_out_of_systemd_arguments(self):
+        (self.run_dir / durable_watch.CONFIG).unlink()
+        secret_url = "https://notify.example.invalid/private-topic-test-1159"
+        args = type("Args", (), {
+            "run_dir": str(self.run_dir),
+            "tasks": ["task-a"],
+            "interval_seconds": 30,
+            "notification_title": "Orchestrator worker result",
+        })()
+        launched = []
+        launch_environments = []
+
+        def capture_systemd_run(command, **kwargs):
+            launched.append(command)
+            launch_environments.append(kwargs["env"])
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"NTFY_URL": secret_url}, clear=True), \
+                mock.patch.object(durable_watch, "systemd_property", return_value="not-found"), \
+                mock.patch.object(durable_watch.subprocess, "run", side_effect=capture_systemd_run), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(durable_watch.command_arm(args), 0)
+
+        self.assertEqual(len(launched), 1)
+        argv = launched[0]
+        self.assertFalse(any(secret_url in value for value in argv))
+        self.assertFalse(any(value.startswith("--setenv=") for value in argv))
+        self.assertNotIn("NTFY_URL", launch_environments[0])
+        self.assertFalse(any(secret_url in value for value in launch_environments[0].values()))
+        secret_path = self.run_dir / durable_watch.NTFY_URL_FILE
+        self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)
+        self.assertEqual(secret_path.read_text(encoding="utf-8").strip(), secret_url)
+        config_text = (self.run_dir / durable_watch.CONFIG).read_text(encoding="utf-8")
+        self.assertNotIn(secret_url, config_text)
+
+    def test_disarm_clears_configuration_before_changed_watch_is_armed(self):
+        durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, "https://notify.example.invalid/topic")
+        disarm_args = type("Args", (), {"run_dir": str(self.run_dir)})()
+        arm_args = type("Args", (), {
+            "run_dir": str(self.run_dir),
+            "tasks": ["task-a"],
+            "interval_seconds": 15,
+            "notification_title": "Orchestrator worker result",
+        })()
+
+        with mock.patch.object(durable_watch, "stop_units"), redirect_stdout(io.StringIO()):
+            self.assertEqual(durable_watch.command_disarm(disarm_args), 0)
+
+        self.assertFalse((self.run_dir / durable_watch.CONFIG).exists())
+        self.assertFalse((self.run_dir / durable_watch.NTFY_URL_FILE).exists())
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(durable_watch, "systemd_property", return_value="not-found"), \
+                mock.patch.object(durable_watch.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(durable_watch.command_arm(arm_args), 0)
+
+        self.assertEqual(durable_watch.read_config(self.run_dir)["tasks"], ["task-a"])
 
     def test_task_paths_cannot_escape_the_run_directory(self):
         outside = Path(self.temporary.name) / "outside"
