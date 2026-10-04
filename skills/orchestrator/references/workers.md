@@ -180,10 +180,20 @@ and that the result accounts for the acceptance criteria. Delegate a substantive
 quality check when the task calls for one. A worker's assertion is not a substitute
 for the recorded test, diff, report, or other task-specific evidence.
 
-Request a corrected result once when fields or evidence are missing. If still
-incomplete, keep the task blocked or assign bounded recovery work; do not report
-it complete. After an ambiguous prompt/launch timeout, observe the existing
-worker before retrying. Resume the same worker when it is still the right owner.
+Treat a text-only stop with open acceptance items and no stated blocker as
+missing evidence. Continue the same worker through its existing session or
+handle, naming the open items; a request to correct missing fields or evidence
+uses this same continuation rule. A continuation reuses the current attempt and
+worker ID; it is not a new launch, attempt, or blind provider retry. Allow at
+most two automatic continuations per task total and record each against the
+current attempt in `STATE.md`. Never continue past a refusal, required approval,
+or capability gap; keep the task blocked with the reason. After the second
+continuation, if any acceptance item remains open, keep it incomplete/blocked
+with the reason and do not report it complete. If the existing worker cannot
+accept a continuation through its known handle, reconcile its state; do not
+launch another worker under this recovery rule. After an ambiguous
+prompt/launch timeout, observe the existing worker before any separately
+authorized retry. Resume the same worker when it is still the right owner.
 
 Changed user instructions increment the assignment revision. Results from an
 earlier revision remain evidence about earlier work, not completion of the new
