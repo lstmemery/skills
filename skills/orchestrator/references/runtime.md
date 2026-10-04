@@ -247,6 +247,33 @@ Label the coordinator `Orchestrator` where the backend supports naming, using
 a unique legal agent name. Preserve existing names owned by others. Names are
 presentation; actual IDs and recorded ownership determine control.
 
+## Durable overnight watch
+
+When a coordinator session may end before workers finish, arm one finite
+systemd user timer for the run directory. It reconciles the listed task
+directories every 30 seconds, records each newly observed `result.json` once
+in `flags/events.jsonl`, and stops itself after every listed task has a
+`disposition.json`. It survives the shell that armed it; it still requires the
+user's systemd manager to remain running. If `NTFY_URL` is set, it publishes
+through the shared `claude-settings/ntfy/publisher.sh` route. Notifications are
+best-effort; the event file is the durable record.
+
+```sh
+RUN_DIR=/absolute/path/to/run
+python3 -B skills/orchestrator/scripts/durable_watch.py arm "$RUN_DIR" task-1 task-2 --interval-seconds 30
+python3 -B skills/orchestrator/scripts/durable_watch.py status "$RUN_DIR"
+systemctl --user list-units 'orch-watch*'
+python3 -B skills/orchestrator/scripts/durable_watch.py disarm "$RUN_DIR"
+```
+
+Pass task directory names relative to the run directory. Repeating `arm` with
+the same configuration is safe and reuses the existing timer. `status` reports
+the exact timer and each task's result/disposition presence. `disarm` stops the
+timer and its active reconcile service; normal completion disarms the timer
+automatically. `arm` accepts `--ntfy-url` or the `ORCH_WATCH_NTFY_URL` /
+`NTFY_URL` environment variable when notification routing differs from the
+shared publisher's configuration.
+
 ## CLI launch and observation
 
 ```sh
