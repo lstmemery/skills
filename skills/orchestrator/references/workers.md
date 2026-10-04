@@ -158,6 +158,15 @@ the roster with the discovered worker-shaped directories. A missing, malformed,
 or mismatched disposition or an unrostered worker makes closeout fail with the
 affected directory named; keep the run open until it is reconciled. If neither a
 roster nor worker-shaped directories exist, closeout succeeds with a count of 0.
+Discovery skips a subtree only when the directory itself carries copy evidence:
+a `.git` checkout or linked-worktree marker, or a code-review capture
+(`manifest.json` with `COMPLETE`). Names alone never exclude a directory, so an
+unrostered worker named like a copy is still reported. An evidence-carrying
+directory that also holds worker markers directly (`brief.md`, `result.json`,
+or `disposition.json` at its own root) is itself a live worker's task
+directory, not a copy, and is reported like any other unrostered worker;
+markers nested below an evidence-carrying root stay excluded, and rostered
+workers are always validated from the roster regardless of discovery.
 
 Repository changes also require the candidate record in
 [review.md](review.md). Use paths for the complete patch, file inventory,

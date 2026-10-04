@@ -38,6 +38,9 @@ RESULT_OUTCOMES = {"ready", "blocked", "failed"}
 CHECK_STATUSES = {"passed", "failed", "not_run"}
 OUTCOME_NORMALIZATIONS = {"complete": "ready", "completed": "ready"}
 WORKER_MARKERS = {"brief.md", "result.json", "disposition.json"}
+REPOSITORY_COPY_MARKER = ".git"
+CAPTURE_MANIFEST_NAME = "manifest.json"
+CAPTURE_COMPLETION_MARKER = "COMPLETE"
 OVERWRITE_MESSAGE = "disposition already exists: {path}; pass --replace to update it"
 
 
@@ -288,6 +291,45 @@ def _relative_directory(value, label):
     return Path(*parts)
 
 
+def _is_capture_or_repository_copy(directory):
+    """Report whether evidence in the directory itself marks it as copied material.
+
+    Discovery may only skip a subtree when the directory carries copy evidence:
+    a git checkout or linked worktree marker (``.git`` file or directory), or a
+    capture written by the local code-review convention (``manifest.json`` plus
+    the ``COMPLETE`` marker). Directory names such as ``capture`` or ``*-repo``
+    are never evidence, so a live worker with such a name is still discovered.
+    """
+    if (directory / REPOSITORY_COPY_MARKER).exists():
+        return True
+    return (
+        (directory / CAPTURE_MANIFEST_NAME).is_file()
+        and (directory / CAPTURE_COMPLETION_MARKER).is_file()
+    )
+
+
+def _direct_worker_markers(directory):
+    """Report which worker markers sit directly inside an evidence-carrying directory.
+
+    A genuine captured copy holds worker-shaped files only below its root, in
+    nested historical task directories, so markers directly inside an
+    evidence-carrying directory mean the directory itself is a live worker's
+    task directory and must be discovered instead of silently pruned. Entries
+    that are directories (including symlinks to directories) never count, so
+    nested markers stay excluded. An unreadable directory is a closeout error,
+    matching the walk error policy.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            names = {entry.name for entry in entries if not entry.is_dir()}
+    except OSError as error:
+        records.invalid(
+            f"cannot inspect copy-evidenced directory {directory}: "
+            f"{error.strerror or error}"
+        )
+    return WORKER_MARKERS.intersection(names)
+
+
 def _parse_roster(run_dir):
     roster_path = run_dir / "workers.json"
     if roster_path.is_symlink():
@@ -344,8 +386,13 @@ def _discover_worker_directories(run_root):
             traversable = []
             for name in directory_names:
                 directory = current_path / name
+                relative_directory = directory.relative_to(run_root)
                 if directory.is_symlink():
-                    symlink_directories.append(directory.relative_to(run_root))
+                    symlink_directories.append(relative_directory)
+                elif _is_capture_or_repository_copy(directory):
+                    if _direct_worker_markers(directory):
+                        discovered.add(relative_directory)
+                    continue
                 else:
                     traversable.append(name)
             directory_names[:] = traversable
