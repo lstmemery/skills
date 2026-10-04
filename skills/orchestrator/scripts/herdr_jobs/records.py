@@ -239,6 +239,11 @@ def prepare(manifest_path, policy_path):
         text(job["output_expectation"], "output_expectation", 10000)
         if not isinstance(job["task_kind"], str) or job["task_kind"] not in policy["routes"]:
             invalid("task_kind must be ordinary, deep_research, or shopping")
+        if job["task_kind"] == "shopping":
+            raise JobError("decision_needed",
+                           f"{job_id}: shopping is unsupported by managed Herdr Jobs because its jail route is Codex-only; "
+                           "launch it from a host Herdr pane with `omp-train --claude` as documented in "
+                           "skills/orchestrator/PREFERENCES.md")
         route = dict(policy["routes"][job["task_kind"]])
         model = None
         override = job.get("override")

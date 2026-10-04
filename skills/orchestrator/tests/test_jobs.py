@@ -103,6 +103,15 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
 
+    def test_shopping_admission_refuses_managed_route_with_host_pane_command(self):
+        self.write_jobs(1, ["shopping"])
+        code, result = self.call(preview=True)
+        self.assertEqual((code, result["error"]), (5, "decision_needed"))
+        self.assertIn("omp-train --claude", result["message"])
+        self.assertIn("PREFERENCES.md", result["message"])
+        self.assertFalse(self.run.exists())
+        self.assertFalse((self.root / "events.json").exists())
+
     def test_zero_budget_is_local_only_and_returns_continuation(self):
         code, result = self.call(real=True, wait_seconds=0)
         self.assertEqual((code, result["batch_state"]), (0, "checkpointed"))
@@ -143,7 +152,7 @@ class JobsTest(unittest.TestCase):
         self.assertFalse((self.run / "state.json").exists())
 
     def test_mixed_batch_observes_each_launch_before_starting_the_next(self):
-        self.write_jobs(5, ["ordinary", "shopping", "deep_research", "ordinary", "ordinary"])
+        self.write_jobs(5, ["ordinary", "deep_research", "deep_research", "ordinary", "ordinary"])
         code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
         events = self.events()
@@ -415,7 +424,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["jobs"][4]["phase"], "pending")
 
     def test_finite_jail_exits_release_slots_and_collect(self):
-        self.write_jobs(5, ["shopping"] * 5)
+        self.write_jobs(5, ["deep_research"] * 5)
         self.configure(jobs={f"job{index}": "exited_jail" for index in range(5)})
         code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"], result["active_jobs"]), (0, "collected", 0))
@@ -549,7 +558,7 @@ class JobsTest(unittest.TestCase):
                 self.run = self.root / f"crash-{action}"
                 (self.root / "crashed").unlink(missing_ok=True)
                 (self.root / "events.json").unlink(missing_ok=True)
-                self.write_jobs(1, ["shopping"] if action == "jail" else None)
+                self.write_jobs(1, ["deep_research"] if action == "jail" else None)
                 self.configure(crash_after=action)
                 first = subprocess.run(self.argv(), capture_output=True, timeout=10)
                 self.assertEqual(first.returncode, 91)

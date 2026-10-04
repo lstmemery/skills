@@ -33,6 +33,10 @@ session, use **Managed Herdr Jobs** below. Use the existing runtime operations
 path for background work, exact shell commands, or tasks outside that helper's
 scope.
 
+Shopping is an exception: the managed jail route is Codex-only, so submit
+shopping through the host Herdr pane-command route `omp-train --claude` in
+[PREFERENCES.md](PREFERENCES.md), not as a managed job.
+
 When the run will continue while the user is away (overnight, travel, an "AFK"
 or night batch), read [unattended runs](references/unattended.md) before they
 leave. It adds admission, supervision, retry, evidence, and decision-doc rules
