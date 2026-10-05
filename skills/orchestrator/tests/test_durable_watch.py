@@ -148,7 +148,7 @@ class DurableWatchTest(unittest.TestCase):
 
     def test_arm_keeps_notification_route_out_of_systemd_arguments(self):
         (self.run_dir / durable_watch.CONFIG).unlink()
-        secret_url = "https://example.invalid/test-token-not-a-secret"
+        secret_url = "http://localhost/a"
         args = type("Args", (), {
             "run_dir": str(self.run_dir),
             "tasks": ["task-a"],
