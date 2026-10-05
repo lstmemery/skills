@@ -1,14 +1,17 @@
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from finish_watch import ResultWatcher, finish_task
+from finish_watch import ResultWatcher, close_herdr_workspace, finish_task
 from herdr_jobs.records import JobError
 
 
@@ -57,6 +60,74 @@ class FinishWatchTest(unittest.TestCase):
 
     def close_workspace(self, workspace):
         self.closed_workspaces.append(workspace)
+
+    def test_documented_watch_invocation_resolves_run_and_task_list_from_caller_directory(self):
+        task_list = self.run_dir / "task-ids.txt"
+        task_list.write_text("task-arrives\n")
+        watch_script = PACKAGE / "scripts" / "watch-results.py"
+        state_file = self.run_dir / ".watch-results-state.json"
+        command = [
+            sys.executable,
+            "-B",
+            str(watch_script),
+            self.run_dir.name,
+            f"{self.run_dir.name}/task-ids.txt",
+            "--timeout-seconds",
+            "3",
+            "--interval-seconds",
+            "0.01",
+        ]
+        process = subprocess.Popen(
+            command,
+            cwd=self.run_dir.parent,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 2
+            while not state_file.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            if not state_file.exists():
+                return_code = process.poll()
+                if return_code is None:
+                    process.terminate()
+                stdout, stderr = process.communicate(timeout=2)
+                self.fail(
+                    "watcher did not initialize from the documented relative paths; "
+                    f"cwd={self.run_dir.parent}, entries={sorted(path.name for path in self.run_dir.iterdir())}, "
+                    f"returncode={return_code}, stdout={stdout!r}, stderr={stderr!r}"
+                )
+            result = self.run_dir / "tasks" / "task-arrives" / "result.json"
+            result.parent.mkdir(parents=True)
+            result.write_text('{"task_id":"task-arrives","summary":"ready"}\n')
+            stdout, stderr = process.communicate(timeout=2)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=2)
+
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(stdout, "DONE task-arrives\n")
+        self.assertEqual(stderr, "")
+
+    @patch("finish_watch.subprocess.run")
+    def test_close_herdr_workspace_uses_exact_argv_without_a_shell(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            ["herdr", "workspace", "close", "wExample"], 0
+        )
+
+        close_herdr_workspace("wExample")
+
+        run.assert_called_once_with(
+            ["herdr", "workspace", "close", "wExample"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        self.assertFalse(run.call_args.kwargs.get("shell", False))
 
     def test_valid_blocked_result_records_blocked_and_uses_recorded_resources(self):
         finished = finish_task(

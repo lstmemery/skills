@@ -125,7 +125,8 @@ def finish_task(run_dir, task_id, revision, summary, release_lease, close_worksp
     run_dir = Path(run_dir)
     if run_dir.is_symlink() or not run_dir.is_dir():
         raise records.JobError("invalid_input", f"run directory does not exist or is a symlink: {run_dir}")
-    run_root = run_dir.resolve()
+    run_dir = run_dir.resolve()
+    run_root = run_dir
     task_dir = run_dir / "tasks" / task_id
     if task_dir.is_symlink() or not task_dir.is_dir():
         raise records.JobError("invalid_input", f"canonical task directory is missing: {task_dir}")
@@ -205,7 +206,8 @@ class ResultWatcher:
         self.run_dir = Path(run_dir)
         if self.run_dir.is_symlink() or not self.run_dir.is_dir():
             raise records.JobError("invalid_input", f"run directory does not exist or is a symlink: {run_dir}")
-        self.run_root = self.run_dir.resolve()
+        self.run_dir = self.run_dir.resolve()
+        self.run_root = self.run_dir
         self.task_ids = tuple(_task_id(task_id) for task_id in task_ids)
         if not self.task_ids or len(set(self.task_ids)) != len(self.task_ids):
             raise records.JobError("invalid_input", "task list must contain unique task IDs")
@@ -352,9 +354,10 @@ def watch_for_result(run_dir, task_ids, timeout_seconds, interval_seconds, state
 def read_task_list(run_dir, task_list):
     run_root = Path(run_dir).resolve()
     path = Path(task_list)
-    if not path.is_absolute():
-        path = Path(run_dir) / path
-    if path.is_symlink() or not path.resolve().is_relative_to(run_root):
+    if path.is_symlink():
+        raise records.JobError("invalid_input", "task list must be a regular path inside the run directory")
+    path = path.resolve()
+    if not path.is_relative_to(run_root):
         raise records.JobError("invalid_input", "task list must be a regular path inside the run directory")
     try:
         content = records.read_regular(path, 1048576).decode("utf-8")
