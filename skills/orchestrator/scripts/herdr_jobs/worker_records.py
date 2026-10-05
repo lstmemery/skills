@@ -141,6 +141,7 @@ def result_schema_markdown():
         "empty only when the outcome is not `ready`.",
         f"`checks` is an array of objects with exactly {check_fields}; `status` must "
         f"be one of {statuses}.",
+        "`checks[].evidence` must be a non-empty string, such as a path or concise check result.",
         "`unresolved` is an array of non-empty strings; `blocked` and `failed` "
         "require at least one explanatory item.",
         "For repository changes, validate with `--repository-changes` and include "
@@ -195,7 +196,13 @@ def _validate_result_record(record, identity, repository_changes=False):
         )
         records.text(item["name"], f"checks[{index}].name")
         _choice(item["status"], CHECK_STATUSES, f"checks[{index}].status")
-        records.text(item["evidence"], f"checks[{index}].evidence")
+        evidence = item["evidence"]
+        if not isinstance(evidence, str) or not evidence.strip():
+            records.invalid(
+                f"checks[{index}].evidence must be a non-empty string; "
+                "use a path or concise check result"
+            )
+        records.text(evidence, f"checks[{index}].evidence")
 
     unresolved = record["unresolved"]
     if not isinstance(unresolved, list):

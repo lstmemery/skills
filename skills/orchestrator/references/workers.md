@@ -10,11 +10,16 @@ Give the worker this compact contract, with concrete values:
 Task: <id and requested outcome>
 Scope: <owned work, inputs, applicable instructions, dependencies>
 Location: <cwd; output folder; permitted repository/worktree if any>
+Result: <absolute path to this attempt's task directory>/result.json
 Authority: <allowed edits/commits; exact actions needing a user decision>
 Acceptance: <observable result and task/repository verification>
 Return: <result record path; full artifact/evidence paths>
 Stop/ask: <missing decision or capability that prevents this task>
 ```
+
+Resolve `Result` to the concrete absolute path before launch and tell the worker
+to write `result.json` there. The path must point into that worker's own task
+directory, not only into a batch or shared directory.
 
 Pass the user's standing pre-PR/pre-integration decision boundary explicitly to
 coding workers. Delegate a bounded execution task, not coordinator authority.
