@@ -17,6 +17,10 @@
     "deep_research": {"mode": "jail", "runtime": "codex"},
     "shopping": {"mode": "jail", "runtime": "codex"}
   },
+  "jail_stream_idle_timeout_ms": {
+    "default": 300000,
+    "task_classes": {"short_routine": 300000, "long_form_research": 600000}
+  },
   "runtime_kinds": {
     "claude-code": "claude",
     "codex": "codex",

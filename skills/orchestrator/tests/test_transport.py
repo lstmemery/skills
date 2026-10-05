@@ -12,7 +12,7 @@ from unittest.mock import patch
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.records import JobError, digest, load_json, save
+from herdr_jobs.records import JobError, digest, load_json, prepare, save
 from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport, RateLimited
 
 
@@ -113,6 +113,18 @@ class TransportTest(unittest.TestCase):
         if argv[:3] == ["herdr", "pane", "move"]:
             return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"},"workspace":{"workspace_id":"workspace:1"}}}}'
         return b'{"result":{}}'
+
+    def prepared_jail_spec(self, task_class):
+        (self.root / "task.md").write_text("A task for the jailed worker.")
+        job = {"job_id": "j1", "name": "fixture", "task_kind": "deep_research",
+               "task_file": "task.md", "cwd": ".", "output_expectation": "answer",
+               "writes_repository": False}
+        if task_class is not None:
+            job["task_class"] = task_class
+        manifest_path = self.root / "manifest.json"
+        save(manifest_path, {"schema_version": 1, "request_id": "fixture", "jobs": [job]})
+        request = prepare(manifest_path, PACKAGE / "launch-policy.json")
+        return request["jobs"][0]
 
     def test_exact_runtime_is_not_substituted(self):
         self.spec["route"]["runtime"] = "omp"
@@ -507,8 +519,62 @@ class TransportTest(unittest.TestCase):
         runner_argv = shlex.split(argv[4])
         self.assertEqual(runner_argv[2], "--request")
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", prompt])
+        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+                                           "--skip-git-repo-check", "-c",
+                                           "model_providers.train-openai.stream_idle_timeout_ms=300000", prompt])
         self.assertNotIn(prompt, argv[4])
+
+    def test_short_routine_jail_class_uses_300000_ms_stream_timeout(self):
+        self.job["spec"] = self.prepared_jail_spec("short_routine")
+        prompt = "short task"
+
+        self.adapter.effect("jail", self.job, prompt)
+
+        runner_argv = shlex.split(self.calls[-1][4])
+        request = load_json(runner_argv[3])
+        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+                                           "--skip-git-repo-check", "-c",
+                                           "model_providers.train-openai.stream_idle_timeout_ms=300000",
+                                           prompt])
+
+    def test_long_form_research_jail_class_uses_600000_ms_stream_timeout(self):
+        self.job["spec"] = self.prepared_jail_spec("long_form_research")
+        prompt = "long research task"
+
+        self.adapter.effect("jail", self.job, prompt)
+
+        runner_argv = shlex.split(self.calls[-1][4])
+        request = load_json(runner_argv[3])
+        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+                                           "--skip-git-repo-check", "-c",
+                                           "model_providers.train-openai.stream_idle_timeout_ms=600000",
+                                           prompt])
+
+    def test_unrecognized_jail_class_uses_300000_ms_stream_timeout(self):
+        self.job["spec"] = self.prepared_jail_spec("future_class")
+        prompt = "future task"
+
+        self.adapter.effect("jail", self.job, prompt)
+
+        runner_argv = shlex.split(self.calls[-1][4])
+        request = load_json(runner_argv[3])
+        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+                                           "--skip-git-repo-check", "-c",
+                                           "model_providers.train-openai.stream_idle_timeout_ms=300000",
+                                           prompt])
+
+    def test_omitted_jail_class_uses_300000_ms_stream_timeout(self):
+        self.job["spec"] = self.prepared_jail_spec(None)
+        prompt = "unclassified task"
+
+        self.adapter.effect("jail", self.job, prompt)
+
+        runner_argv = shlex.split(self.calls[-1][4])
+        request = load_json(runner_argv[3])
+        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+                                           "--skip-git-repo-check", "-c",
+                                           "model_providers.train-openai.stream_idle_timeout_ms=300000",
+                                           prompt])
 
     def test_verified_exit_record_survives_absent_agent(self):
         self.spec["route"]["mode"] = "jail"
