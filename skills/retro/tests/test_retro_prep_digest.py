@@ -64,17 +64,17 @@ class DeriveRoleTests(unittest.TestCase):
 
     def test_worker_dispatch(self):
         role, basis = MOD.derive_role(
-            ['You are a worker. Read and execute your brief: /tmp/brief.md'])
+            ['You are a worker. Read and execute your brief: brief.md'])
         self.assertEqual(('worker', 'worker-dispatch'), (role, basis))
 
     def test_code_reviewer_is_worker(self):
         self.assertEqual('worker', MOD.derive_role(
-            ['You are a code reviewer. Read and execute /tmp/review/brief.md.'])[0])
+            ['You are a code reviewer. Read and execute review/brief.md.'])[0])
 
     def test_coordinator_wins_over_worker_dispatch(self):
         role, _ = MOD.derive_role([
-            'You are a worker. Read and execute your brief: /tmp/b.md',
-            'You are the /orchestrator. Read this handoff: ~/HANDOFF.md'])
+            'You are a worker. Read and execute your brief: b.md',
+            'You are the /orchestrator. Read this handoff: HANDOFF.md'])
         self.assertEqual('coordinator', role)
 
     def test_no_user_turns(self):
