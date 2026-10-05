@@ -63,11 +63,20 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command route `omp-train --claude` documented in [PREFERENCES.md](../PREFERENCES.md). Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
+
+For a jailed Codex job, optional `task_class` selects the per-run provider
+stream idle timeout from `launch-policy.json`: `short_routine` uses 300000 ms
+and `long_form_research` uses 600000 ms. A missing or unrecognized class uses
+the 300000 ms default, so long-form research must be marked explicitly; the
+`deep_research` task kind alone does not select 600000 ms. The helper passes
+`-c model_providers.train-openai.stream_idle_timeout_ms=<value>` to that
+Codex invocation. This limits an idle stream interval, not total job time, and
+does not modify shared Codex configuration.
 
 `worker_result` opts a job into the shared worker-record contract. The helper
 then asks for a `result.json` bound to that task ID and assignment revision,

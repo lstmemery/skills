@@ -261,7 +261,9 @@ class NativeTransport:
         elif action == "prompt":
             argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
         elif action == "jail":
-            launch = ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", prompt]
+            timeout_ms = spec.get("jail_stream_idle_timeout_ms", 300000)
+            launch = ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "-c",
+                      f"model_providers.train-openai.stream_idle_timeout_ms={timeout_ms}", prompt]
             launch_request = Path(job["exit_record"]).with_name("launch.json")
             save(launch_request, {"schema_version": 1, "job_id": spec["job_id"], "attempt_id": job["attempt_id"],
                                   "argv": launch, "exit_path": job["exit_record"]})

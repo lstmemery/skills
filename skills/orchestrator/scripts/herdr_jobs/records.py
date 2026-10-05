@@ -130,6 +130,19 @@ def integer(value, label, low, high):
     return value
 
 
+def jail_stream_idle_timeout_record(value):
+    fields(value, ["default", "task_classes"], label="jail_stream_idle_timeout_ms")
+    default = integer(value["default"], "jail stream idle timeout default", 1, 2**31 - 1)
+    classes = value["task_classes"]
+    if not isinstance(classes, dict):
+        invalid("jail stream idle timeout task_classes must be an object")
+    normalized = {}
+    for task_class, timeout in classes.items():
+        identifier(task_class, "jail timeout task class")
+        normalized[task_class] = integer(timeout, f"jail stream idle timeout for {task_class}", 1, 2**31 - 1)
+    return {"default": default, "task_classes": normalized}
+
+
 def version(value):
     integer(value, "schema_version", 1, 1)
 
@@ -204,10 +217,16 @@ def absolute(value, base):
 
 def policy_record(value):
     fields(value, ["schema_version", "default_concurrency", "max_concurrency", "topology", "routes", "runtime_kinds"],
-           ["provider_admission"])
+           ["provider_admission", "jail_stream_idle_timeout_ms"])
     version(value["schema_version"])
     if value["topology"] != "new-workspace":
         invalid("version 1 supports new-workspace topology only")
+    value["jail_stream_idle_timeout_ms"] = jail_stream_idle_timeout_record(
+        value.get("jail_stream_idle_timeout_ms", {
+            "default": 300000,
+            "task_classes": {"short_routine": 300000, "long_form_research": 600000},
+        })
+    )
     maximum = integer(value["max_concurrency"], "max_concurrency", 1, 64)
     integer(value["default_concurrency"], "default_concurrency", 1, maximum)
     fields(value["routes"], ["ordinary", "deep_research", "shopping"], label="routes")
@@ -274,7 +293,7 @@ def prepare(manifest_path, policy_path):
     for job in manifest["jobs"]:
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
-               ["override", "repository_worktree", "worker_result"], "job")
+               ["override", "repository_worktree", "worker_result", "task_class"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -284,6 +303,7 @@ def prepare(manifest_path, policy_path):
         text(job["output_expectation"], "output_expectation", 10000)
         if not isinstance(job["task_kind"], str) or job["task_kind"] not in policy["routes"]:
             invalid("task_kind must be ordinary, deep_research, or shopping")
+        task_class = identifier(job["task_class"], "task_class") if "task_class" in job else None
         ensure_task_admitted(job["task_kind"], job_id)
         route = dict(policy["routes"][job["task_kind"]])
         model = None
@@ -340,9 +360,14 @@ def prepare(manifest_path, policy_path):
             if identity in worker_results:
                 invalid(f"duplicate worker_result identity: {identity[0]} revision {identity[1]}")
             worker_results.add(identity)
-        jobs.append({**job, "task_file": task_path, "cwd": cwd,
-                     "task": task, "route": route, "model": model,
-                     "provider": provider, "kind": policy["runtime_kinds"][runtime]})
+        prepared_job = {**job, "task_file": task_path, "cwd": cwd,
+                        "task": task, "route": route, "model": model,
+                        "provider": provider, "kind": policy["runtime_kinds"][runtime]}
+        if route["mode"] == "jail":
+            timeout_policy = policy["jail_stream_idle_timeout_ms"]
+            prepared_job["jail_stream_idle_timeout_ms"] = timeout_policy["task_classes"].get(
+                task_class, timeout_policy["default"])
+        jobs.append(prepared_job)
     if retry_override:
         for runtime in retry_override:
             if not any(job["route"]["mode"] == "agent" and job["route"]["runtime"] == runtime

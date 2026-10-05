@@ -74,6 +74,11 @@ acceptance of worker output.
   verified, so confirm at admission that the jail's runtime default is
   `gpt-6-astra` at max effort; if it cannot be confirmed, hold the launch —
   do not substitute.
+  Managed jailed Codex jobs use optional `task_class` for their per-run
+  stream idle timeout: `short_routine` and missing or unknown classes use
+  300000 ms; explicitly setting `long_form_research` uses 600000 ms. This is
+  an idle-stream limit, not a total job deadline, and leaves shared Codex
+  configuration untouched.
   Within the managed helper, a named non-jail runtime is honoured by
   re-issuing the job as `task_kind: ordinary`; a runtime override on the jail
   route itself is refused, never converted.
