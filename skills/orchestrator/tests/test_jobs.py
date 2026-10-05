@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
 from support import isolate_admission_state
-from herdr_jobs.records import digest
+from herdr_jobs.records import digest, encoded
 
 
 class JobsTest(unittest.TestCase):
@@ -85,6 +85,28 @@ class JobsTest(unittest.TestCase):
     def state(self):
         return json.loads((self.run / "state.json").read_text())
 
+    def restore_pending_checkpoint(self, task_kind):
+        state = self.state()
+        request = state["request"]
+        spec = request["jobs"][0]
+        spec["task_kind"] = task_kind
+        if task_kind == "shopping":
+            spec["route"] = copy.deepcopy(request["policy"]["routes"]["shopping"])
+            spec["kind"] = request["policy"]["runtime_kinds"][spec["route"]["runtime"]]
+        job = state["jobs"][0]
+        job["spec"] = copy.deepcopy(spec)
+        job.update(phase="pending", pane_id=None, pending_effect=None, settled=False,
+                   observed=None, activity_seen=False, collection=None, collection_error=None,
+                   issue=None, admission_acquired=False)
+        if task_kind == "shopping":
+            suffix = f"c9-{digest(request['request_id'].encode())[:12]}/{spec['job_id']}-{job['attempt_id']}"
+            job["host_output"] = str(self.root / "export" / suffix)
+            job["worker_output"] = str(Path("/worker-workspace") / suffix)
+        state["request_digest"] = digest(encoded(request))
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+        (self.root / "events.json").write_text("[]")
+        return (self.run / "state.json").read_bytes()
+
     def test_codex_pending_start_predicate_matches_only_managed_codex_starts(self):
         job = {"spec": {"route": {"mode": "agent", "runtime": "codex"}}}
         pending = {"action": "start", "started_at": "fixture"}
@@ -102,6 +124,36 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["batch_state"], result["concurrency"]), (0, "preview", 4))
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
+
+    def test_shopping_admission_refuses_managed_route_with_host_pane_command(self):
+        self.write_jobs(1, ["shopping"])
+        code, result = self.call(preview=True)
+        self.assertEqual((code, result.get("error")), (5, "decision_needed"), result)
+        self.assertIn("omp-train --claude", result["message"])
+        self.assertIn("PREFERENCES.md", result["message"])
+        self.assertFalse(self.run.exists())
+        self.assertFalse((self.root / "events.json").exists())
+
+    def test_resume_refuses_legacy_pending_shopping_checkpoint_without_launch_effects(self):
+        self.call()
+        checkpoint = self.restore_pending_checkpoint("shopping")
+
+        code, result = self.call("resume")
+
+        self.assertEqual((code, result.get("error")), (5, "decision_needed"), result)
+        self.assertIn("omp-train --claude", result["message"])
+        self.assertIn("PREFERENCES.md", result["message"])
+        self.assertEqual(self.events(), [])
+        self.assertEqual((self.run / "state.json").read_bytes(), checkpoint)
+
+    def test_resume_relaunches_pending_ordinary_checkpoint(self):
+        self.call()
+        self.restore_pending_checkpoint("ordinary")
+
+        code, result = self.call("resume")
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
 
     def test_zero_budget_is_local_only_and_returns_continuation(self):
         code, result = self.call(real=True, wait_seconds=0)
@@ -143,7 +195,7 @@ class JobsTest(unittest.TestCase):
         self.assertFalse((self.run / "state.json").exists())
 
     def test_mixed_batch_observes_each_launch_before_starting_the_next(self):
-        self.write_jobs(5, ["ordinary", "shopping", "deep_research", "ordinary", "ordinary"])
+        self.write_jobs(5, ["ordinary", "deep_research", "deep_research", "ordinary", "ordinary"])
         code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
         events = self.events()
@@ -415,7 +467,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["jobs"][4]["phase"], "pending")
 
     def test_finite_jail_exits_release_slots_and_collect(self):
-        self.write_jobs(5, ["shopping"] * 5)
+        self.write_jobs(5, ["deep_research"] * 5)
         self.configure(jobs={f"job{index}": "exited_jail" for index in range(5)})
         code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"], result["active_jobs"]), (0, "collected", 0))
@@ -549,7 +601,7 @@ class JobsTest(unittest.TestCase):
                 self.run = self.root / f"crash-{action}"
                 (self.root / "crashed").unlink(missing_ok=True)
                 (self.root / "events.json").unlink(missing_ok=True)
-                self.write_jobs(1, ["shopping"] if action == "jail" else None)
+                self.write_jobs(1, ["deep_research"] if action == "jail" else None)
                 self.configure(crash_after=action)
                 first = subprocess.run(self.argv(), capture_output=True, timeout=10)
                 self.assertEqual(first.returncode, 91)

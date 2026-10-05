@@ -33,6 +33,9 @@ session, use **Managed Herdr Jobs** below. Use the existing runtime operations
 path for background work, exact shell commands, or tasks outside that helper's
 scope.
 
+Shopping is refused under the [Managed Herdr Jobs contract](references/managed-jobs.md);
+use the host pane-command route documented in [PREFERENCES.md](PREFERENCES.md).
+
 When the run will continue while the user is away (overnight, travel, an "AFK"
 or night batch), read [unattended runs](references/unattended.md) before they
 leave. It adds admission, supervision, retry, evidence, and decision-doc rules
