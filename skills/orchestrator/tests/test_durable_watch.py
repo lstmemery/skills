@@ -12,6 +12,7 @@ import tempfile
 from threading import Thread
 import unittest
 from unittest import mock
+import urllib.error
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -147,10 +148,74 @@ class DurableWatchTest(unittest.TestCase):
         self.assertNotIn(route, output.getvalue())
         self.assertNotIn("unit-test-token", output.getvalue())
 
+    def test_authenticated_ntfy_request_does_not_follow_cross_host_redirect(self):
+        route = "https://ntfy.example.invalid/source-topic"
+        redirect_target = "https://other.example.invalid/target-topic"
+        token = "fake"
+        token_file = self.run_dir / "redirect-token"
+        token_file.write_text(token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        config = {
+            "notify": True,
+            "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
+            "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
+            "ntfy_token_file": str(token_file),
+        }
+        durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
+        delivered = []
+        openers = []
+
+        class FakeOpener:
+            def __init__(self, handlers):
+                self.redirect_handler = next(
+                    handler for handler in handlers
+                    if isinstance(handler, durable_watch.NoRedirectHandler)
+                )
+
+            def open(self, request, timeout):
+                delivered.append(("ntfy.example.invalid", request.get_header("Authorization")))
+                redirected = self.redirect_handler.redirect_request(
+                    request, self, 302, "Found", {"Location": redirect_target}, redirect_target,
+                )
+                if redirected is not None:
+                    delivered.append(("other.example.invalid", redirected.get_header("Authorization")))
+                raise urllib.error.HTTPError(
+                    request.full_url, 302, "Found", {}, io.BytesIO(),
+                )
+
+        def build_fake_opener(*handlers):
+            opener = FakeOpener(handlers)
+            openers.append(opener)
+            return opener
+
+        output = io.StringIO()
+        with mock.patch.object(durable_watch.urllib.request, "build_opener", side_effect=build_fake_opener), \
+                mock.patch.object(durable_watch.urllib.request, "urlopen", side_effect=AssertionError("unexpected urlopen")), \
+                redirect_stderr(output):
+            durable_watch.publish({"task_dir": "task-a", "run_dir": "run"}, config)
+
+        self.assertEqual(len(openers), 1)
+        self.assertEqual(delivered, [("ntfy.example.invalid", "Bearer fake")])
+        self.assertIn(
+            "ntfy publish failed (HTTP 302; redirect not followed); event is recorded",
+            output.getvalue(),
+        )
+        self.assertNotIn(redirect_target, output.getvalue())
+        self.assertNotIn(token, output.getvalue())
+
+    def test_ntfy_url_requires_https_except_for_loopback(self):
+        with mock.patch.dict(os.environ, {"NTFY_URL": "http://ntfy.example.invalid/topic"}, clear=True):
+            with self.assertRaisesRegex(durable_watch.WatchError, "https unless it targets loopback"):
+                durable_watch.ntfy_url()
+
+        for value in ("http://localhost/topic", "http://127.0.0.1/topic", "https://ntfy.example.invalid/topic"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"NTFY_URL": value}, clear=True):
+                self.assertEqual(durable_watch.ntfy_url(), value)
+
     def test_arm_starts_watcher_with_an_allowlisted_environment(self):
         (self.run_dir / durable_watch.CONFIG).unlink()
         secret_url = "http://localhost/a"
-        simulated_manager_key = "synthetic-unknown-api-key-canary"
+        unknown_manager_value = "fake"
         runtime_dir = "/run/user/test"
         args = type("Args", (), {
             "run_dir": str(self.run_dir),
@@ -168,7 +233,7 @@ class DurableWatchTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {
                 "NTFY_URL": secret_url,
-                "FOO_API_KEY": simulated_manager_key,
+                "FOO_UNLISTED_SETTING": unknown_manager_value,
                 "XDG_RUNTIME_DIR": runtime_dir,
         }, clear=True), \
                 mock.patch.object(durable_watch, "systemd_property", return_value="not-found"), \
@@ -209,13 +274,13 @@ class DurableWatchTest(unittest.TestCase):
         ]
         probe = subprocess.run(
             probe_argv,
-            env={"FOO_API_KEY": simulated_manager_key},
+            env={"FOO_UNLISTED_SETTING": unknown_manager_value},
             text=True,
             capture_output=True,
             check=True,
         )
         self.assertEqual(probe.stdout.splitlines(), ["HOME", "LANG", "PATH", "XDG_RUNTIME_DIR"])
-        self.assertNotIn("FOO_API_KEY", probe.stdout)
+        self.assertNotIn("FOO_UNLISTED_SETTING", probe.stdout)
 
         secret_path = self.run_dir / durable_watch.NTFY_URL_FILE
         self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)

@@ -263,9 +263,13 @@ This clears the systemd user manager's inherited environment before the watcher
 starts. Reconcile reads the URL and token only from their private files (the
 config stores the URL hash and file paths, not their values), using the same
 private token file as the shared `claude-settings/ntfy/publisher.sh` sender.
-Notifications are best-effort; the event file is the durable record. `disarm`
-stops the units and clears the stored watch config and URL so changed settings
-can be armed again.
+The route must use HTTPS, except that HTTP is accepted for `localhost` and
+loopback IP addresses. Do not use plain HTTP for a LAN ntfy server: the bearer
+token would be visible to network observers. Authenticated sends never follow
+redirects; a 3xx response is reported as a delivery failure while the event is
+still recorded. Notifications are best-effort; the event file is the durable
+record. `disarm` stops the units and clears the stored watch config and URL so
+changed settings can be armed again.
 
 ```sh
 RUN_DIR=/absolute/path/to/run

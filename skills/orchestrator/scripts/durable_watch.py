@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,13 @@ WATCHER_ENVIRONMENT_NAMES = ("PATH", "HOME", "LANG", "XDG_RUNTIME_DIR")
 
 class WatchError(Exception):
     """A watcher error safe to show without leaking configuration."""
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep authenticated ntfy requests on the configured origin."""
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
 
 
 def unit_base(run_dir: Path) -> str:
@@ -197,7 +205,8 @@ def publish(event: dict, config: dict) -> None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        opener = urllib.request.build_opener(NoRedirectHandler())
+        with opener.open(request, timeout=45) as response:
             status = response.status
             response_body = response.read(65536)
     except urllib.error.HTTPError as error:
@@ -205,6 +214,9 @@ def publish(event: dict, config: dict) -> None:
         response_body = error.read(65536)
     except (OSError, TimeoutError, urllib.error.URLError):
         print("durable-watch: ntfy publish failed; event is recorded", file=sys.stderr)
+        return
+    if 300 <= status < 400:
+        print(f"durable-watch: ntfy publish failed (HTTP {status}; redirect not followed); event is recorded", file=sys.stderr)
         return
     if not 200 <= status < 300:
         print(f"durable-watch: ntfy publish failed (HTTP {status}); event is recorded", file=sys.stderr)
@@ -333,9 +345,16 @@ def ntfy_url() -> str | None:
         parsed.port
     except ValueError as error:
         raise WatchError("ntfy URL must be a valid http(s) URL without embedded credentials") from error
+    loopback = False
+    if hostname:
+        try:
+            loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            loopback = hostname.lower() == "localhost"
     if (parsed.scheme not in ("http", "https") or not hostname or parsed.username or parsed.password
+            or (parsed.scheme == "http" and not loopback)
             or any(character in value for character in "\r\n\t ")):
-        raise WatchError("ntfy URL must be an http(s) URL without embedded credentials")
+        raise WatchError("ntfy URL must use https unless it targets loopback, without embedded credentials")
     return value
 
 
