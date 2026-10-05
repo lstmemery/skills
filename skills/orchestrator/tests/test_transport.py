@@ -227,6 +227,28 @@ class TransportTest(unittest.TestCase):
                                  "--pane", "moved:1", "--", "--provider", "zai", "--model",
                                  "glm-5.3-flash", "--thinking", "high"])
 
+    def test_claude_effort_maps_without_an_explicit_model(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"},
+                         override={"effort": "xhigh"})
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start[-3:], ["--", "--effort", "xhigh"])
+
+    def test_omp_effort_maps_to_thinking_without_an_explicit_model(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="omp", route={"mode": "agent", "runtime": "omp"},
+                         override={"effort": "max"})
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start[-3:], ["--", "--thinking", "max"])
+
     def test_codex_effort_is_scoped_to_the_prompt_bearing_start(self):
         fake = FakeHerdr(start_code=1)
         self.spec["override"] = {"effort": "max"}
@@ -265,6 +287,19 @@ class TransportTest(unittest.TestCase):
 
         self.assertEqual(result, {"closed": True, "workspace_id": "workspace:1"})
         self.assertEqual(calls, [["herdr", "workspace", "close", "workspace:1"]])
+
+    def test_finish_reconciliation_checks_the_exact_workspace_id(self):
+        self.job["workspace_id"] = "workspace:1"
+        self.adapter.raw = lambda argv: json.dumps({"result": {"type": "workspace_list", "workspaces": [
+            {"workspace_id": "workspace:other"}, {"workspace_id": "workspace:1"}
+        ]}}).encode()
+
+        self.assertTrue(self.adapter.workspace_is_open(self.job))
+
+        self.adapter.raw = lambda argv: json.dumps({"result": {"type": "workspace_list", "workspaces": [
+            {"workspace_id": "workspace:other"}
+        ]}}).encode()
+        self.assertFalse(self.adapter.workspace_is_open(self.job))
 
     def test_codex_retry_override_is_scoped_to_the_fresh_launch_arguments(self):
         fake = FakeHerdr(start_code=1)
@@ -371,6 +406,56 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(sum(call[:3] == ["herdr", "agent", "start"] for call in fake.calls), 1)
         self.assertTrue(any(call[:3] == ["herdr", "pane", "read"] for call in fake.calls))
         self.assertFalse(any(call[:3] == ["herdr", "agent", "prompt"] for call in fake.calls))
+
+    def test_echoed_prompt_working_text_does_not_prove_an_active_turn(self):
+        self.spec["task"] = "Print this word on its own line:\nWorking"
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = self.spec["task"]
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "working")
+        self.assertFalse(observation["prompt_verified"])
+
+    def test_unrelated_working_prose_does_not_prove_an_active_turn(self):
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = "The report says the workflow is working as intended."
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertFalse(observation["prompt_verified"])
+
+    def test_active_turn_status_line_after_unrelated_prose_proves_prompt_landing(self):
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = "The report says the workflow is working as intended.\n✳ Working…"
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertTrue(observation["prompt_verified"])
+
+    def test_active_status_after_an_echoed_working_prompt_proves_prompt_landing(self):
+        self.spec["task"] = "Print this word on its own line:\nWorking"
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = self.spec["task"] + "\n✳ Working…"
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertTrue(observation["prompt_verified"])
+
+    def test_echoed_authentication_phrase_does_not_block_a_working_worker(self):
+        self.spec["task"] = "Explain the phrase authentication required in the log."
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = self.spec["task"]
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "working")
+        self.assertTrue(observation["identity_verified"])
 
     def test_unverified_mutation_response_stays_ambiguous(self):
         self.adapter.raw = lambda argv: b'{}'

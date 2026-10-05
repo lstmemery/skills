@@ -234,8 +234,39 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((disposition["task_id"], disposition["assignment_revision"],
                           disposition["disposition"]), ("task-finish", 2, "completed"))
         self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
+
+    def test_finish_reconciles_workspace_closed_before_checkpoint_after_crash(self):
+        self.call()
+        self.configure(crash_after="workspace_close")
+
+        first = subprocess.run(self.argv("finish"), capture_output=True, timeout=10)
+
+        self.assertEqual(first.returncode, 91)
+        self.assertEqual(self.state()["jobs"][0]["pending_effect"]["action"], "workspace_close")
+        self.configure()
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["finish_complete"]), (0, True))
+        self.assertTrue(result["jobs"][0]["workspace_closed"])
+        self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
         self.assertEqual(self.call("finish")[1]["finish_complete"], True)
         self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
+
+    def test_finish_identifies_legacy_receipt_only_jobs_as_not_worker_validated(self):
+        self.configure(legacy_receipt_fixture=str(PACKAGE / "tests/fixtures/managed-jobs/legacy-receipt.json"))
+        code, result = self.call()
+        self.assertEqual((code, result["collection_complete"]), (0, True))
+        self.assertEqual(result["jobs"][0]["collection"]["outcome"], "complete")
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["finish_complete"]), (0, True))
+        self.assertEqual(result["finish"]["jobs"]["job0"]["worker_result_validation"], "not_requested")
+        message = result["next_action"]["message"]
+        self.assertIn("job0", message)
+        self.assertIn("not requested", message)
+        self.assertNotIn("validated worker records", message)
 
     def test_finish_refuses_an_unsettled_pane_and_keeps_it_open(self):
         manifest = json.loads(self.manifest.read_text())
@@ -268,6 +299,49 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["batch_state"]), (10, "partial"))
         self.assertIn("dialog", result["jobs"][0]["issue"])
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
+    def test_pi_provider_override_without_model_is_rejected_in_manifest_validation(self):
+        self.write_jobs(1, runtime="pi", provider="zai")
+
+        code, result = self.call(real=True, preview=True)
+
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("provider override requires a model", result["message"])
+        self.assertFalse(self.run.exists())
+
+    def test_runtime_without_effort_support_is_rejected_before_launch(self):
+        policy = json.loads(self.policy.read_text())
+        policy["runtime_kinds"]["gemini"] = "gemini"
+        self.policy.write_text(json.dumps(policy))
+        self.write_jobs(1, runtime="gemini")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["override"]["effort"] = "high"
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, result = self.call(real=True, preview=True)
+
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("runtime gemini does not support an effort override", result["message"])
+        self.assertFalse(self.run.exists())
+
+    def test_effort_values_outside_each_runtime_capability_are_rejected(self):
+        policy = json.loads(self.policy.read_text())
+        policy["runtime_kinds"]["claude-code"] = "claude"
+        self.policy.write_text(json.dumps(policy))
+        cases = (("codex", "auto"), ("pi", "auto"),
+                 ("claude-code", "off"), ("omp", "none"))
+        for runtime, effort in cases:
+            with self.subTest(runtime=runtime, effort=effort):
+                self.write_jobs(1, runtime=runtime)
+                manifest = json.loads(self.manifest.read_text())
+                manifest["jobs"][0]["override"]["effort"] = effort
+                self.manifest.write_text(json.dumps(manifest))
+
+                code, result = self.call(real=True, preview=True)
+
+                self.assertEqual((code, result["error"]), (2, "invalid_input"))
+                self.assertIn(f"not supported by runtime {runtime}", result["message"])
+                self.assertFalse(self.run.exists())
 
     def test_large_valid_batch_state_can_resume(self):
         self.write_jobs(6)

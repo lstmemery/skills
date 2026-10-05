@@ -53,9 +53,24 @@ then asks for a `result.json` bound to that task ID and assignment revision,
 collects it and every artifact it names, and lets `finish` validate it before
 writing `disposition.json`. Jobs without `worker_result` keep the original
 receipt contract (`result.md` plus `receipt.json`) and remain valid with
-existing manifests and receipts. Keep `effort` runtime-specific: Codex receives
-`model_reasoning_effort` and Pi receives its `--thinking` value; a Pi provider
-override is also passed to Pi as `--provider` and used for admission.
+existing manifests and receipts. `finish` reports that worker-result
+validation was not requested for these receipt-only jobs. Effort overrides are
+validated against each runtime's supported values and mapped to that runtime's
+native argument:
+
+| Runtime | Accepted effort values | Native argument |
+|---|---|---|
+| `codex` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `-c model_reasoning_effort=<value>` |
+| `pi` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `--thinking <value>` |
+| `claude-code` | `low`, `medium`, `high`, `xhigh`, `max` | `--effort <value>` |
+| `omp` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` | `--thinking <value>` |
+
+Other runtimes, including Gemini CLI, reject an effort override before launch;
+the launcher does not assume every runtime accepts a generic `--effort` flag.
+Effort values are runtime-level capabilities; a selected model may support a
+smaller subset. A Pi provider override is also passed to Pi as `--provider` and
+used for admission, and requires an explicit model because Pi requires
+`--model` with `--provider`.
 
 `retry_override` is an optional run-level object, pinned in `state.json` and
 applied only to matching workers in that run. Pi accepts `max_retries` (0–100)

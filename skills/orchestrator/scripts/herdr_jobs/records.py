@@ -12,6 +12,18 @@ import tempfile
 from datetime import datetime, timezone
 
 
+RUNTIME_EFFORT_CAPABILITIES = {
+    "codex": {"values": frozenset(("minimal", "low", "medium", "high", "xhigh", "max")),
+              "flag": None},
+    "pi": {"values": frozenset(("off", "minimal", "low", "medium", "high", "xhigh", "max")),
+           "flag": "--thinking"},
+    "claude-code": {"values": frozenset(("low", "medium", "high", "xhigh", "max")),
+                    "flag": "--effort"},
+    "omp": {"values": frozenset(("off", "minimal", "low", "medium", "high", "xhigh", "max", "auto")),
+            "flag": "--thinking"},
+}
+
+
 class JobError(Exception):
     def __init__(self, kind, message):
         super().__init__(message)
@@ -82,6 +94,23 @@ def text(value, label, maximum=100000):
     if not isinstance(value, str) or not value.strip() or "\0" in value or len(value) > maximum:
         invalid(f"{label}: expected nonempty text, at most {maximum} characters, without NUL")
     return value
+
+
+def validate_effort(runtime, effort):
+    capability = RUNTIME_EFFORT_CAPABILITIES.get(runtime)
+    if capability is None:
+        invalid(f"runtime {runtime} does not support an effort override")
+    if effort not in capability["values"]:
+        invalid(f"effort {effort!r} is not supported by runtime {runtime}")
+
+
+def effort_arguments(runtime, effort):
+    if effort is None:
+        return []
+    validate_effort(runtime, effort)
+    if runtime == "codex":
+        return ["-c", f"model_reasoning_effort={effort}"]
+    return [RUNTIME_EFFORT_CAPABILITIES[runtime]["flag"], effort]
 
 
 def is_commit_id(value):
@@ -273,8 +302,6 @@ def prepare(manifest_path, policy_path):
                 model = text(override["model"], "model", 200)
             if "effort" in override:
                 effort = text(override["effort"], "effort", 32)
-                if re.fullmatch(r"[A-Za-z0-9_-]+", effort) is None:
-                    invalid("effort must be a simple runtime value")
             if "provider" in override:
                 provider = text(override["provider"], "provider", 100)
                 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
@@ -288,6 +315,12 @@ def prepare(manifest_path, policy_path):
             raise JobError("decision_needed", f"{job_id}: choose an ordinary-job runtime in policy or a current-request override")
         if runtime not in policy["runtime_kinds"]:
             raise JobError("unavailable_capability", f"unsupported runtime mapping: {runtime}; no substitution")
+        if override is not None and "effort" in override:
+            if route["mode"] != "agent":
+                invalid(f"{job_id}: effort overrides are not supported for {route['mode']} routes")
+            validate_effort(runtime, effort)
+        if runtime == "pi" and provider is not None and model is None:
+            invalid(f"{job_id}: pi provider override requires a model")
         task_path = absolute(job["task_file"], manifest_path.parent)
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")

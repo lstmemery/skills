@@ -114,8 +114,13 @@ def main(argv=None, transport_factory=NativeTransport):
                 if not finish["complete"]:
                     result["batch_state"] = "partial"
             if args.operation == "finish" and finish["complete"]:
+                legacy_jobs = [job_id for job_id, outcome in finish["jobs"].items()
+                               if outcome["worker_result_validation"] == "not_requested"]
+                message = ("All settled job workspaces are closed. Worker result validation was not requested "
+                           f"for legacy receipt-only job(s): {', '.join(legacy_jobs)}." if legacy_jobs else
+                           "All settled jobs have validated worker records and their workspaces are closed.")
                 result["next_action"] = {"kind": "accept", "argv": None,
-                                          "message": "All settled jobs have validated worker records and their workspaces are closed."}
+                                          "message": message}
             elif result["batch_state"] == "collected":
                 result["next_action"] = {"kind": "review", "argv": None, "message": "Assess collected artifacts against the task."}
             else:

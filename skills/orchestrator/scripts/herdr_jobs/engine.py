@@ -246,7 +246,8 @@ class Engine:
                     raise JobError("conflict", "stored pi retry settings changed after profile preparation")
             if job["pending_effect"] is not None:
                 fields(job["pending_effect"], ["action", "started_at"], label="pending effect")
-                if job["pending_effect"]["action"] not in ("split", "move", "retry_setup", "start", "prompt", "jail"):
+                if job["pending_effect"]["action"] not in (
+                        "split", "move", "retry_setup", "start", "prompt", "jail", "workspace_close"):
                     raise JobError("conflict", "unknown pending effect")
             for flag in ("settled", "activity_seen"):
                 if type(job[flag]) is not bool:
@@ -556,10 +557,12 @@ class Engine:
         outcomes = {}
         for job in self.state["jobs"]:
             job_id = job["spec"]["job_id"]
-            if not job["settled"] or job["collection"] is None or job["collection_error"]:
-                outcomes[job_id] = {"finished": False, "issue": "worker is not settled with a collected receipt"}
-                continue
             worker = job["spec"].get("worker_result")
+            validation = "pending" if worker else "not_requested"
+            if not job["settled"] or job["collection"] is None or job["collection_error"]:
+                outcomes[job_id] = {"finished": False, "issue": "worker is not settled with a collected receipt",
+                                    "worker_result_validation": validation}
+                continue
             if worker:
                 try:
                     result_path = Path(job["host_output"]) / "result.json"
@@ -592,10 +595,12 @@ class Engine:
                             summary=result["summary"], evidence=evidence))
                     job["worker_disposition"] = disposition["disposition"]
                     job["issue"] = None
+                    validation = "validated"
                     self.checkpoint()
                 except (JobError, OSError, UnicodeError, KeyError) as error:
                     job["issue"] = f"worker result/disposition could not be verified: {error}"
-                    outcomes[job_id] = {"finished": False, "issue": job["issue"]}
+                    outcomes[job_id] = {"finished": False, "issue": job["issue"],
+                                        "worker_result_validation": "failed"}
                     self.checkpoint()
                     continue
 
@@ -605,20 +610,40 @@ class Engine:
                                    "observed_at": now()})
             self.checkpoint()
             if not job.get("workspace_closed", False):
+                pending = job["pending_effect"]
+                if pending is not None and pending["action"] != "workspace_close":
+                    outcomes[job_id] = {"finished": False,
+                                        "issue": "another external effect is still unresolved",
+                                        "worker_result_validation": validation}
+                    continue
+                if pending is None:
+                    job["pending_effect"] = {"action": "workspace_close", "started_at": now()}
+                    job["issue"] = None
+                    self.checkpoint()
                 try:
-                    closed = self.transport.close_workspace(job)
+                    if self.transport.workspace_is_open(job):
+                        closed = self.transport.close_workspace(job)
+                        reconciled = False
+                    else:
+                        closed = {"closed": True, "workspace_id": job["workspace_id"]}
+                        reconciled = True
                 except (JobError, BudgetExpired, UnicodeError) as error:
                     job["issue"] = f"workspace close is unverified: {error}"
-                    outcomes[job_id] = {"finished": False, "issue": job["issue"]}
+                    outcomes[job_id] = {"finished": False, "issue": job["issue"],
+                                        "worker_result_validation": validation}
                     self.checkpoint()
                     continue
                 job["workspace_closed"] = True
+                job["pending_effect"] = None
                 job["history"].append({"action": "workspace_closed", "workspace_id": closed["workspace_id"],
-                                       "observed_at": now()})
+                                       "observed_at": now(),
+                                       **({"reconciled_by": "workspace absent from Herdr list"}
+                                          if reconciled else {})})
             job["issue"] = None
             self.checkpoint()
             outcomes[job_id] = {"finished": True, "workspace_closed": True,
-                                "worker_disposition": job.get("worker_disposition")}
+                                "worker_disposition": job.get("worker_disposition"),
+                                "worker_result_validation": validation}
         return {"jobs": outcomes, "complete": all(item["finished"] for item in outcomes.values())}
 
     def ensure_snapshot(self, path, expected):
@@ -638,6 +663,8 @@ class Engine:
 
     def observe(self, job):
         if job.get("workspace_closed", False):
+            return
+        if job["pending_effect"] and job["pending_effect"]["action"] == "workspace_close":
             return
         if job["pane_id"] is None:
             if job["pending_effect"]:

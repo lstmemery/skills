@@ -57,6 +57,10 @@ class FakeHost:
         receipt = {"schema_version": 1, "request_id": self.fixture["request_id"],
                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
                    "outcome": "complete", "artifacts": artifact_paths, "unresolved": []}
+        if not worker and self.fixture.get("legacy_receipt_fixture"):
+            receipt = load_json(self.fixture["legacy_receipt_fixture"])
+            receipt.update({"request_id": self.fixture["request_id"],
+                            "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"]})
         if mode == "stale":
             receipt["attempt_id"] = "another-attempt"
         elif mode == "missing_artifact":
@@ -156,4 +160,20 @@ class FakeHost:
         self.event("workspace_close", job)
         if self.fixture.get("close_workspace_error"):
             raise JobError("unavailable_capability", self.fixture["close_workspace_error"])
+        closed_path = self.path.with_name("closed-workspaces.json")
+        closed = load_json(closed_path) if closed_path.exists() else []
+        workspace_id = job.get("workspace_id")
+        if workspace_id not in closed:
+            closed.append(workspace_id)
+            save(closed_path, closed)
+        if self.fixture.get("crash_after") == "workspace_close":
+            crash_path = self.path.with_name("crashed")
+            if not crash_path.exists():
+                save(crash_path, {"action": "workspace_close"})
+                os._exit(91)
         return {"closed": True, "workspace_id": job.get("workspace_id")}
+
+    def workspace_is_open(self, job):
+        closed_path = self.path.with_name("closed-workspaces.json")
+        closed = load_json(closed_path) if closed_path.exists() else []
+        return job.get("workspace_id") not in closed

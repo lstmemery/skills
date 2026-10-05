@@ -130,6 +130,12 @@ provider/model backoff blocked it. Keep the lease through the worker's active
 lifetime; release it after the owned worker is terminal. `status` reports the
 provider-wide active count used by both direct and managed launches.
 
+An ad-hoc launcher must also verify that the submitted prompt landed by checking
+the runtime's active-turn status line in the owned pane. A generic occurrence of
+“working” in echoed prompt text or other pane prose is not proof of a live turn;
+leave the attempt unresolved and inspect the pane before retrying when the
+status line is absent.
+
 When a direct worker reports HTTP 429 or a rate-limit response, record its
 Retry-After or reset metadata before another start, then release the completed
 attempt's admission lease:
