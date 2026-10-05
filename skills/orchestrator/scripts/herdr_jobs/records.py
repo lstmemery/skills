@@ -12,6 +12,18 @@ import tempfile
 from datetime import datetime, timezone
 
 
+RUNTIME_EFFORT_CAPABILITIES = {
+    "codex": {"values": frozenset(("minimal", "low", "medium", "high", "xhigh", "max")),
+              "flag": None},
+    "pi": {"values": frozenset(("off", "minimal", "low", "medium", "high", "xhigh", "max")),
+           "flag": "--thinking"},
+    "claude-code": {"values": frozenset(("low", "medium", "high", "xhigh", "max")),
+                    "flag": "--effort"},
+    "omp": {"values": frozenset(("off", "minimal", "low", "medium", "high", "xhigh", "max", "auto")),
+            "flag": "--thinking"},
+}
+
+
 class JobError(Exception):
     def __init__(self, kind, message):
         super().__init__(message)
@@ -84,6 +96,23 @@ def text(value, label, maximum=100000):
     return value
 
 
+def validate_effort(runtime, effort):
+    capability = RUNTIME_EFFORT_CAPABILITIES.get(runtime)
+    if capability is None:
+        invalid(f"runtime {runtime} does not support an effort override")
+    if effort not in capability["values"]:
+        invalid(f"effort {effort!r} is not supported by runtime {runtime}")
+
+
+def effort_arguments(runtime, effort):
+    if effort is None:
+        return []
+    validate_effort(runtime, effort)
+    if runtime == "codex":
+        return ["-c", f"model_reasoning_effort={effort}"]
+    return [RUNTIME_EFFORT_CAPABILITIES[runtime]["flag"], effort]
+
+
 def is_commit_id(value):
     return (isinstance(value, str)
             and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is not None)
@@ -131,6 +160,13 @@ def validate_writer_intent(job, label="job"):
     if not job["writes_repository"] and has_worktree:
         invalid(f"{label}: repository_worktree requires writes_repository=true")
     return job["writes_repository"]
+
+
+def worker_result_record(value):
+    fields(value, ["task_id", "assignment_revision"], label="worker_result")
+    text(value["task_id"], "worker_result.task_id", 200)
+    integer(value["assignment_revision"], "worker_result.assignment_revision", 1, 2**63 - 1)
+    return value
 
 
 def retry_override_record(value):
@@ -234,10 +270,11 @@ def prepare(manifest_path, policy_path):
         invalid("jobs must contain 1–128 independent jobs")
     jobs = []
     seen = set()
+    worker_results = set()
     for job in manifest["jobs"]:
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
-               ["override", "repository_worktree"], "job")
+               ["override", "repository_worktree", "worker_result"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -252,7 +289,7 @@ def prepare(manifest_path, policy_path):
         model = None
         override = job.get("override")
         if override is not None:
-            fields(override, ["instruction"], ["runtime", "model", "provider"], "override")
+            fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
             if "runtime" in override:
                 named = identifier(override["runtime"], "override runtime")
@@ -263,6 +300,8 @@ def prepare(manifest_path, policy_path):
                 route = {"mode": route["mode"], "runtime": named}
             if "model" in override:
                 model = text(override["model"], "model", 200)
+            if "effort" in override:
+                effort = text(override["effort"], "effort", 32)
             if "provider" in override:
                 provider = text(override["provider"], "provider", 100)
                 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
@@ -276,6 +315,12 @@ def prepare(manifest_path, policy_path):
             raise JobError("decision_needed", f"{job_id}: choose an ordinary-job runtime in policy or a current-request override")
         if runtime not in policy["runtime_kinds"]:
             raise JobError("unavailable_capability", f"unsupported runtime mapping: {runtime}; no substitution")
+        if override is not None and "effort" in override:
+            if route["mode"] != "agent":
+                invalid(f"{job_id}: effort overrides are not supported for {route['mode']} routes")
+            validate_effort(runtime, effort)
+        if runtime == "pi" and provider is not None and model is None:
+            invalid(f"{job_id}: pi provider override requires a model")
         task_path = absolute(job["task_file"], manifest_path.parent)
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")
@@ -289,6 +334,12 @@ def prepare(manifest_path, policy_path):
                 invalid(f"{job_id}: repository worktree path cannot be canonicalized")
             if cwd != recorded_path:
                 invalid(f"{job_id}: cwd must equal repository_worktree.path")
+        if "worker_result" in job:
+            worker_result_record(job["worker_result"])
+            identity = (job["worker_result"]["task_id"], job["worker_result"]["assignment_revision"])
+            if identity in worker_results:
+                invalid(f"duplicate worker_result identity: {identity[0]} revision {identity[1]}")
+            worker_results.add(identity)
         jobs.append({**job, "task_file": task_path, "cwd": cwd,
                      "task": task, "route": route, "model": model,
                      "provider": provider, "kind": policy["runtime_kinds"][runtime]})

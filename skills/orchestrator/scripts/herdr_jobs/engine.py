@@ -12,9 +12,12 @@ from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fie
                       text, version)
 from .retry import prepare_pi_run_profile
 from .transport import BudgetExpired, EffectUnknown, RateLimited
+from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
+                             result_schema_markdown, validate_result)
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted"}
+WORKER_DISPOSITIONS = {"completed", "blocked", "failed"}
 
 
 class Engine:
@@ -53,6 +56,12 @@ class Engine:
                                         self.state["request"]["request_id"],
                                         bypass_admission=bypass_admission)
         job["admission_acquired"] = result["lease_held"]
+        if not result["admitted"]:
+            job["admission_wait"] = {"reason": result["reason"], "provider": result["provider"],
+                                      "provider_active": result["provider_active"], "cap": result["cap"],
+                                      "retry_at": result["retry_at"]}
+        else:
+            job["admission_wait"] = None
         if not result["admitted"] and result["reason"] == "backoff" and result["lease_held"]:
             self.release_admission(job)
         return result["admitted"]
@@ -164,7 +173,8 @@ class Engine:
                          "pending_effect", "history", "observed", "activity_seen", "settled", "collection",
                          "collection_error", "host_output", "worker_output", "issue", "exit_record"],
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
-                    "rate_limit_until", "retry_override", "retry_profile"],
+                    "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
+                    "worker_disposition", "worker_disposition_override", "admission_wait"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -180,8 +190,36 @@ class Engine:
             job.setdefault("admission_acquired", False)
             job.setdefault("rate_limit_seen", False)
             job.setdefault("rate_limit_until", None)
+            job.setdefault("workspace_id", None)
+            job.setdefault("workspace_closed", False)
+            job.setdefault("worker_disposition", None)
+            job.setdefault("worker_disposition_override", None)
+            job.setdefault("admission_wait", None)
             if type(job["admission_acquired"]) is not bool or type(job["rate_limit_seen"]) is not bool:
                 raise JobError("conflict", "stored admission flags must be booleans")
+            if type(job["workspace_closed"]) is not bool:
+                raise JobError("conflict", "stored workspace_closed must be a boolean")
+            if job["workspace_id"] is not None:
+                text(job["workspace_id"], "stored workspace_id", 512)
+            if job["worker_disposition"] is not None and job["worker_disposition"] not in WORKER_DISPOSITIONS:
+                raise JobError("conflict", "stored worker disposition is invalid")
+            if job["worker_disposition_override"] is not None:
+                override = fields(job["worker_disposition_override"], ["disposition", "reason"],
+                                  label="stored worker disposition override")
+                if override["disposition"] not in WORKER_DISPOSITIONS:
+                    raise JobError("conflict", "stored worker disposition override is invalid")
+                text(override["reason"], "stored worker disposition override reason", 10000)
+            if job["admission_wait"] is not None:
+                wait = fields(job["admission_wait"], ["reason", "provider", "provider_active", "cap", "retry_at"],
+                              label="admission wait")
+                if wait["reason"] not in ("capacity", "backoff"):
+                    raise JobError("conflict", "stored admission wait reason is invalid")
+                normalize_provider(wait["provider"])
+                integer(wait["provider_active"], "admission wait active count", 0, 1000000)
+                integer(wait["cap"], "admission wait cap", 1, 64)
+                if wait["retry_at"] is not None and (
+                        type(wait["retry_at"]) not in (int, float) or not math.isfinite(wait["retry_at"])):
+                    raise JobError("conflict", "stored admission retry time is invalid")
             if job["rate_limit_until"] is not None and (
                     type(job["rate_limit_until"]) not in (int, float) or not math.isfinite(job["rate_limit_until"])):
                 raise JobError("conflict", "stored rate_limit_until must be a finite timestamp or null")
@@ -215,7 +253,8 @@ class Engine:
                     raise JobError("conflict", "stored pi retry settings changed after profile preparation")
             if job["pending_effect"] is not None:
                 fields(job["pending_effect"], ["action", "started_at"], label="pending effect")
-                if job["pending_effect"]["action"] not in ("split", "move", "retry_setup", "start", "prompt", "jail"):
+                if job["pending_effect"]["action"] not in (
+                        "split", "move", "retry_setup", "start", "prompt", "jail", "workspace_close"):
                     raise JobError("conflict", "unknown pending effect")
             for flag in ("settled", "activity_seen"):
                 if type(job[flag]) is not bool:
@@ -259,43 +298,79 @@ class Engine:
             return
         if any(path.name != ".lock" for path in self.root.iterdir()):
             raise JobError("conflict", "new run directory contains unrelated files")
-        jobs = []
-        for spec in request["jobs"]:
-            attempt = uuid.uuid4().hex
-            resolved_model = capabilities["models"].get(spec["job_id"])
-            provider = self.provider_for(spec, resolved_model)
-            suffix = f"c9-{digest(request['request_id'].encode())[:12]}/{spec['job_id']}-{attempt}"
-            if spec["route"]["mode"] == "jail":
-                export = capabilities["binding"]["jail_export"]
-                host_output = str(Path(export["host_root"]) / suffix)
-                worker_output = str(Path(export["worker_root"]) / suffix)
-            else:
-                host_output = str(self.root / "workers" / spec["job_id"] / attempt)
-                worker_output = host_output
-            runtime = spec["route"]["runtime"]
-            retry_override = request.get("retry_override", {}).get(runtime)
-            retry_profile = None
-            if runtime == "pi" and retry_override is not None:
-                profile_root = self.root / "runtime" / "pi" / spec["job_id"] / attempt
-                retry_profile = prepare_pi_run_profile(profile_root / "agent", profile_root / "sessions",
-                                                       retry_override)
-            jobs.append({"spec": spec, "attempt_id": attempt, "agent_name": "c9-" + attempt[:24],
-                         "resolved_model": resolved_model, "provider": provider,
-                         "admission_model": (resolved_model or "default").casefold(),
-                         "admission_lease_id": self.admission_lease_id(request["request_id"], spec["job_id"], attempt),
-                         "admission_acquired": False, "rate_limit_seen": False, "rate_limit_until": None,
-                         "retry_override": retry_override, "retry_profile": retry_profile,
-                         "phase": "pending", "pane_id": None, "previous_pane_ids": [],
-                         "pending_effect": None, "history": [], "observed": None,
-                         "activity_seen": False, "settled": False, "collection": None,
-                         "collection_error": None, "host_output": host_output,
-                         "worker_output": worker_output, "issue": None,
-                         "exit_record": str(self.root / "lifecycle" / spec["job_id"] / "exit.json")})
+        jobs = [self.new_job(spec, request, capabilities) for spec in request["jobs"]]
         self.state = {"schema_version": 1, "request": request, "request_digest": digest(encoded(request)),
                       "host_contract": str(Path(binding_path).absolute()) if binding_path else None,
                       "session_id": capabilities["session_id"], "binding_digest": digest(encoded(capabilities["binding"])),
                       "jobs": jobs, "created_at": now(), "updated_at": now()}
         self.state["retry_override"] = request.get("retry_override")
+        self.validate_prompts()
+        self.checkpoint()
+
+    def new_job(self, spec, request, capabilities):
+        attempt = uuid.uuid4().hex
+        resolved_model = capabilities["models"].get(spec["job_id"])
+        provider = self.provider_for(spec, resolved_model)
+        suffix = f"c9-{digest(request['request_id'].encode())[:12]}/{spec['job_id']}-{attempt}"
+        if spec["route"]["mode"] == "jail":
+            export = capabilities["binding"]["jail_export"]
+            host_output = str(Path(export["host_root"]) / suffix)
+            worker_output = str(Path(export["worker_root"]) / suffix)
+        else:
+            host_output = str(self.root / "workers" / spec["job_id"] / attempt)
+            worker_output = host_output
+        runtime = spec["route"]["runtime"]
+        retry_override = request.get("retry_override", {}).get(runtime)
+        retry_profile = None
+        if runtime == "pi" and retry_override is not None:
+            profile_root = self.root / "runtime" / "pi" / spec["job_id"] / attempt
+            retry_profile = prepare_pi_run_profile(profile_root / "agent", profile_root / "sessions",
+                                                   retry_override)
+        return {"spec": spec, "attempt_id": attempt, "agent_name": "c9-" + attempt[:24],
+                "resolved_model": resolved_model, "provider": provider,
+                "admission_model": (resolved_model or "default").casefold(),
+                "admission_lease_id": self.admission_lease_id(request["request_id"], spec["job_id"], attempt),
+                "admission_acquired": False, "rate_limit_seen": False, "rate_limit_until": None,
+                "retry_override": retry_override, "retry_profile": retry_profile,
+                "phase": "pending", "pane_id": None, "previous_pane_ids": [], "workspace_id": None,
+                "workspace_closed": False, "worker_disposition": None,
+                "worker_disposition_override": None,
+                "admission_wait": None,
+                "pending_effect": None, "history": [], "observed": None,
+                "activity_seen": False, "settled": False, "collection": None,
+                "collection_error": None, "host_output": host_output,
+                "worker_output": worker_output, "issue": None,
+                "exit_record": str(self.root / "lifecycle" / spec["job_id"] / "exit.json")}
+
+    def append_jobs(self, request, capabilities):
+        stored = self.state["request"]
+        if request["request_id"] != stored["request_id"]:
+            raise JobError("conflict", "added jobs must use the existing request_id")
+        if request["concurrency"] != stored["concurrency"]:
+            raise JobError("conflict", "added jobs must use the existing run concurrency")
+        if request["policy_digest"] != stored["policy_digest"]:
+            raise JobError("conflict", "added jobs must use the run's pinned launch policy")
+        if (request.get("retry_override") is not None
+                and request["retry_override"] != stored.get("retry_override")):
+            raise JobError("conflict", "added jobs must use the run's pinned retry_override")
+        old_ids = {job["job_id"] for job in stored["jobs"]}
+        if any(job["job_id"] in old_ids for job in request["jobs"]):
+            raise JobError("conflict", "an added job_id already exists in this run")
+        identities = {(job["worker_result"]["task_id"], job["worker_result"]["assignment_revision"])
+                      for job in stored["jobs"] if "worker_result" in job}
+        for spec in request["jobs"]:
+            identity = spec.get("worker_result")
+            if identity and (identity["task_id"], identity["assignment_revision"]) in identities:
+                raise JobError("conflict", "worker task/revision already exists in this run")
+            if identity:
+                identities.add((identity["task_id"], identity["assignment_revision"]))
+        if len(stored["jobs"]) + len(request["jobs"]) > 128:
+            raise JobError("invalid_input", "a managed run may contain at most 128 jobs")
+        self.bind(capabilities)
+        self.state["request"]["jobs"].extend(request["jobs"])
+        self.state["request_digest"] = digest(encoded(self.state["request"]))
+        self.state["jobs"].extend(self.new_job(spec, self.state["request"], capabilities)
+                                   for spec in request["jobs"])
         self.validate_prompts()
         self.checkpoint()
 
@@ -315,9 +390,11 @@ class Engine:
 
     def prompt(self, job):
         spec = job["spec"]
+        worker_result = spec.get("worker_result")
         receipt = {"schema_version": 1, "request_id": self.state["request"]["request_id"],
                    "job_id": spec["job_id"], "attempt_id": job["attempt_id"],
-                   "outcome": "complete", "artifacts": ["result.md"], "unresolved": []}
+                   "outcome": "complete", "artifacts": ["result.json"] if worker_result else ["result.md"],
+                   "unresolved": []}
         instructions = ""
         if spec["task_kind"] == "shopping":
             instructions = "Load and follow skill shopping.\n"
@@ -326,15 +403,27 @@ class Engine:
         current = (spec.get("override") or {}).get("instruction")
         if current:
             instructions = f"Current user instruction (highest precedence):\n{current}\n\n{instructions}"
+        output_contract = (
+            "Write result.md and any supporting artifacts inside that directory. Then write receipt.json atomically, "
+            "using the following identity and relative artifact paths. Set outcome to complete, partial, blocked, or failed; "
+            "list all unresolved items as strings. Write the receipt last, after artifacts are durable. "
+            "Keep receipts and intermediate artifacts out of any publication queue. "
+            "A receipt records your outcome; the coordinator assesses correctness.\n")
+        worker_contract = ""
+        if worker_result:
+            output_contract = (
+                "Write result.json and every artifact it names inside the output directory, using relative paths. "
+                "Then write receipt.json atomically; its artifacts array must include result.json and every artifact "
+                "path from result.json. Map result outcome ready to receipt outcome complete; preserve blocked and failed. "
+                "Write the receipt last, after the result and artifacts are durable.\n")
+            worker_contract = (
+                f"Worker identity: task_id={worker_result['task_id']}; "
+                f"assignment_revision={worker_result['assignment_revision']}.\n"
+                + result_schema_markdown() + "\n")
         return (f"{instructions}{spec['task']}\n\nManaged-job output contract:\n"
                 f"Expected result: {spec['output_expectation']}\n"
                 f"Output directory: {job['worker_output']}\n"
-                "Write result.md and any supporting artifacts inside that directory. Then write receipt.json atomically, "
-                "using the following identity and relative artifact paths. Set outcome to complete, partial, blocked, or failed; "
-                "list all unresolved items as strings. Write the receipt last, after artifacts are durable. "
-                "Keep receipts and intermediate artifacts out of any publication queue. "
-                "A receipt records your outcome; the coordinator assesses correctness.\n"
-                + encoded(receipt).decode() + "\n")
+                + worker_contract + output_contract + encoded(receipt).decode() + "\n")
 
     def effect(self, job, action):
         self.deadline.check()
@@ -366,6 +455,7 @@ class Engine:
         elif action == "move":
             job["previous_pane_ids"].append(job["pane_id"])
             job["pane_id"] = result["pane_id"]
+            job["workspace_id"] = result.get("workspace_id")
             job["phase"] = "moved"
         elif action == "retry_setup":
             job["phase"] = "retry_ready"
@@ -408,7 +498,17 @@ class Engine:
             elif job["phase"] == "retry_ready":
                 action = "start"
             else:
-                if job["observed"] and job["observed"]["state"] not in ("idle", "done"):
+                observation = job["observed"]
+                if observation is None:
+                    self.observe(job)
+                    observation = job["observed"]
+                if not observation or observation.get("identity_verified") is not True:
+                    if not job["issue"]:
+                        job["issue"] = "worker startup identity is unverified; the task prompt was not sent"
+                    return
+                if observation["state"] != "idle":
+                    job["issue"] = (observation.get("launch_issue") or
+                                     "worker was not idle after startup; task prompt was not sent")
                     return
                 action = "prompt"
             if not self.effect(job, action):
@@ -463,6 +563,143 @@ class Engine:
         except (JobError, OSError, UnicodeError) as error:
             job["collection_error"] = str(error)
 
+    def finish(self, disposition_overrides=None, override_reason=None):
+        """Record worker dispositions and close only settled, collected jobs."""
+        disposition_overrides = disposition_overrides or {}
+        if not isinstance(disposition_overrides, dict):
+            raise JobError("invalid_input", "coordinator disposition overrides must be an object")
+        if bool(disposition_overrides) != (override_reason is not None):
+            raise JobError("invalid_input", "coordinator disposition overrides require a reason, and a reason requires an override")
+        if override_reason is not None:
+            override_reason = text(override_reason, "coordinator override reason", 10000)
+            if not override_reason.strip():
+                raise JobError("invalid_input", "coordinator override reason must not be blank")
+        worker_job_ids = {job["spec"]["job_id"] for job in self.state["jobs"]
+                          if job["spec"].get("worker_result")}
+        unknown_overrides = set(disposition_overrides) - worker_job_ids
+        if unknown_overrides:
+            raise JobError("invalid_input", "coordinator disposition override references job(s) without a worker result: "
+                           + ", ".join(sorted(unknown_overrides)))
+        for job_id, disposition in disposition_overrides.items():
+            text(job_id, "coordinator override job_id", 100)
+            if disposition not in WORKER_DISPOSITIONS:
+                raise JobError("invalid_input", "coordinator disposition override must be completed, blocked, or failed")
+        outcomes = {}
+        for job in self.state["jobs"]:
+            job_id = job["spec"]["job_id"]
+            worker = job["spec"].get("worker_result")
+            validation = "pending" if worker else "not_requested"
+            if not job["settled"] or job["collection"] is None or job["collection_error"]:
+                outcomes[job_id] = {"finished": False, "issue": "worker is not settled with a collected receipt",
+                                    "worker_result_validation": validation}
+                continue
+            if worker:
+                try:
+                    result_path = Path(job["host_output"]) / "result.json"
+                    identity = WorkerIdentity(worker["task_id"], worker["assignment_revision"])
+                    validate_result(result_path, identity, repository_changes=job["spec"]["writes_repository"])
+                    result = load_json(result_path)
+                    receipt_sources = {item["source"] for item in job["collection"]["artifacts"]}
+                    required_sources = {"result.json", *(item["path"] for item in result["artifacts"])}
+                    if not required_sources <= receipt_sources:
+                        raise JobError("invalid_input", "receipt did not collect result.json and every result artifact")
+                    for relative in required_sources:
+                        bounded_file(job["host_output"], relative)
+                    contract_disposition = {"ready": "completed", "blocked": "blocked",
+                                            "failed": "failed"}[result["outcome"]]
+                    requested_override = disposition_overrides.get(job_id)
+                    stored_override = job.get("worker_disposition_override")
+                    if requested_override is not None:
+                        requested_record = {"disposition": requested_override, "reason": override_reason}
+                        if stored_override is not None and stored_override != requested_record:
+                            raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
+                        if stored_override is None:
+                            job["worker_disposition_override"] = requested_record
+                            stored_override = requested_record
+                            self.checkpoint()
+                    effective_override = stored_override
+                    worker_disposition = (effective_override["disposition"] if effective_override
+                                          else contract_disposition)
+                    result_hash = digest(read_regular(result_path))
+                    evidence = (f"Managed job {job_id} settled in pane {job['pane_id']}; "
+                                f"result.json SHA-256 {result_hash}.")
+                    if effective_override:
+                        evidence += (" Coordinator override recorded via --coordinator-disposition-override: "
+                                    f"worker outcome {result['outcome']} maps to {contract_disposition}; "
+                                    f"coordinator disposition is {worker_disposition}. "
+                                    f"Reason: {effective_override['reason']}")
+                    disposition = {"task_id": worker["task_id"],
+                                   "assignment_revision": worker["assignment_revision"],
+                                   "disposition": worker_disposition,
+                                   "summary": result["summary"], "evidence": evidence}
+                    disposition_path = Path(job["host_output"]) / "disposition.json"
+                    if disposition_path.exists():
+                        previous = load_json(disposition_path)
+                        fields(previous, ["task_id", "assignment_revision", "disposition", "summary", "evidence"],
+                               label="disposition.json")
+                        if previous != disposition:
+                            raise JobError("conflict", "existing disposition differs from the collected worker result")
+                    else:
+                        record_disposition(Path(job["host_output"]), DispositionInput(
+                            identity=identity, disposition=disposition["disposition"],
+                            summary=result["summary"], evidence=evidence))
+                    job["worker_disposition"] = disposition["disposition"]
+                    job["issue"] = None
+                    validation = "validated"
+                    self.checkpoint()
+                except (JobError, OSError, UnicodeError, KeyError) as error:
+                    job["issue"] = f"worker result/disposition could not be verified: {error}"
+                    outcomes[job_id] = {"finished": False, "issue": job["issue"],
+                                        "worker_result_validation": "failed"}
+                    self.checkpoint()
+                    continue
+
+            release = self.admission.release(job["admission_lease_id"])
+            job["admission_acquired"] = False
+            job["history"].append({"action": "finish_release", "released": release["released"],
+                                   "observed_at": now()})
+            self.checkpoint()
+            if not job.get("workspace_closed", False):
+                pending = job["pending_effect"]
+                if pending is not None and pending["action"] != "workspace_close":
+                    outcomes[job_id] = {"finished": False,
+                                        "issue": "another external effect is still unresolved",
+                                        "worker_result_validation": validation}
+                    continue
+                if pending is None:
+                    job["pending_effect"] = {"action": "workspace_close", "started_at": now()}
+                    job["issue"] = None
+                    self.checkpoint()
+                try:
+                    if self.transport.workspace_is_open(job):
+                        closed = self.transport.close_workspace(job)
+                        reconciled = False
+                    else:
+                        closed = {"closed": True, "workspace_id": job["workspace_id"]}
+                        reconciled = True
+                except (JobError, BudgetExpired, UnicodeError) as error:
+                    job["issue"] = f"workspace close is unverified: {error}"
+                    outcomes[job_id] = {"finished": False, "issue": job["issue"],
+                                        "worker_result_validation": validation}
+                    self.checkpoint()
+                    continue
+                job["workspace_closed"] = True
+                job["pending_effect"] = None
+                job["history"].append({"action": "workspace_closed", "workspace_id": closed["workspace_id"],
+                                       "observed_at": now(),
+                                       **({"reconciled_by": "workspace absent from Herdr list"}
+                                          if reconciled else {})})
+            job["issue"] = None
+            self.checkpoint()
+            outcomes[job_id] = {"finished": True, "workspace_closed": True,
+                                "worker_disposition": job.get("worker_disposition"),
+                                "worker_result_validation": validation}
+            if worker:
+                outcomes[job_id]["worker_result_outcome"] = result["outcome"]
+                if job.get("worker_disposition_override") is not None:
+                    outcomes[job_id]["coordinator_override_reason"] = job["worker_disposition_override"]["reason"]
+        return {"jobs": outcomes, "complete": all(item["finished"] for item in outcomes.values())}
+
     def ensure_snapshot(self, path, expected):
         try:
             current = bounded_file(self.root, str(path.relative_to(self.root)))
@@ -479,6 +716,10 @@ class Engine:
                     and job["spec"]["route"]["runtime"] == "codex")
 
     def observe(self, job):
+        if job.get("workspace_closed", False):
+            return
+        if job["pending_effect"] and job["pending_effect"]["action"] == "workspace_close":
+            return
         if job["pane_id"] is None:
             if job["pending_effect"]:
                 job["issue"] = "launch identity is ambiguous; inspect owned resources before any new attempt"
@@ -521,7 +762,7 @@ class Engine:
                                        "attempt_id": job["attempt_id"], "observed_at": now()})
                 job["pending_effect"] = None
                 job["phase"] = "submitted"
-        if lifecycle == "working":
+        if lifecycle == "working" and self.has_verified_working_activity(job):
             job["activity_seen"] = True
         pending = job["pending_effect"]
         codex_start = self.is_codex_pending_start(job, pending)
@@ -530,6 +771,14 @@ class Engine:
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["history"].append({"action": "start", "reconciled_by": "observed Codex Working state", "observed_at": now()})
+        elif (pending and pending["action"] == "prompt" and observation.get("prompt_verified")
+              and job["spec"]["route"]["mode"] == "agent"):
+            job["phase"] = "submitted"
+            job["pending_effect"] = None
+            job["activity_seen"] = True
+            job["issue"] = None
+            job["history"].append({"action": "prompt", "reconciled_by": "observed visible Working state",
+                                   "observed_at": now()})
         elif codex_start and lifecycle == "blocked":
             job["phase"] = "ready"
             job["pending_effect"] = None
@@ -562,7 +811,12 @@ class Engine:
         elif lifecycle == "exited" and observation["exit_code"] != 0:
             job["issue"] = f"jail launcher exited {observation['exit_code']}"
         elif job["phase"] == "submitted" and not job["settled"]:
-            job["issue"] = "submission activity is unproven; a valid receipt or observed work is needed"
+            if job["spec"]["route"]["mode"] == "agent":
+                job["issue"] = ("prompt delivery is unverified; a matching receipt or visible Working marker is needed; "
+                                 "inspect the owned pane before retrying")
+            else:
+                job["issue"] = ("jail launcher has not produced a matching exit record or collected receipt; "
+                                 "inspect the owned pane before retrying")
         else:
             job["issue"] = None
 
@@ -570,13 +824,14 @@ class Engine:
         return not job["settled"] and (job["phase"] != "pending" or job["pending_effect"] is not None)
 
     @staticmethod
-    def has_verified_working_turn(job):
+    def has_verified_working_activity(job):
         observation = job["observed"]
         if not observation or observation["state"] != "working":
             return False
-        pending = job["pending_effect"]
-        codex_start = Engine.is_codex_pending_start(job, pending)
-        return not codex_start or observation.get("prompt_verified") is True
+        route_mode = job["spec"]["route"]["mode"]
+        if route_mode == "agent":
+            return observation.get("identity_verified") is True and observation.get("prompt_verified") is True
+        return route_mode == "jail" and observation.get("identity_verified") is True
 
     def drive(self, status_only=False):
         try:
@@ -602,7 +857,7 @@ class Engine:
                     self.checkpoint()
                 if status_only or all(job["settled"] for job in self.state["jobs"]):
                     return
-                if not any(self.has_verified_working_turn(job) for job in self.state["jobs"]):
+                if not any(self.has_verified_working_activity(job) for job in self.state["jobs"]):
                     launchable = any(job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
                                      and job["pending_effect"] is None for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:
@@ -621,6 +876,10 @@ class Engine:
                          "attempt_id": job["attempt_id"], "resolved_model": job["resolved_model"],
                          "observed": job["observed"], "settled": job["settled"],
                          "pending_effect": job["pending_effect"], "issue": job["issue"],
+                         "workspace_id": job.get("workspace_id"),
+                         "workspace_closed": job.get("workspace_closed", False),
+                         "worker_disposition": job.get("worker_disposition"),
+                         "admission_wait": job.get("admission_wait"),
                          "collection": job["collection"], "collection_error": job["collection_error"]})
         all_collected = all(job["collection"] is not None and job["collection_error"] is None for job in jobs)
         unresolved = any(job["pending_effect"] is not None for job in jobs)

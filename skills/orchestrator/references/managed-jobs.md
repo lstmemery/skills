@@ -2,7 +2,7 @@
 
 ## Contract
 
-Use `scripts/herdr-jobs.py` for independent ordinary-agent and omp-train Codex jobs in an authorized Herdr host session. It validates launch policy, starts up to the configured cap, journals effects, and collects artifacts. The coordinator supplies intent and judges the results. Current explicit instructions take precedence through an `override` record; its instruction must reflect real authorization.
+Use `scripts/herdr-jobs.py` for Herdr worker fleets in an authorized host session. It validates launch policy and worktree bindings, enforces shared provider caps, journals effects, observes startup and settled panes, and collects artifacts. Use `run` for an initial manifest, `add` to launch exactly one more job into the same persistent run, `resume` to continue launch and observation, `status` for observation only, and `finish` after collection to validate worker results, record dispositions, release leases, and close owned workspaces. The coordinator supplies intent and judges the results. Current explicit instructions take precedence through an `override` record; its instruction must reflect real authorization.
 
 Success has separate layers: a helper operation returned; a worker settled; its receipt and artifacts were collected; and the coordinator accepted its work. A `collected` batch still has `acceptance: pending`. Missing files, malformed receipts, and uncertain effects remain visible. Managed Codex jobs pass the complete prompt as argv to a fresh `agent start`, then verify the owned identity and visible `Working` state before marking submission and observing it. A Herdr startup timeout is expected for this prompt-bearing launch, but is not delivery evidence by itself. The helper never answers approval dialogs or blindly repeats a timed-out prompt.
 
@@ -15,9 +15,40 @@ Paths to the entrypoint and policy are relative to this skill; use absolute path
 ```sh
 python3 scripts/herdr-jobs.py run --manifest request.json --policy launch-policy.json --run-dir RUN_DIR --preview
 python3 scripts/herdr-jobs.py run --manifest request.json --policy launch-policy.json --run-dir RUN_DIR --host-contract HOST_CONTRACT --wait-seconds 30
+python3 scripts/herdr-jobs.py add --manifest one-job.json --policy launch-policy.json --run-dir RUN_DIR --host-contract HOST_CONTRACT --wait-seconds 30
 python3 scripts/herdr-jobs.py resume --run-dir RUN_DIR --wait-seconds 30
 python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 30
+python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR --wait-seconds 30
 ```
+
+`finish` maps worker outcomes to coordinator dispositions using the worker
+contract: `ready` → `completed`, `blocked` → `blocked`, and `failed` →
+`failed`. It validates result records, confirms each receipt lists `result.json`
+and every declared artifact file, records dispositions, releases leases, and
+closes settled workspaces. A successful cleanup returns `next_action.kind`
+`review`; it does not accept the work, and `acceptance` remains pending.
+
+The coordinator can explicitly change a worker disposition for a specific job
+with the repeatable `--coordinator-disposition-override JOB_ID=DISPOSITION`
+flag and a non-empty `--coordinator-override-reason`. The reason is recorded in
+the run checkpoint and disposition evidence. A saved override remains in force
+for later `finish` retries.
+
+```sh
+python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR \
+  --coordinator-disposition-override job-1=completed \
+  --coordinator-override-reason "Reviewed the blocker and approved completion."
+```
+
+An added manifest must use the existing `request_id`, pinned policy, and run
+concurrency, and contain one unique `job_id`. Its optional `retry_override`,
+when supplied, must match the run's pinned value; omit it to inherit that value
+for matching workers in the added jobs. Additions append to `state.json`;
+they do not replace earlier attempts, receipts, or collections. Use the same
+run directory for the lifetime of that fleet. `finish` does not launch work and
+closes only jobs that are settled and have a valid collected receipt. A missing
+workspace ID or failed worker-result validation leaves the job open with an
+actionable issue.
 
 Preview validates the request, policy, and prompts offline; it does not read the host contract and cannot report a missing or unverified binding. Before the first live call, confirm the contract's `jail_export` is non-null, `verified`, and bound to the child's output root; a preview success is not evidence the binding exists.
 
@@ -32,10 +63,35 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree` |
-| Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result` |
+| Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
+| Worker result | `task_id`, `assignment_revision` | none |
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command route `omp-train --claude` documented in [PREFERENCES.md](../PREFERENCES.md). Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
+
+`worker_result` opts a job into the shared worker-record contract. The helper
+then asks for a `result.json` bound to that task ID and assignment revision,
+collects it and every artifact it names, and lets `finish` validate it before
+writing `disposition.json`. Jobs without `worker_result` keep the original
+receipt contract (`result.md` plus `receipt.json`) and remain valid with
+existing manifests and receipts. `finish` reports that worker-result
+validation was not requested for these receipt-only jobs. Effort overrides are
+validated against each runtime's supported values and mapped to that runtime's
+native argument:
+
+| Runtime | Accepted effort values | Native argument |
+|---|---|---|
+| `codex` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `-c model_reasoning_effort=<value>` |
+| `pi` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `--thinking <value>` |
+| `claude-code` | `low`, `medium`, `high`, `xhigh`, `max` | `--effort <value>` |
+| `omp` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` | `--thinking <value>` |
+
+Other runtimes, including Gemini CLI, reject an effort override before launch;
+the launcher does not assume every runtime accepts a generic `--effort` flag.
+Effort values are runtime-level capabilities; a selected model may support a
+smaller subset. A Pi provider override is also passed to Pi as `--provider` and
+used for admission, and requires an explicit model because Pi requires
+`--model` with `--provider`.
 
 `retry_override` is an optional run-level object, pinned in `state.json` and
 applied only to matching workers in that run. Pi accepts `max_retries` (0–100)
@@ -113,7 +169,7 @@ produced output before retrying. An authorized retry requires the old Codex
 process to have exited, the pane to be at a shell prompt, and any prior result
 to be collected; create a new run directory only for that fresh attempt.
 
-The run concurrency and shared provider cap both apply. Managed jobs reserve provider capacity before the first pane is created and report the same provider-wide active count as the admission CLI. Startup, working, blocked, and ambiguously active workers occupy slots. A worker with proven settled activity releases its slot while collection stays incomplete. Idle/done without observed activity or a valid receipt does not prove that the submitted job ran. A recognized 429 records model-specific backoff; after the response is terminal, the attempt is queued in the same run and a fresh attempt starts after the window expires. Earlier output folders and repository-worktree lease records remain intact. With no Retry-After or reset metadata, the configured default is 60 seconds.
+The run concurrency and shared provider cap both apply. Managed jobs reserve provider capacity before the first pane is created and report the same provider-wide active count as the admission CLI. Capacity and backoff waits appear as `admission_wait` and do not count as task failures. Startup, working, blocked, and ambiguously active workers occupy slots. A worker with proven settled activity releases its slot while collection stays incomplete. Idle/done without a matching receipt or visible `Working` marker does not prove that the submitted prompt landed. For non-Codex agents, the helper verifies the owned worker is idle after startup before sending the prompt, detects trust and authentication dialogs, then requires a matching receipt or visible `Working` marker. It never sends input to a startup dialog. A recognized 429 records model-specific backoff; after the response is terminal, the attempt is queued in the same run and a fresh attempt starts after the window expires. Earlier output folders and repository-worktree lease records remain intact. With no Retry-After or reset metadata, the configured default is 60 seconds.
 
 For finite jail jobs, the internal `jail-runner.py` runs the fixed launcher command and writes an attempt-bound exit record on the host after it returns. This survives disappearance of Herdr's live agent classification. It is not a general shell runner. A missing or mismatched exit record establishes no completion. Created panes/workspaces remain available for inspection.
 
@@ -153,6 +209,6 @@ Every successful operation emits one JSON object naming request/run identity, ba
 | 10 | Partial batch or work needing attention |
 | 130 | Interrupted; resume from durable state |
 
-Host calls can create workspaces/panes, start provider-backed workers, and submit task content under existing task authority. The helper writes only its run state, configured artifact locations, and collected snapshots. It performs no installation, registration, automatic cancellation, background-adapter launch, or successor handoff.
+Host calls can create workspaces/panes, start provider-backed workers, and submit task content under existing task authority. The helper writes only its run state, configured artifact locations, collected snapshots, and explicit finish dispositions. `finish` releases the job's provider lease and closes the exact workspace ID recorded from its pane-move response; the move response must expose `workspace.workspace_id` or `workspace_id` for closeout. It performs no installation, registration, automatic cancellation, background-adapter launch, or successor handoff.
 
 If the helper or required binding is unavailable, return the capability gap and its recovery path. A manual continuation must be explicit, preserve policy and receipt obligations, and account for existing owned resources. Unknown effects are not evidence that nothing happened.

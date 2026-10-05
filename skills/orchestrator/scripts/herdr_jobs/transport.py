@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import selectors
 import shlex
 import shutil
@@ -11,7 +12,7 @@ import sys
 import time
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
-                      validate_writer_intent, version)
+                      effort_arguments, validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
@@ -29,6 +30,14 @@ class RateLimited(Exception):
     def __init__(self, signal):
         super().__init__("provider returned a rate-limit response")
         self.signal = signal
+
+
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+ACTIVE_TURN_STATUS = re.compile(
+    r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
+    r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
+    re.IGNORECASE,
+)
 
 
 class Deadline:
@@ -226,11 +235,29 @@ class NativeTransport:
                          f"projects.{json.dumps(spec['cwd'])}.trust_level=\"trusted\""]
                 if job["resolved_model"] is not None:
                     argv += ["-m", job["resolved_model"]]
+                effort = (spec.get("override") or {}).get("effort")
+                argv += effort_arguments("codex", effort)
                 if job.get("retry_override") and "provider_id" in job["retry_override"]:
                     argv += codex_retry_cli_args(job["retry_override"])
                 argv.append(prompt)
-            elif job["resolved_model"] is not None:
-                argv += ["--", "--model", job["resolved_model"]]
+            elif spec["route"]["runtime"] == "pi":
+                runtime_args = []
+                if spec.get("provider") is not None:
+                    runtime_args += ["--provider", spec["provider"]]
+                if job["resolved_model"] is not None:
+                    runtime_args += ["--model", job["resolved_model"]]
+                effort = (spec.get("override") or {}).get("effort")
+                runtime_args += effort_arguments("pi", effort)
+                if runtime_args:
+                    argv += ["--", *runtime_args]
+            else:
+                runtime_args = []
+                if job["resolved_model"] is not None:
+                    runtime_args += ["--model", job["resolved_model"]]
+                effort = (spec.get("override") or {}).get("effort")
+                runtime_args += effort_arguments(spec["route"]["runtime"], effort)
+                if runtime_args:
+                    argv += ["--", *runtime_args]
         elif action == "prompt":
             argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
         elif action == "jail":
@@ -282,7 +309,15 @@ class NativeTransport:
             if action == "split":
                 return {"pane_id": text(at(result, ["result", "pane", "pane_id"]), "pane ID", 200)}
             if action == "move":
-                return {"pane_id": text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)}
+                moved = at(result, ["result", "move_result"])
+                pane_id = text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)
+                workspace = moved.get("workspace") if isinstance(moved, dict) else None
+                workspace_id = (workspace.get("workspace_id") if isinstance(workspace, dict) else None)
+                workspace_id = workspace_id or (moved.get("workspace_id") if isinstance(moved, dict) else None)
+                response = {"pane_id": pane_id}
+                if workspace_id is not None:
+                    response["workspace_id"] = text(workspace_id, "workspace ID", 512)
+                return response
             return {}
         except RateLimited:
             raise
@@ -329,12 +364,24 @@ class NativeTransport:
             terminal = self.read([self.herdr, "pane", "read", job["pane_id"],
                                   "--source", "visible", "--lines", "200"])
             output = self.terminal_output(terminal)
-            if codex:
-                dialog = self.codex_dialog(output)
+        pending = job.get("pending_effect")
+        prompt_may_be_echoed = (job.get("phase") == "submitted"
+                                or (pending and pending["action"] in ("prompt", "jail"))
+                                or (codex and pending and pending["action"] == "start"))
+        if agent_route and not prompt_may_be_echoed:
+            dialog = self.startup_dialog(self.without_prompt_echo(output, job), codex=codex)
+            if dialog:
+                return {"state": "blocked", "identity_verified": False,
+                        "prompt_verified": False, "launch_issue": dialog}
+        try:
+            result = self.read([self.herdr, "agent", "get", job["pane_id"]])
+        except JobError:
+            if agent_route and prompt_may_be_echoed:
+                dialog = self.startup_dialog(self.without_prompt_echo(output, job), codex=codex)
                 if dialog:
                     return {"state": "blocked", "identity_verified": False,
                             "prompt_verified": False, "launch_issue": dialog}
-        result = self.read([self.herdr, "agent", "get", job["pane_id"]])
+            raise
         paths = self.binding["paths"]
         pane = at(result, paths["agent_pane_id"])
         kind = at(result, paths["agent_kind"])
@@ -346,15 +393,43 @@ class NativeTransport:
         state = at(result, paths["agent_state"])
         if state not in ("idle", "done", "working", "blocked", "unknown"):
             raise JobError("unavailable_capability", "unrecognized worker lifecycle state")
+        if agent_route and (state != "working" or not prompt_may_be_echoed):
+            dialog = self.startup_dialog(self.without_prompt_echo(output, job), codex=codex)
+            if dialog:
+                return {"state": "blocked", "identity_verified": False,
+                        "prompt_verified": False, "launch_issue": dialog}
         observation = {"state": state, "identity_verified": True}
         rate_limit = (rate_limit_from_output(output, runtime=job["spec"]["route"]["runtime"])
                       if output is not None else None)
         if rate_limit is not None:
             observation["rate_limit"] = rate_limit
-        if codex:
-            observation["prompt_verified"] = (observation["state"] == "working"
-                                               and "working" in output.casefold())
+        if agent_route:
+            observation["prompt_verified"] = self.prompt_landed(job, state, output)
         return observation
+
+    @staticmethod
+    def without_prompt_echo(output, job):
+        output = ANSI_ESCAPE.sub("", output)
+        spec = job.get("spec", {})
+        override = spec.get("override") or {}
+        for prompt_part in (spec.get("task"), spec.get("output_expectation"),
+                            spec.get("name"), override.get("instruction")):
+            if isinstance(prompt_part, str) and prompt_part.strip():
+                pattern = re.compile(r"\s+".join(re.escape(part) for part in prompt_part.split()),
+                                     re.IGNORECASE)
+                output = pattern.sub("", output, count=1)
+        return output
+
+    @staticmethod
+    def has_active_turn_status(output):
+        clean = ANSI_ESCAPE.sub("", output)
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        return bool(lines and ACTIVE_TURN_STATUS.fullmatch(lines[-1]))
+
+    @classmethod
+    def prompt_landed(cls, job, state, output):
+        return (state == "working"
+                and cls.has_active_turn_status(cls.without_prompt_echo(output, job)))
 
     @staticmethod
     def terminal_output(result):
@@ -389,3 +464,49 @@ class NativeTransport:
         if trust_dialog:
             return "Codex is showing a trust dialog; inspect and resolve it manually before relaunching"
         return None
+
+    @classmethod
+    def startup_dialog(cls, output, *, codex=False):
+        if codex:
+            dialog = cls.codex_dialog(output)
+            if dialog:
+                return dialog
+        text_lower = output.casefold()
+        if any(phrase in text_lower for phrase in (
+            "continue without trusting", "trust and continue", "trust this folder",
+            "trust this directory", "trust this project", "press enter to confirm",
+            "authentication required", "sign in to continue",
+        )):
+            return "worker startup is waiting on a trust or authentication dialog; resolve it manually"
+        return None
+
+    def close_workspace(self, job):
+        workspace_id = job.get("workspace_id")
+        if not workspace_id:
+            raise JobError("unavailable_capability", "the move response had no verified workspace ID to close")
+        code, _, error_output = command([self.herdr, "workspace", "close", workspace_id], self.deadline)
+        if code:
+            detail = error_output.decode("utf-8", "replace").strip()
+            suffix = f": {detail[:300]}" if detail else ""
+            raise JobError("unavailable_capability", f"workspace close exited {code}{suffix}")
+        return {"closed": True, "workspace_id": workspace_id}
+
+    def workspace_is_open(self, job):
+        workspace_id = job.get("workspace_id")
+        if not workspace_id:
+            raise JobError("unavailable_capability", "the move response had no verified workspace ID to reconcile")
+        response = self.read([self.herdr, "workspace", "list"])
+        if (not isinstance(response, dict) or response.get("ok") is False
+                or response.get("success") is False):
+            raise JobError("unavailable_capability", "Herdr workspace list returned an unexpected response shape")
+        result = response.get("result")
+        if (not isinstance(result, dict) or result.get("type") != "workspace_list"
+                or not isinstance(result.get("workspaces"), list)):
+            raise JobError("unavailable_capability", "Herdr workspace list returned an unexpected response shape")
+        workspaces = result["workspaces"]
+        workspace_ids = []
+        for item in workspaces:
+            if not isinstance(item, dict) or "workspace_id" not in item:
+                raise JobError("unavailable_capability", "Herdr workspace list contains a malformed workspace")
+            workspace_ids.append(text(item["workspace_id"], "workspace ID", 512))
+        return workspace_id in workspace_ids

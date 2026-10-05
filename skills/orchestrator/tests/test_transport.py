@@ -111,7 +111,7 @@ class TransportTest(unittest.TestCase):
         if argv[:3] == ["herdr", "pane", "split"]:
             return b'{"result":{"pane":{"pane_id":"old:1"}}}'
         if argv[:3] == ["herdr", "pane", "move"]:
-            return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"}}}}'
+            return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"},"workspace":{"workspace_id":"workspace:1"}}}}'
         return b'{"result":{}}'
 
     def test_exact_runtime_is_not_substituted(self):
@@ -191,7 +191,8 @@ class TransportTest(unittest.TestCase):
 
     def test_pane_ids_come_from_response_and_prompt_remains_one_argument(self):
         self.assertEqual(self.adapter.effect("split", self.job, ""), {"pane_id": "old:1"})
-        self.assertEqual(self.adapter.effect("move", self.job, ""), {"pane_id": "moved:1"})
+        moved = self.adapter.effect("move", self.job, "")
+        self.assertEqual(moved, {"pane_id": "moved:1", "workspace_id": "workspace:1"})
         prompt = "Literal 'quotes' and $(echo nope)\nNext line"
         fake = FakeHerdr()
         with patch("herdr_jobs.transport.command", fake.command):
@@ -211,6 +212,125 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "codex",
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
+
+    def test_pi_zai_start_passes_provider_model_and_effort_to_the_agent(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="pi", provider="zai", route={"mode": "agent", "runtime": "pi"},
+                         override={"effort": "high"})
+        self.job["resolved_model"] = "glm-5.3-flash"
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "pi",
+                                 "--pane", "moved:1", "--", "--provider", "zai", "--model",
+                                 "glm-5.3-flash", "--thinking", "high"])
+
+    def test_claude_effort_maps_without_an_explicit_model(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"},
+                         override={"effort": "xhigh"})
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start[-3:], ["--", "--effort", "xhigh"])
+
+    def test_omp_effort_maps_to_thinking_without_an_explicit_model(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="omp", route={"mode": "agent", "runtime": "omp"},
+                         override={"effort": "max"})
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start[-3:], ["--", "--thinking", "max"])
+
+    def test_codex_effort_is_scoped_to_the_prompt_bearing_start(self):
+        fake = FakeHerdr(start_code=1)
+        self.spec["override"] = {"effort": "max"}
+        self.job["resolved_model"] = "native-id"
+        self.adapter.observe = lambda job: {"state": "working", "identity_verified": True,
+                                            "prompt_verified": True}
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(result["prompt_submitted"], True)
+        self.assertEqual(start[-5:], ["-m", "native-id", "-c", "model_reasoning_effort=max", "Assigned work"])
+
+    def test_non_codex_startup_dialog_is_reported_as_blocked(self):
+        self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
+        self.agent.update(state="working", kind="pi")
+        self.pane_output = "Trust and continue to access this project"
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "blocked")
+        self.assertFalse(observation["identity_verified"])
+        self.assertIn("dialog", observation["launch_issue"])
+
+    def test_finish_closes_only_the_recorded_workspace_id(self):
+        self.job["workspace_id"] = "workspace:1"
+        calls = []
+
+        def fake_command(argv, deadline, cwd=None):
+            calls.append(argv)
+            return 0, b"closed", b""
+
+        with patch("herdr_jobs.transport.command", fake_command):
+            result = self.adapter.close_workspace(self.job)
+
+        self.assertEqual(result, {"closed": True, "workspace_id": "workspace:1"})
+        self.assertEqual(calls, [["herdr", "workspace", "close", "workspace:1"]])
+
+    def test_finish_reconciliation_checks_the_exact_workspace_id(self):
+        self.job["workspace_id"] = "workspace:1"
+        calls = []
+
+        def workspace_list(argv):
+            calls.append(argv)
+            return json.dumps({"result": {"type": "workspace_list", "workspaces": [
+                {"workspace_id": "workspace:other"}, {"workspace_id": "workspace:1"}
+            ]}}).encode()
+
+        self.adapter.raw = workspace_list
+
+        self.assertTrue(self.adapter.workspace_is_open(self.job))
+        self.assertEqual(calls, [["herdr", "workspace", "list"]])
+
+        self.adapter.raw = lambda argv: json.dumps({"result": {"type": "workspace_list", "workspaces": [
+            {"workspace_id": "workspace:other"}
+        ]}}).encode()
+        self.assertFalse(self.adapter.workspace_is_open(self.job))
+
+    def test_workspace_list_rejects_an_unexpected_response_shape(self):
+        self.job["workspace_id"] = "workspace:1"
+        responses = (
+            {"result": {"workspaces": [{"workspace_id": "workspace:1"}]}},
+            {"result": {"type": "workspace_list_v2", "workspaces": [{"workspace_id": "workspace:1"}]}},
+            {"result": {"type": "workspace_list", "workspace_list": [{"workspace_id": "workspace:1"}]}},
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                self.adapter.raw = lambda _argv, response=response: json.dumps(response).encode()
+                with self.assertRaisesRegex(JobError, "workspace list returned an unexpected response shape"):
+                    self.adapter.workspace_is_open(self.job)
+
+    def test_jail_exit_record_verifies_completion_without_prompt_marker(self):
+        self.spec["route"]["mode"] = "jail"
+        save(self.job["exit_record"], {"schema_version": 1, "job_id": self.spec["job_id"],
+                                        "attempt_id": self.job["attempt_id"], "exit_code": 0,
+                                        "exited_at": "2026-10-04T00:00:00+00:00"})
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation, {"state": "exited", "identity_verified": True, "exit_code": 0})
+        self.assertEqual(self.calls, [])
 
     def test_codex_retry_override_is_scoped_to_the_fresh_launch_arguments(self):
         fake = FakeHerdr(start_code=1)
@@ -317,6 +437,56 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(sum(call[:3] == ["herdr", "agent", "start"] for call in fake.calls), 1)
         self.assertTrue(any(call[:3] == ["herdr", "pane", "read"] for call in fake.calls))
         self.assertFalse(any(call[:3] == ["herdr", "agent", "prompt"] for call in fake.calls))
+
+    def test_echoed_prompt_working_text_does_not_prove_an_active_turn(self):
+        self.spec["task"] = "Print this word on its own line:\nWorking"
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = self.spec["task"]
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "working")
+        self.assertFalse(observation["prompt_verified"])
+
+    def test_unrelated_working_prose_does_not_prove_an_active_turn(self):
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = "The report says the workflow is working as intended."
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertFalse(observation["prompt_verified"])
+
+    def test_active_turn_status_line_after_unrelated_prose_proves_prompt_landing(self):
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = "The report says the workflow is working as intended.\n✳ Working…"
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertTrue(observation["prompt_verified"])
+
+    def test_active_status_after_an_echoed_working_prompt_proves_prompt_landing(self):
+        self.spec["task"] = "Print this word on its own line:\nWorking"
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = self.spec["task"] + "\n✳ Working…"
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertTrue(observation["prompt_verified"])
+
+    def test_echoed_authentication_phrase_does_not_block_a_working_worker(self):
+        self.spec["task"] = "Explain the phrase authentication required in the log."
+        self.job["phase"] = "submitted"
+        self.agent["state"] = "working"
+        self.pane_output = self.spec["task"]
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation["state"], "working")
+        self.assertTrue(observation["identity_verified"])
 
     def test_unverified_mutation_response_stays_ambiguous(self):
         self.adapter.raw = lambda argv: b'{}'
