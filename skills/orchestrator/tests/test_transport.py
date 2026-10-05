@@ -161,7 +161,7 @@ class TransportTest(unittest.TestCase):
     def test_pi_observation_exposes_retry_after_for_provider_rate_limit(self):
         self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
         self.agent.update(state="done", kind="pi")
-        self.job.update(provider="zai", admission_model="glm-4.5")
+        self.job.update(provider="codex", admission_model="gpt-6-luna")
         self.pane_output = 'Error: 429: {"code":"1302","message":"Rate limit reached"}\nRetry-After: 12'
 
         observation = self.adapter.observe(self.job)
@@ -213,19 +213,19 @@ class TransportTest(unittest.TestCase):
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
 
-    def test_pi_zai_start_passes_provider_model_and_effort_to_the_agent(self):
+    def test_pi_start_passes_configured_provider_model_and_effort_to_the_agent(self):
         fake = FakeHerdr()
-        self.spec.update(kind="pi", provider="zai", route={"mode": "agent", "runtime": "pi"},
+        self.spec.update(kind="pi", provider="llama-local", route={"mode": "agent", "runtime": "pi"},
                          override={"effort": "high"})
-        self.job["resolved_model"] = "glm-5.3-flash"
+        self.job["resolved_model"] = "qwen3.8-27b-uncensored"
 
         with patch("herdr_jobs.transport.command", fake.command):
             self.adapter.effect("start", self.job, "Assigned work")
 
         start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
         self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "pi",
-                                 "--pane", "moved:1", "--", "--provider", "zai", "--model",
-                                 "glm-5.3-flash", "--thinking", "high"])
+                                 "--pane", "moved:1", "--", "--provider", "llama-local", "--model",
+                                 "qwen3.8-27b-uncensored", "--thinking", "high"])
 
     def test_claude_effort_maps_without_an_explicit_model(self):
         fake = FakeHerdr()
