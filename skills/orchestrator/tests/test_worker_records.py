@@ -47,6 +47,7 @@ class WorkerRecordsTest(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertIn('"path": "artifact-path"', process.stdout)
         self.assertIn('"kind": "report"', process.stdout)
+        self.assertIn("`checks[].evidence` must be a non-empty string", process.stdout)
         for value in ("`ready`", "`blocked`", "`failed`", "`passed`", "`not_run`"):
             self.assertIn(value, process.stdout)
         self.assertIn("candidate", process.stdout)
@@ -252,6 +253,23 @@ class WorkerRecordsTest(unittest.TestCase):
 
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertIn("VALID", process.stdout)
+
+    def test_invalid_check_evidence_reports_nonempty_string_hint(self):
+        result_path = self.root / "result.json"
+        for evidence in ([], ""):
+            with self.subTest(evidence=evidence):
+                result_path.write_text(json.dumps(self.make_result(
+                    checks=[{"name": "source check", "status": "passed", "evidence": evidence}]
+                )))
+
+                process = self.call(
+                    "validate-result", result_path,
+                    "--task-id", "worker-a", "--revision", "1",
+                )
+
+                self.assertEqual(process.returncode, 2)
+                self.assertIn("checks[0].evidence must be a non-empty string", process.stderr)
+                self.assertIn("path or concise check result", process.stderr)
 
     def test_result_with_mismatched_identity_is_rejected(self):
         result_path = self.root / "result.json"
