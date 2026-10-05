@@ -148,7 +148,7 @@ class DurableWatchTest(unittest.TestCase):
 
     def test_arm_keeps_notification_route_out_of_systemd_arguments(self):
         (self.run_dir / durable_watch.CONFIG).unlink()
-        secret_url = "https://notify.example.invalid/private-topic-test-1159"
+        secret_url = "https://example.invalid/test-token-not-a-secret"
         args = type("Args", (), {
             "run_dir": str(self.run_dir),
             "tasks": ["task-a"],
@@ -172,6 +172,14 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(len(launched), 1)
         argv = launched[0]
         self.assertFalse(any(secret_url in value for value in argv))
+        unset_environment = [
+            argv[index + 1]
+            for index, value in enumerate(argv[:-1])
+            if value == "-p" and argv[index + 1].startswith("UnsetEnvironment=")
+        ]
+        self.assertEqual(unset_environment, [
+            "UnsetEnvironment=NTFY_URL ORCH_WATCH_NTFY_URL NTFY_TOKEN NTFY_TOKEN_FILE NTFY_PASSWORD",
+        ])
         self.assertFalse(any(value.startswith("--setenv=") for value in argv))
         self.assertNotIn("NTFY_URL", launch_environments[0])
         self.assertFalse(any(secret_url in value for value in launch_environments[0].values()))

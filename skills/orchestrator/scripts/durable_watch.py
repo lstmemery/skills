@@ -27,6 +27,13 @@ NTFY_URL_FILE = Path(".durable-watch/ntfy-url")
 LOCK = Path(".durable-watch/reconcile.lock")
 EVENTS = Path("flags/events.jsonl")
 VERSION = 1
+NTFY_CREDENTIAL_ENV_VARS = (
+    "NTFY_URL",
+    "ORCH_WATCH_NTFY_URL",
+    "NTFY_TOKEN",
+    "NTFY_TOKEN_FILE",
+    "NTFY_PASSWORD",
+)
 
 
 class WatchError(Exception):
@@ -363,13 +370,14 @@ def command_arm(args: argparse.Namespace) -> int:
             "systemd-run", "--user", "--quiet", f"--unit={unit_base(run_dir)}.service",
             "--on-active=1s", f"--on-unit-active={args.interval_seconds}s",
             "--timer-property=AccuracySec=1s",
+            "-p", f"UnsetEnvironment={' '.join(NTFY_CREDENTIAL_ENV_VARS)}",
         ]
         command.extend([
             sys.executable, "-B", str(Path(__file__).resolve()), "reconcile", str(run_dir),
         ])
     try:
         systemd_run_env = os.environ.copy()
-        for name in ("NTFY_URL", "ORCH_WATCH_NTFY_URL", "NTFY_TOKEN", "NTFY_TOKEN_FILE", "NTFY_PASSWORD"):
+        for name in NTFY_CREDENTIAL_ENV_VARS:
             systemd_run_env.pop(name, None)
         result = subprocess.run(command, capture_output=True, check=False, timeout=15, env=systemd_run_env)
     except (OSError, subprocess.TimeoutExpired) as error:
