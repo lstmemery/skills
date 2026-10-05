@@ -350,6 +350,9 @@ class Engine:
             raise JobError("conflict", "added jobs must use the existing run concurrency")
         if request["policy_digest"] != stored["policy_digest"]:
             raise JobError("conflict", "added jobs must use the run's pinned launch policy")
+        if (request.get("retry_override") is not None
+                and request["retry_override"] != stored.get("retry_override")):
+            raise JobError("conflict", "added jobs must use the run's pinned retry_override")
         old_ids = {job["job_id"] for job in stored["jobs"]}
         if any(job["job_id"] in old_ids for job in request["jobs"]):
             raise JobError("conflict", "an added job_id already exists in this run")

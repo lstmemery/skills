@@ -60,7 +60,8 @@ class JobsTest(unittest.TestCase):
         self.manifest.write_text(json.dumps(manifest))
 
     def write_add_job(self, job_id="job-added", task_id="task-added", revision=1,
-                      runtime="pi", provider="zai", model="glm-5.3-flash", effort="high"):
+                      runtime="pi", provider="zai", model="glm-5.3-flash", effort="high",
+                      retry_override=None):
         add_manifest = self.root / "add-manifest.json"
         job = {"job_id": job_id, "name": "Incremental fixture", "task_kind": "ordinary",
                "task_file": str(self.task), "cwd": str(self.root),
@@ -68,8 +69,27 @@ class JobsTest(unittest.TestCase):
                "worker_result": {"task_id": task_id, "assignment_revision": revision},
                "override": {"runtime": runtime, "provider": provider, "model": model,
                             "effort": effort, "instruction": f"Use {runtime} with {model}."}}
-        add_manifest.write_text(json.dumps({"schema_version": 1, "request_id": "test-request", "jobs": [job]}))
+        manifest = {"schema_version": 1, "request_id": "test-request", "jobs": [job]}
+        if retry_override is not None:
+            manifest["retry_override"] = retry_override
+        add_manifest.write_text(json.dumps(manifest))
         self.manifest = add_manifest
+
+    def prepare_pi_retry_run(self, retry_override):
+        global_agent = self.root / "pi-global"
+        global_agent.mkdir()
+        (global_agent / "settings.json").write_text('{"retry":{"enabled":true,"maxRetries":2}}')
+        (global_agent / "auth.json").write_text("{}")
+
+        policy = json.loads(self.policy.read_text())
+        policy["routes"]["ordinary"]["runtime"] = "pi"
+        policy["runtime_kinds"]["pi"] = "pi"
+        self.policy.write_text(json.dumps(policy))
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0].pop("override")
+        manifest["retry_override"] = retry_override
+        self.manifest.write_text(json.dumps(manifest))
+        return global_agent
 
     def configure(self, **kwargs):
         self.fixture.write_text(json.dumps({"request_id": "test-request", **kwargs}))
@@ -195,6 +215,52 @@ class JobsTest(unittest.TestCase):
                              for event in self.events()), 1)
         self.assertEqual(state["jobs"][1]["provider"], "zai")
         self.assertEqual(state["jobs"][1]["resolved_model"], "glm-5.3-flash")
+
+    def test_add_applies_the_run_pinned_retry_override_to_matching_workers(self):
+        retry_override = {"pi": {"max_retries": 10, "max_agent_delay_ms": 120000}}
+        global_agent = self.prepare_pi_retry_run(retry_override)
+
+        with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
+            self.call()
+            self.write_add_job(retry_override=retry_override)
+            code, result = self.call("add", wait_seconds=1)
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        state = self.state()
+        added_job = state["jobs"][1]
+        self.assertEqual(state["retry_override"], retry_override)
+        self.assertEqual(added_job["retry_override"], retry_override["pi"])
+        self.assertIsNotNone(added_job["retry_profile"])
+        settings = json.loads((Path(added_job["retry_profile"]["agent_dir"]) / "settings.json").read_text())
+        self.assertEqual(settings["retry"], {"enabled": True, "maxRetries": 10,
+                                               "maxAgentDelayMs": 120000})
+
+    def test_add_rejects_a_retry_override_that_changes_the_run_pin(self):
+        pinned = {"pi": {"max_retries": 10}}
+        global_agent = self.prepare_pi_retry_run(pinned)
+
+        with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
+            self.call()
+            self.write_add_job(retry_override={"pi": {"max_retries": 9}})
+            code, result = self.call("add")
+
+        self.assertEqual((code, result["error"]), (3, "conflict"))
+        self.assertIn("run's pinned retry_override", result["message"])
+        self.assertEqual(len(self.state()["jobs"]), 1)
+        self.assertFalse(any(event["action"] == "start" and event["job_id"] == "job-added"
+                             for event in self.events()))
+
+    def test_add_rejects_a_retry_override_when_the_run_has_no_pin(self):
+        self.call()
+        self.write_add_job(retry_override={"pi": {"max_retries": 10}})
+
+        code, result = self.call("add")
+
+        self.assertEqual((code, result["error"]), (3, "conflict"))
+        self.assertIn("run's pinned retry_override", result["message"])
+        self.assertEqual(len(self.state()["jobs"]), 1)
+        self.assertFalse(any(event["action"] == "start" and event["job_id"] == "job-added"
+                             for event in self.events()))
 
     def test_add_rejects_duplicate_job_or_worker_identity(self):
         self.call()
@@ -735,7 +801,7 @@ class JobsTest(unittest.TestCase):
         self.assertNotIn("prompt_verified", result["jobs"][4]["observed"])
 
     def test_long_running_jail_waits_for_exit_evidence_until_budget(self):
-        self.write_jobs(1, ["shopping"])
+        self.write_jobs(1, ["deep_research"])
         self.configure(jobs={"job0": "working"})
         started = time.monotonic()
 
@@ -745,6 +811,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["jobs"][0]["observed"]["state"], "working")
         self.assertFalse(result["jobs"][0]["settled"])
         self.assertTrue(self.state()["jobs"][0]["activity_seen"])
+        self.assertEqual(self.state()["jobs"][0]["spec"]["route"]["mode"], "jail")
 
     def test_malformed_nested_state_has_structured_error(self):
         self.call()

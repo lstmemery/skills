@@ -41,7 +41,9 @@ python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR \
 ```
 
 An added manifest must use the existing `request_id`, pinned policy, and run
-concurrency, and contain one unique `job_id`. Additions append to `state.json`;
+concurrency, and contain one unique `job_id`. Its optional `retry_override`,
+when supplied, must match the run's pinned value; omit it to inherit that value
+for matching workers in the added jobs. Additions append to `state.json`;
 they do not replace earlier attempts, receipts, or collections. Use the same
 run directory for the lifetime of that fleet. `finish` does not launch work and
 closes only jobs that are settled and have a valid collected receipt. A missing
