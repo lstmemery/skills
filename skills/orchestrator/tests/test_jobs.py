@@ -680,6 +680,16 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
+    def test_agent_working_without_prompt_landing_is_not_verified_activity(self):
+        self.write_jobs(1, runtime="pi")
+        self.configure(jobs={"job0": "unverified_working"})
+
+        _, result = self.call(wait_seconds=0.3)
+
+        self.assertEqual(result["jobs"][0]["observed"]["state"], "working")
+        self.assertFalse(self.state()["jobs"][0]["activity_seen"])
+        self.assertEqual(sum(event["action"] == "observe" for event in self.events()), 2)
+
     def test_ambiguous_split_is_not_replayed_and_other_job_finishes(self):
         self.write_jobs(2)
         self.configure(jobs={"job0": "split_unknown"})
@@ -721,6 +731,20 @@ class JobsTest(unittest.TestCase):
         code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"], result["active_jobs"]), (0, "collected", 0))
         self.assertEqual(result["jobs"][4]["observed"]["state"], "exited")
+        self.assertTrue(result["jobs"][4]["settled"])
+        self.assertNotIn("prompt_verified", result["jobs"][4]["observed"])
+
+    def test_long_running_jail_waits_for_exit_evidence_until_budget(self):
+        self.write_jobs(1, ["shopping"])
+        self.configure(jobs={"job0": "working"})
+        started = time.monotonic()
+
+        _, result = self.call(wait_seconds=0.3)
+
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertEqual(result["jobs"][0]["observed"]["state"], "working")
+        self.assertFalse(result["jobs"][0]["settled"])
+        self.assertTrue(self.state()["jobs"][0]["activity_seen"])
 
     def test_malformed_nested_state_has_structured_error(self):
         self.call()

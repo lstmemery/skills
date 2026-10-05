@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from .engine import Engine
+from .engine import Engine, WORKER_DISPOSITIONS
 from .records import JobError, digest, encoded, prepare, run_lock
 from .transport import BudgetExpired, Deadline, NativeTransport
 
@@ -12,7 +12,6 @@ from .transport import BudgetExpired, Deadline, NativeTransport
 ENTRYPOINT = str(Path(__file__).resolve().parents[1] / "herdr-jobs.py")
 EXIT_CODES = {"invalid_input": 2, "conflict": 3, "unavailable_capability": 4,
               "decision_needed": 5, "unresolved_effect": 6, "io_error": 7, "partial": 10}
-WORKER_DISPOSITIONS = {"completed", "blocked", "failed"}
 
 
 class Parser(argparse.ArgumentParser):

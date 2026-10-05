@@ -496,13 +496,14 @@ class NativeTransport:
         if not workspace_id:
             raise JobError("unavailable_capability", "the move response had no verified workspace ID to reconcile")
         response = self.read([self.herdr, "workspace", "list"])
-        result = response.get("result", response) if isinstance(response, dict) else None
-        if isinstance(result, dict):
-            workspaces = result.get("workspaces", result.get("workspace_list"))
-        else:
-            workspaces = result
-        if not isinstance(workspaces, list):
-            raise JobError("unavailable_capability", "Herdr workspace list returned no workspace records")
+        if (not isinstance(response, dict) or response.get("ok") is False
+                or response.get("success") is False):
+            raise JobError("unavailable_capability", "Herdr workspace list returned an unexpected response shape")
+        result = response.get("result")
+        if (not isinstance(result, dict) or result.get("type") != "workspace_list"
+                or not isinstance(result.get("workspaces"), list)):
+            raise JobError("unavailable_capability", "Herdr workspace list returned an unexpected response shape")
+        workspaces = result["workspaces"]
         workspace_ids = []
         for item in workspaces:
             if not isinstance(item, dict) or "workspace_id" not in item:

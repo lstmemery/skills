@@ -759,7 +759,7 @@ class Engine:
                                        "attempt_id": job["attempt_id"], "observed_at": now()})
                 job["pending_effect"] = None
                 job["phase"] = "submitted"
-        if lifecycle == "working" and observation.get("prompt_verified") is True:
+        if lifecycle == "working" and self.has_verified_working_activity(job):
             job["activity_seen"] = True
         pending = job["pending_effect"]
         codex_start = self.is_codex_pending_start(job, pending)
@@ -808,8 +808,12 @@ class Engine:
         elif lifecycle == "exited" and observation["exit_code"] != 0:
             job["issue"] = f"jail launcher exited {observation['exit_code']}"
         elif job["phase"] == "submitted" and not job["settled"]:
-            job["issue"] = ("prompt delivery is unverified; a matching receipt or visible Working marker is needed; "
-                             "inspect the owned pane before retrying")
+            if job["spec"]["route"]["mode"] == "agent":
+                job["issue"] = ("prompt delivery is unverified; a matching receipt or visible Working marker is needed; "
+                                 "inspect the owned pane before retrying")
+            else:
+                job["issue"] = ("jail launcher has not produced a matching exit record or collected receipt; "
+                                 "inspect the owned pane before retrying")
         else:
             job["issue"] = None
 
@@ -817,11 +821,14 @@ class Engine:
         return not job["settled"] and (job["phase"] != "pending" or job["pending_effect"] is not None)
 
     @staticmethod
-    def has_verified_working_turn(job):
+    def has_verified_working_activity(job):
         observation = job["observed"]
         if not observation or observation["state"] != "working":
             return False
-        return observation.get("prompt_verified") is True
+        route_mode = job["spec"]["route"]["mode"]
+        if route_mode == "agent":
+            return observation.get("identity_verified") is True and observation.get("prompt_verified") is True
+        return route_mode == "jail" and observation.get("identity_verified") is True
 
     def drive(self, status_only=False):
         try:
@@ -847,7 +854,7 @@ class Engine:
                     self.checkpoint()
                 if status_only or all(job["settled"] for job in self.state["jobs"]):
                     return
-                if not any(self.has_verified_working_turn(job) for job in self.state["jobs"]):
+                if not any(self.has_verified_working_activity(job) for job in self.state["jobs"]):
                     launchable = any(job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
                                      and job["pending_effect"] is None for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:

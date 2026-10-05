@@ -290,16 +290,47 @@ class TransportTest(unittest.TestCase):
 
     def test_finish_reconciliation_checks_the_exact_workspace_id(self):
         self.job["workspace_id"] = "workspace:1"
-        self.adapter.raw = lambda argv: json.dumps({"result": {"type": "workspace_list", "workspaces": [
-            {"workspace_id": "workspace:other"}, {"workspace_id": "workspace:1"}
-        ]}}).encode()
+        calls = []
+
+        def workspace_list(argv):
+            calls.append(argv)
+            return json.dumps({"result": {"type": "workspace_list", "workspaces": [
+                {"workspace_id": "workspace:other"}, {"workspace_id": "workspace:1"}
+            ]}}).encode()
+
+        self.adapter.raw = workspace_list
 
         self.assertTrue(self.adapter.workspace_is_open(self.job))
+        self.assertEqual(calls, [["herdr", "workspace", "list"]])
 
         self.adapter.raw = lambda argv: json.dumps({"result": {"type": "workspace_list", "workspaces": [
             {"workspace_id": "workspace:other"}
         ]}}).encode()
         self.assertFalse(self.adapter.workspace_is_open(self.job))
+
+    def test_workspace_list_rejects_an_unexpected_response_shape(self):
+        self.job["workspace_id"] = "workspace:1"
+        responses = (
+            {"result": {"workspaces": [{"workspace_id": "workspace:1"}]}},
+            {"result": {"type": "workspace_list_v2", "workspaces": [{"workspace_id": "workspace:1"}]}},
+            {"result": {"type": "workspace_list", "workspace_list": [{"workspace_id": "workspace:1"}]}},
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                self.adapter.raw = lambda _argv, response=response: json.dumps(response).encode()
+                with self.assertRaisesRegex(JobError, "workspace list returned an unexpected response shape"):
+                    self.adapter.workspace_is_open(self.job)
+
+    def test_jail_exit_record_verifies_completion_without_prompt_marker(self):
+        self.spec["route"]["mode"] = "jail"
+        save(self.job["exit_record"], {"schema_version": 1, "job_id": self.spec["job_id"],
+                                        "attempt_id": self.job["attempt_id"], "exit_code": 0,
+                                        "exited_at": "2026-10-04T00:00:00+00:00"})
+
+        observation = self.adapter.observe(self.job)
+
+        self.assertEqual(observation, {"state": "exited", "identity_verified": True, "exit_code": 0})
+        self.assertEqual(self.calls, [])
 
     def test_codex_retry_override_is_scoped_to_the_fresh_launch_arguments(self):
         fake = FakeHerdr(start_code=1)
