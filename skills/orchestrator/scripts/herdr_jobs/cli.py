@@ -12,6 +12,7 @@ from .transport import BudgetExpired, Deadline, NativeTransport
 ENTRYPOINT = str(Path(__file__).resolve().parents[1] / "herdr-jobs.py")
 EXIT_CODES = {"invalid_input": 2, "conflict": 3, "unavailable_capability": 4,
               "decision_needed": 5, "unresolved_effect": 6, "io_error": 7, "partial": 10}
+WORKER_DISPOSITIONS = {"completed", "blocked", "failed"}
 
 
 class Parser(argparse.ArgumentParser):
@@ -27,11 +28,67 @@ def parser():
         sub.add_argument("--run-dir", required=True)
         sub.add_argument("--host-contract", help="verified host CLI and jail export binding")
         sub.add_argument("--wait-seconds", type=float, default=30)
+        if name == "finish":
+            sub.add_argument("--coordinator-disposition-override", action="append", metavar="JOB_ID=DISPOSITION",
+                             help="explicitly override one worker disposition (repeatable; requires a reason)")
+            sub.add_argument("--coordinator-override-reason",
+                             help="required reason recorded with every coordinator disposition override")
         if name in ("run", "add"):
             sub.add_argument("--manifest", required=True)
             sub.add_argument("--policy", required=True)
             sub.add_argument("--preview", action="store_true", help="offline validation; no writes or host calls")
     return result
+
+
+def parse_finish_overrides(values, reason):
+    values = values or []
+    if bool(values) != (reason is not None):
+        raise JobError("invalid_input", "coordinator disposition overrides require --coordinator-override-reason, and a reason requires at least one override")
+    overrides = {}
+    for value in values:
+        job_id, separator, disposition = value.partition("=")
+        if (not separator or not job_id.strip() or not disposition.strip() or "=" in disposition
+                or disposition.strip() not in WORKER_DISPOSITIONS):
+            raise JobError("invalid_input", "coordinator disposition override must be JOB_ID=completed|blocked|failed")
+        job_id = job_id.strip()
+        if job_id in overrides:
+            raise JobError("invalid_input", f"duplicate coordinator disposition override for {job_id}")
+        overrides[job_id] = disposition.strip()
+    if reason is not None:
+        reason = reason.strip()
+        if not reason or len(reason) > 10000:
+            raise JobError("invalid_input", "coordinator override reason must contain 1 to 10000 characters")
+    return overrides, reason
+
+
+def finish_message(finish):
+    validations = finish["jobs"]
+    validated = [job_id for job_id, item in validations.items()
+                 if item["worker_result_validation"] == "validated"]
+    legacy = [job_id for job_id, item in validations.items()
+              if item["worker_result_validation"] == "not_requested"]
+    dispositions = []
+    for job_id in validated:
+        item = validations[job_id]
+        detail = f"{job_id}: worker outcome {item['worker_result_outcome']} -> disposition {item['worker_disposition']}"
+        if item.get("coordinator_override_reason"):
+            detail += f" by coordinator override ({item['coordinator_override_reason']})"
+        dispositions.append(detail)
+    closed = [job_id for job_id, item in validations.items() if item["workspace_closed"]]
+    parts = []
+    if validated:
+        parts.append(
+            "Validated each worker result.json schema and assigned task/revision (including the repository candidate "
+            "when required), and verified its receipt listed result.json and every declared artifact file for: "
+            + ", ".join(validated) + "."
+        )
+        parts.append("Recorded dispositions: " + "; ".join(dispositions) + ".")
+    if legacy:
+        parts.append("Worker result validation was not requested for legacy receipt-only job(s): " + ", ".join(legacy) + ".")
+    if closed:
+        parts.append("Closed workspaces for: " + ", ".join(closed) + ".")
+    parts.append("Acceptance remains pending; review the collected artifacts and outcomes.")
+    return " ".join(parts)
 
 
 def main(argv=None, transport_factory=NativeTransport):
@@ -40,6 +97,10 @@ def main(argv=None, transport_factory=NativeTransport):
         args = parser().parse_args(argv)
         if not 0 <= args.wait_seconds <= 60:
             raise JobError("invalid_input", "wait-seconds must be finite and between 0 and 60")
+        disposition_overrides, override_reason = ({}, None)
+        if args.operation == "finish":
+            disposition_overrides, override_reason = parse_finish_overrides(
+                args.coordinator_disposition_override, args.coordinator_override_reason)
         root = Path(args.run_dir).absolute()
         request = prepare(args.manifest, args.policy) if args.operation in ("run", "add") else None
         if args.operation == "add" and len(request["jobs"]) != 1:
@@ -79,6 +140,11 @@ def main(argv=None, transport_factory=NativeTransport):
                     if args.operation == "add":
                         next_argv += ["--manifest", str(Path(args.manifest).absolute()),
                                       "--policy", str(Path(args.policy).absolute())]
+                    if args.operation == "finish":
+                        for item in args.coordinator_disposition_override or []:
+                            next_argv += ["--coordinator-disposition-override", item]
+                        if override_reason is not None:
+                            next_argv += ["--coordinator-override-reason", override_reason]
                 else:
                     result = {"schema_version": 1, "request_id": request["request_id"], "run_dir": str(root),
                               "batch_state": "checkpointed", "run_created": False, "collection_complete": False,
@@ -106,7 +172,7 @@ def main(argv=None, transport_factory=NativeTransport):
                     engine.append_jobs(request, capabilities)
             engine.drive(status_only=args.operation in ("status", "finish"))
             if args.operation == "finish":
-                finish = engine.finish()
+                finish = engine.finish(disposition_overrides, override_reason)
             result = engine.result()
             if args.operation == "finish":
                 result["finish"] = finish
@@ -114,13 +180,7 @@ def main(argv=None, transport_factory=NativeTransport):
                 if not finish["complete"]:
                     result["batch_state"] = "partial"
             if args.operation == "finish" and finish["complete"]:
-                legacy_jobs = [job_id for job_id, outcome in finish["jobs"].items()
-                               if outcome["worker_result_validation"] == "not_requested"]
-                message = ("All settled job workspaces are closed. Worker result validation was not requested "
-                           f"for legacy receipt-only job(s): {', '.join(legacy_jobs)}." if legacy_jobs else
-                           "All settled jobs have validated worker records and their workspaces are closed.")
-                result["next_action"] = {"kind": "accept", "argv": None,
-                                          "message": message}
+                result["next_action"] = {"kind": "review", "argv": None, "message": finish_message(finish)}
             elif result["batch_state"] == "collected":
                 result["next_action"] = {"kind": "review", "argv": None, "message": "Assess collected artifacts against the task."}
             else:

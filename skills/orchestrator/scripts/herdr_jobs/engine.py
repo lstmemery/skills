@@ -17,6 +17,7 @@ from .worker_records import (DispositionInput, WorkerIdentity, record_dispositio
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted"}
+WORKER_DISPOSITIONS = {"completed", "blocked", "failed"}
 
 
 class Engine:
@@ -173,7 +174,7 @@ class Engine:
                          "collection_error", "host_output", "worker_output", "issue", "exit_record"],
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
-                    "worker_disposition", "admission_wait"],
+                    "worker_disposition", "worker_disposition_override", "admission_wait"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -192,6 +193,7 @@ class Engine:
             job.setdefault("workspace_id", None)
             job.setdefault("workspace_closed", False)
             job.setdefault("worker_disposition", None)
+            job.setdefault("worker_disposition_override", None)
             job.setdefault("admission_wait", None)
             if type(job["admission_acquired"]) is not bool or type(job["rate_limit_seen"]) is not bool:
                 raise JobError("conflict", "stored admission flags must be booleans")
@@ -199,9 +201,14 @@ class Engine:
                 raise JobError("conflict", "stored workspace_closed must be a boolean")
             if job["workspace_id"] is not None:
                 text(job["workspace_id"], "stored workspace_id", 512)
-            if job["worker_disposition"] is not None and job["worker_disposition"] not in (
-                    "completed", "blocked", "failed"):
+            if job["worker_disposition"] is not None and job["worker_disposition"] not in WORKER_DISPOSITIONS:
                 raise JobError("conflict", "stored worker disposition is invalid")
+            if job["worker_disposition_override"] is not None:
+                override = fields(job["worker_disposition_override"], ["disposition", "reason"],
+                                  label="stored worker disposition override")
+                if override["disposition"] not in WORKER_DISPOSITIONS:
+                    raise JobError("conflict", "stored worker disposition override is invalid")
+                text(override["reason"], "stored worker disposition override reason", 10000)
             if job["admission_wait"] is not None:
                 wait = fields(job["admission_wait"], ["reason", "provider", "provider_active", "cap", "retry_at"],
                               label="admission wait")
@@ -327,6 +334,7 @@ class Engine:
                 "retry_override": retry_override, "retry_profile": retry_profile,
                 "phase": "pending", "pane_id": None, "previous_pane_ids": [], "workspace_id": None,
                 "workspace_closed": False, "worker_disposition": None,
+                "worker_disposition_override": None,
                 "admission_wait": None,
                 "pending_effect": None, "history": [], "observed": None,
                 "activity_seen": False, "settled": False, "collection": None,
@@ -552,8 +560,27 @@ class Engine:
         except (JobError, OSError, UnicodeError) as error:
             job["collection_error"] = str(error)
 
-    def finish(self):
+    def finish(self, disposition_overrides=None, override_reason=None):
         """Record worker dispositions and close only settled, collected jobs."""
+        disposition_overrides = disposition_overrides or {}
+        if not isinstance(disposition_overrides, dict):
+            raise JobError("invalid_input", "coordinator disposition overrides must be an object")
+        if bool(disposition_overrides) != (override_reason is not None):
+            raise JobError("invalid_input", "coordinator disposition overrides require a reason, and a reason requires an override")
+        if override_reason is not None:
+            override_reason = text(override_reason, "coordinator override reason", 10000)
+            if not override_reason.strip():
+                raise JobError("invalid_input", "coordinator override reason must not be blank")
+        worker_job_ids = {job["spec"]["job_id"] for job in self.state["jobs"]
+                          if job["spec"].get("worker_result")}
+        unknown_overrides = set(disposition_overrides) - worker_job_ids
+        if unknown_overrides:
+            raise JobError("invalid_input", "coordinator disposition override references job(s) without a worker result: "
+                           + ", ".join(sorted(unknown_overrides)))
+        for job_id, disposition in disposition_overrides.items():
+            text(job_id, "coordinator override job_id", 100)
+            if disposition not in WORKER_DISPOSITIONS:
+                raise JobError("invalid_input", "coordinator disposition override must be completed, blocked, or failed")
         outcomes = {}
         for job in self.state["jobs"]:
             job_id = job["spec"]["job_id"]
@@ -575,21 +602,41 @@ class Engine:
                         raise JobError("invalid_input", "receipt did not collect result.json and every result artifact")
                     for relative in required_sources:
                         bounded_file(job["host_output"], relative)
+                    contract_disposition = {"ready": "completed", "blocked": "blocked",
+                                            "failed": "failed"}[result["outcome"]]
+                    requested_override = disposition_overrides.get(job_id)
+                    stored_override = job.get("worker_disposition_override")
+                    if requested_override is not None:
+                        requested_record = {"disposition": requested_override, "reason": override_reason}
+                        if stored_override is not None and stored_override != requested_record:
+                            raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
+                        if stored_override is None:
+                            job["worker_disposition_override"] = requested_record
+                            stored_override = requested_record
+                            self.checkpoint()
+                    effective_override = stored_override
+                    worker_disposition = (effective_override["disposition"] if effective_override
+                                          else contract_disposition)
+                    result_hash = digest(read_regular(result_path))
+                    evidence = (f"Managed job {job_id} settled in pane {job['pane_id']}; "
+                                f"result.json SHA-256 {result_hash}.")
+                    if effective_override:
+                        evidence += (" Coordinator override recorded via --coordinator-disposition-override: "
+                                    f"worker outcome {result['outcome']} maps to {contract_disposition}; "
+                                    f"coordinator disposition is {worker_disposition}. "
+                                    f"Reason: {effective_override['reason']}")
                     disposition = {"task_id": worker["task_id"],
                                    "assignment_revision": worker["assignment_revision"],
-                                   "disposition": {"ready": "completed", "blocked": "blocked",
-                                                   "failed": "failed"}[result["outcome"]],
-                                   "summary": result["summary"]}
+                                   "disposition": worker_disposition,
+                                   "summary": result["summary"], "evidence": evidence}
                     disposition_path = Path(job["host_output"]) / "disposition.json"
                     if disposition_path.exists():
                         previous = load_json(disposition_path)
                         fields(previous, ["task_id", "assignment_revision", "disposition", "summary", "evidence"],
                                label="disposition.json")
-                        if any(previous[key] != value for key, value in disposition.items()):
+                        if previous != disposition:
                             raise JobError("conflict", "existing disposition differs from the collected worker result")
                     else:
-                        evidence = (f"Managed job {job_id} settled in pane {job['pane_id']}; "
-                                    f"result.json SHA-256 {digest(read_regular(result_path))}.")
                         record_disposition(Path(job["host_output"]), DispositionInput(
                             identity=identity, disposition=disposition["disposition"],
                             summary=result["summary"], evidence=evidence))
@@ -644,6 +691,10 @@ class Engine:
             outcomes[job_id] = {"finished": True, "workspace_closed": True,
                                 "worker_disposition": job.get("worker_disposition"),
                                 "worker_result_validation": validation}
+            if worker:
+                outcomes[job_id]["worker_result_outcome"] = result["outcome"]
+                if job.get("worker_disposition_override") is not None:
+                    outcomes[job_id]["coordinator_override_reason"] = job["worker_disposition_override"]["reason"]
         return {"jobs": outcomes, "complete": all(item["finished"] for item in outcomes.values())}
 
     def ensure_snapshot(self, path, expected):

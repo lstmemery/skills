@@ -229,11 +229,84 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["finish_complete"]), (0, True))
         self.assertEqual(result["jobs"][0]["worker_disposition"], "completed")
         self.assertTrue(result["jobs"][0]["workspace_closed"])
+        self.assertEqual(result["finish"]["jobs"]["job0"]["worker_result_outcome"], "ready")
         output = Path(self.state()["jobs"][0]["host_output"])
         disposition = json.loads((output / "disposition.json").read_text())
         self.assertEqual((disposition["task_id"], disposition["assignment_revision"],
                           disposition["disposition"]), ("task-finish", 2, "completed"))
         self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
+        self.assertEqual(result["next_action"]["kind"], "review")
+        self.assertIn("Validated each worker result.json schema", result["next_action"]["message"])
+        self.assertNotIn("accept the work", result["next_action"]["message"].lower())
+
+    def prepare_worker_outcome(self, outcome):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "task-finish", "assignment_revision": 2}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(worker_results={"job0": {"outcome": outcome,
+                                                  "summary": f"Fixture worker {outcome}.",
+                                                  "unresolved": [] if outcome == "ready" else [f"Fixture {outcome} detail."]}})
+        return self.call()
+
+    def test_finish_preserves_blocked_worker_result_disposition_and_requests_review(self):
+        self.prepare_worker_outcome("blocked")
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["batch_state"], result["finish_complete"]), (10, "partial", True))
+        self.assertEqual(result["jobs"][0]["worker_disposition"], "blocked")
+        self.assertEqual(result["next_action"]["kind"], "review")
+        self.assertIn("blocked", result["next_action"]["message"])
+        self.assertNotEqual(result["next_action"]["kind"], "accept")
+        output = Path(self.state()["jobs"][0]["host_output"])
+        disposition = json.loads((output / "disposition.json").read_text())
+        self.assertEqual(disposition["disposition"], "blocked")
+
+    def test_finish_preserves_failed_worker_result_disposition_and_requests_review(self):
+        self.prepare_worker_outcome("failed")
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["batch_state"], result["finish_complete"]), (10, "partial", True))
+        self.assertEqual(result["jobs"][0]["worker_disposition"], "failed")
+        self.assertEqual(result["next_action"]["kind"], "review")
+        self.assertIn("failed", result["next_action"]["message"])
+        self.assertNotEqual(result["next_action"]["kind"], "accept")
+        output = Path(self.state()["jobs"][0]["host_output"])
+        disposition = json.loads((output / "disposition.json").read_text())
+        self.assertEqual(disposition["disposition"], "failed")
+
+    def test_finish_requires_named_reason_for_explicit_disposition_override(self):
+        self.prepare_worker_outcome("blocked")
+        reason = "Coordinator reviewed the result and approved completion despite the reported blocker."
+
+        missing_reason_code, missing_reason = self.call(
+            "finish", coordinator_disposition_override="job0=completed")
+
+        self.assertEqual((missing_reason_code, missing_reason["error"]), (2, "invalid_input"))
+        self.assertIn("require --coordinator-override-reason", missing_reason["message"])
+
+        code, result = self.call("finish", coordinator_disposition_override="job0=completed",
+                                 coordinator_override_reason=reason)
+
+        self.assertEqual((code, result["batch_state"], result["finish_complete"]), (10, "partial", True))
+        self.assertEqual(result["jobs"][0]["worker_disposition"], "completed")
+        self.assertEqual(result["next_action"]["kind"], "review")
+        self.assertIn("blocked", result["next_action"]["message"])
+        self.assertIn("completed", result["next_action"]["message"])
+        output = Path(self.state()["jobs"][0]["host_output"])
+        disposition = json.loads((output / "disposition.json").read_text())
+        self.assertEqual(disposition["disposition"], "completed")
+        self.assertIn(reason, disposition["evidence"])
+        self.assertIn("blocked -> disposition completed", result["next_action"]["message"])
+        self.assertIn(reason, result["next_action"]["message"])
+
+        repeat_code, repeat_result = self.call("finish")
+
+        self.assertEqual((repeat_code, repeat_result["finish_complete"]), (10, True))
+        self.assertEqual(repeat_result["jobs"][0]["worker_disposition"], "completed")
+        repeated = json.loads((output / "disposition.json").read_text())
+        self.assertEqual(repeated, disposition)
 
     def test_finish_reconciles_workspace_closed_before_checkpoint_after_crash(self):
         self.call()

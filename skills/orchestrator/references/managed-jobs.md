@@ -21,6 +21,25 @@ python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 30
 python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR --wait-seconds 30
 ```
 
+`finish` maps worker outcomes to coordinator dispositions using the worker
+contract: `ready` → `completed`, `blocked` → `blocked`, and `failed` →
+`failed`. It validates result records, confirms each receipt lists `result.json`
+and every declared artifact file, records dispositions, releases leases, and
+closes settled workspaces. A successful cleanup returns `next_action.kind`
+`review`; it does not accept the work, and `acceptance` remains pending.
+
+The coordinator can explicitly change a worker disposition for a specific job
+with the repeatable `--coordinator-disposition-override JOB_ID=DISPOSITION`
+flag and a non-empty `--coordinator-override-reason`. The reason is recorded in
+the run checkpoint and disposition evidence. A saved override remains in force
+for later `finish` retries.
+
+```sh
+python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR \
+  --coordinator-disposition-override job-1=completed \
+  --coordinator-override-reason "Reviewed the blocker and approved completion."
+```
+
 An added manifest must use the existing `request_id`, pinned policy, and run
 concurrency, and contain one unique `job_id`. Additions append to `state.json`;
 they do not replace earlier attempts, receipts, or collections. Use the same

@@ -39,13 +39,17 @@ class FakeHost:
         output.mkdir(parents=True, exist_ok=True)
         worker = job["spec"].get("worker_result")
         if worker:
+            worker_fixture = self.fixture.get("worker_results", {}).get(job["spec"]["job_id"], {})
+            worker_outcome = worker_fixture.get("outcome", "ready")
             (output / "worker-report.md").write_text("Independent fixture result.\n")
             result = {"task_id": worker["task_id"],
                       "assignment_revision": worker["assignment_revision"],
-                      "outcome": "ready", "summary": "Fixture worker completed.",
+                      "outcome": worker_outcome,
+                      "summary": worker_fixture.get("summary", "Fixture worker completed."),
                       "artifacts": [{"path": "worker-report.md", "kind": "report"}],
                       "checks": [{"name": "fixture", "status": "passed", "evidence": "fixture"}],
-                      "unresolved": [], "next_action": "Review the fixture result."}
+                      "unresolved": worker_fixture.get("unresolved", []),
+                      "next_action": "Review the fixture result."}
             if job["spec"]["writes_repository"]:
                 result["candidate"] = {"repo": "fixture/repo", "branch": "fixture-branch",
                                         "base": "a" * 40, "head": "b" * 40}
@@ -57,6 +61,10 @@ class FakeHost:
         receipt = {"schema_version": 1, "request_id": self.fixture["request_id"],
                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
                    "outcome": "complete", "artifacts": artifact_paths, "unresolved": []}
+        if worker:
+            receipt["outcome"] = {"ready": "complete", "blocked": "blocked",
+                                  "failed": "failed"}[worker_outcome]
+            receipt["unresolved"] = worker_fixture.get("unresolved", [])
         if not worker and self.fixture.get("legacy_receipt_fixture"):
             receipt = load_json(self.fixture["legacy_receipt_fixture"])
             receipt.update({"request_id": self.fixture["request_id"],
