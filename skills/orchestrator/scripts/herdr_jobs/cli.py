@@ -25,7 +25,7 @@ def parser():
     for name in ("run", "add", "resume", "status", "finish"):
         sub = commands.add_parser(name)
         sub.add_argument("--run-dir", required=True)
-        sub.add_argument("--host-contract", help="verified host CLI and jail export binding")
+        sub.add_argument("--host-contract", help="verified Herdr endpoint, CLI contract, and optional jail export binding")
         sub.add_argument("--wait-seconds", type=float, default=30)
         if name == "finish":
             sub.add_argument("--coordinator-disposition-override", action="append", metavar="JOB_ID=DISPOSITION",

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
+HERDR_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "herdr"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.records import JobError, digest, load_json, prepare, save
@@ -37,11 +38,12 @@ class FakeHerdr:
         if argv[:3] == ["herdr", "agent", "get"]:
             if self.state is None:
                 return 1, b'{"error":{"code":"agent_not_found","message":"not detected yet"}}', b""
-            agent = {"state": self.state, "pane": "moved:1", "kind": "codex", "name": "c9-fixture"}
-            return 0, json.dumps(agent).encode(), b""
+            agent = {"agent_status": self.state, "pane_id": "moved:1",
+                     "agent": "codex", "name": "c9-fixture"}
+            return 0, json.dumps({"result": {"type": "agent_info", "agent": agent}}).encode(), b""
         if argv[:3] == ["herdr", "pane", "read"]:
             output = self.retry_output if self.retry_output is not None else self.output
-            return 0, json.dumps({"result": {"output": output}}).encode(), b""
+            return 0, output.encode(), b""
         if argv[:3] == ["herdr", "pane", "run"]:
             shell_command = argv[4]
             if shell_command.startswith("export "):
@@ -70,14 +72,18 @@ class TransportTest(unittest.TestCase):
                                 "herdr_agent_help_sha256": digest(b"herdr agent help"),
                                 "herdr_pane_help_sha256": digest(b"herdr pane help"),
                                 "orchestrator_help_sha256": digest(b"orchestrator help"),
-                                "supported_kinds": ["codex", "omp"], "server_version": "fixture-v1",
-                                "paths": {"session_id": ["session"], "server_version": ["version"],
-                                          "agent_state": ["state"], "agent_pane_id": ["pane"],
-                                          "agent_kind": ["kind"], "agent_name": ["name"]},
+                                "supported_kinds": ["codex", "omp"], "server_version": "0.9.3",
+                                "paths": {"session_id": ["server", "socket"],
+                                          "server_version": ["server", "version"],
+                                          "agent_state": ["result", "agent", "agent_status"],
+                                          "agent_pane_id": ["result", "agent", "pane_id"],
+                                          "agent_kind": ["result", "agent", "agent"],
+                                          "agent_name": ["result", "agent", "name"]},
                                 "jail_export": None}
         self.calls = []
         self.available = ["codex", "omp"]
-        self.agent = {"state": "done", "pane": "moved:1", "kind": "codex", "name": "c9-fixture"}
+        self.agent = dict(load_json(HERDR_FIXTURES / "agent-get.json")["result"]["agent"])
+        self.agent.update(agent_status="done", pane_id="moved:1", agent="codex", name="c9-fixture")
         self.catalog = {"models": [{"id": "native-id", "displayName": "Human label"}]}
         self.pane_output = "Working"
         self.adapter.raw = self.raw
@@ -92,26 +98,26 @@ class TransportTest(unittest.TestCase):
         self.calls.append(argv)
         if argv == ["herdr", "--help"]:
             return b"herdr help"
-        if argv == ["herdr", "agent"]:
+        if argv in (["herdr", "agent", "--help"], ["herdr", "agent"]):
             return b"herdr agent help"
-        if argv == ["herdr", "pane"]:
+        if argv in (["herdr", "pane", "--help"], ["herdr", "pane"]):
             return b"herdr pane help"
         if argv[:2] == ["orchestrator", "help"]:
             return b"orchestrator help"
-        if argv == ["herdr", "status"]:
-            return b'{"session":"fixture-server-session","version":"fixture-v1"}'
+        if argv[:2] == ["herdr", "status"]:
+            return json.dumps(load_json(HERDR_FIXTURES / "status.json")).encode()
         if argv[:2] == ["orchestrator", "doctor"]:
             return json.dumps({"runtimeSummary": {"availableIds": self.available}}).encode()
         if argv[:2] == ["orchestrator", "models"]:
             return json.dumps(self.catalog).encode()
         if argv[:3] == ["herdr", "agent", "get"]:
-            return json.dumps(self.agent).encode()
+            return json.dumps({"result": {"type": "agent_info", "agent": self.agent}}).encode()
         if argv[:3] == ["herdr", "pane", "read"]:
-            return json.dumps({"result": {"output": self.pane_output}}).encode()
+            return self.pane_output.encode()
         if argv[:3] == ["herdr", "pane", "split"]:
             return b'{"result":{"pane":{"pane_id":"old:1"}}}'
         if argv[:3] == ["herdr", "pane", "move"]:
-            return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"},"workspace":{"workspace_id":"workspace:1"}}}}'
+            return b'{"result":{"move_result":{"pane":{"pane_id":"moved:1"},"created_workspace":{"workspace_id":"workspace:1"}}}}'
         return b'{"result":{}}'
 
     def prepared_jail_spec(self, task_class):
@@ -162,6 +168,65 @@ class TransportTest(unittest.TestCase):
             self.adapter.preflight({"jobs": [self.spec]})
         self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in self.calls))
 
+    def test_preflight_uses_installed_help_flags_json_status_and_endpoint_identity(self):
+        status = load_json(HERDR_FIXTURES / "status.json")
+        self.adapter.binding["paths"].update(
+            session_id=["server", "socket"], server_version=["server", "version"])
+        self.adapter.binding["server_version"] = status["server"]["version"]
+
+        def fixture_raw(argv):
+            self.calls.append(argv)
+            if argv == ["herdr", "--help"]:
+                return b"herdr help"
+            if argv in (["herdr", "agent", "--help"], ["herdr", "agent"]):
+                return b"herdr agent help"
+            if argv in (["herdr", "pane", "--help"], ["herdr", "pane"]):
+                return b"herdr pane help"
+            if argv[:2] == ["orchestrator", "help"]:
+                return b"orchestrator help"
+            if argv[:2] == ["herdr", "status"]:
+                return json.dumps(status).encode()
+            if argv[:2] == ["orchestrator", "doctor"]:
+                return json.dumps({"runtimeSummary": {"availableIds": self.available}}).encode()
+            return b"{}"
+
+        self.adapter.raw = fixture_raw
+
+        result = self.adapter.preflight({"jobs": [self.spec]})
+
+        self.assertEqual(result["session_id"], "<redacted>")
+        self.assertIn(["herdr", "agent", "--help"], self.calls)
+        self.assertIn(["herdr", "pane", "--help"], self.calls)
+        self.assertIn(["herdr", "status", "--json"], self.calls)
+
+    def test_observation_reads_raw_pane_text_and_installed_agent_info_envelope(self):
+        response = load_json(HERDR_FIXTURES / "agent-get.json")
+        response["result"]["agent"].update(
+            agent="codex", agent_status="working", pane_id=self.job["pane_id"],
+            name=self.job["agent_name"])
+        paths = self.adapter.binding["paths"]
+        paths.update(agent_state=["result", "agent", "agent_status"],
+                     agent_pane_id=["result", "agent", "pane_id"],
+                     agent_kind=["result", "agent", "agent"],
+                     agent_name=["result", "agent", "name"])
+        self.job["phase"] = "submitted"
+
+        def fixture_raw(argv):
+            self.calls.append(argv)
+            if argv[:3] == ["herdr", "pane", "read"]:
+                return b"Working"
+            if argv[:3] == ["herdr", "agent", "get"]:
+                return json.dumps(response).encode()
+            return b"{}"
+
+        self.adapter.raw = fixture_raw
+
+        observed = self.adapter.observe(self.job)
+
+        self.assertEqual(observed["state"], "working")
+        self.assertTrue(observed["identity_verified"])
+        self.assertTrue(observed["prompt_verified"])
+
     def test_status_does_not_rediscover_finished_workers_runtime_or_model(self):
         self.available = []
         self.spec["model"] = "formerly valid alias"
@@ -172,7 +237,7 @@ class TransportTest(unittest.TestCase):
 
     def test_pi_observation_exposes_retry_after_for_provider_rate_limit(self):
         self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
-        self.agent.update(state="done", kind="pi")
+        self.agent.update(agent_status="done", agent="pi")
         self.job.update(provider="codex", admission_model="gpt-6-luna")
         self.pane_output = 'Error: 429: {"code":"1302","message":"Rate limit reached"}\nRetry-After: 12'
 
@@ -184,7 +249,7 @@ class TransportTest(unittest.TestCase):
 
     def test_transcript_mentions_of_rate_limit_are_not_provider_errors(self):
         self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
-        self.agent.update(state="done", kind="pi")
+        self.agent.update(agent_status="done", agent="pi")
         self.pane_output = "The report discusses HTTP 429 and rate limit backoff."
 
         observation = self.adapter.observe(self.job)
@@ -277,7 +342,7 @@ class TransportTest(unittest.TestCase):
 
     def test_non_codex_startup_dialog_is_reported_as_blocked(self):
         self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
-        self.agent.update(state="working", kind="pi")
+        self.agent.update(agent_status="working", agent="pi")
         self.pane_output = "Trust and continue to access this project"
 
         observation = self.adapter.observe(self.job)
@@ -306,9 +371,9 @@ class TransportTest(unittest.TestCase):
 
         def workspace_list(argv):
             calls.append(argv)
-            return json.dumps({"result": {"type": "workspace_list", "workspaces": [
-                {"workspace_id": "workspace:other"}, {"workspace_id": "workspace:1"}
-            ]}}).encode()
+            response = load_json(HERDR_FIXTURES / "workspace-list.json")
+            response["result"]["workspaces"][0]["workspace_id"] = "workspace:1"
+            return json.dumps(response).encode()
 
         self.adapter.raw = workspace_list
 
@@ -453,7 +518,7 @@ class TransportTest(unittest.TestCase):
     def test_echoed_prompt_working_text_does_not_prove_an_active_turn(self):
         self.spec["task"] = "Print this word on its own line:\nWorking"
         self.job["phase"] = "submitted"
-        self.agent["state"] = "working"
+        self.agent["agent_status"] = "working"
         self.pane_output = self.spec["task"]
 
         observation = self.adapter.observe(self.job)
@@ -463,7 +528,7 @@ class TransportTest(unittest.TestCase):
 
     def test_unrelated_working_prose_does_not_prove_an_active_turn(self):
         self.job["phase"] = "submitted"
-        self.agent["state"] = "working"
+        self.agent["agent_status"] = "working"
         self.pane_output = "The report says the workflow is working as intended."
 
         observation = self.adapter.observe(self.job)
@@ -472,7 +537,7 @@ class TransportTest(unittest.TestCase):
 
     def test_active_turn_status_line_after_unrelated_prose_proves_prompt_landing(self):
         self.job["phase"] = "submitted"
-        self.agent["state"] = "working"
+        self.agent["agent_status"] = "working"
         self.pane_output = "The report says the workflow is working as intended.\n✳ Working…"
 
         observation = self.adapter.observe(self.job)
@@ -482,7 +547,7 @@ class TransportTest(unittest.TestCase):
     def test_active_status_after_an_echoed_working_prompt_proves_prompt_landing(self):
         self.spec["task"] = "Print this word on its own line:\nWorking"
         self.job["phase"] = "submitted"
-        self.agent["state"] = "working"
+        self.agent["agent_status"] = "working"
         self.pane_output = self.spec["task"] + "\n✳ Working…"
 
         observation = self.adapter.observe(self.job)
@@ -492,7 +557,7 @@ class TransportTest(unittest.TestCase):
     def test_echoed_authentication_phrase_does_not_block_a_working_worker(self):
         self.spec["task"] = "Explain the phrase authentication required in the log."
         self.job["phase"] = "submitted"
-        self.agent["state"] = "working"
+        self.agent["agent_status"] = "working"
         self.pane_output = self.spec["task"]
 
         observation = self.adapter.observe(self.job)
