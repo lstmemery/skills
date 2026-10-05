@@ -253,6 +253,53 @@ Label the coordinator `Orchestrator` where the backend supports naming, using
 a unique legal agent name. Preserve existing names owned by others. Names are
 presentation; actual IDs and recorded ownership determine control.
 
+## Durable overnight watch
+
+When a coordinator session may end before workers finish, arm one finite
+systemd user timer for the run directory. It reconciles the listed task
+directories every 30 seconds, records each newly observed `result.json` once
+in `flags/events.jsonl`, and stops itself after every listed task has a
+`disposition.json`. It survives the shell that armed it; it still requires the
+user's systemd manager to remain running. If `NTFY_URL` or
+`ORCH_WATCH_NTFY_URL` is set while arming, the URL is saved in a mode-600 file
+under `.durable-watch/`; the transient unit receives only the run directory.
+The transient service starts Python through `/usr/bin/env -i`, passing only a
+fixed system `PATH`, the account `HOME`, `LANG=C.UTF-8`, and `XDG_RUNTIME_DIR`.
+This clears the systemd user manager's inherited environment before the watcher
+starts. Reconcile reads the URL and token only from their private files (the
+config stores the URL hash and file paths, not their values), using the same
+private token file as the shared `claude-settings/ntfy/publisher.sh` sender.
+The configured `NTFY_TOKEN_FILE` path is retained as given and checked for
+symlinks when arming and before each read. Watch configurations created before
+this path policy must be disarmed and armed again before notifications resume.
+The route must use HTTPS, except that HTTP is accepted for `localhost` and
+loopback IP addresses. Do not use plain HTTP for a LAN ntfy server: the bearer
+token would be visible to network observers. Authenticated sends never follow
+redirects; a 3xx response is reported as a delivery failure while the event is
+still recorded. Notifications are best-effort; the event file is the durable
+record. `disarm` stops the units and clears the stored watch config and URL so
+changed settings can be armed again.
+
+```sh
+RUN_DIR=/absolute/path/to/run
+python3 -B skills/orchestrator/scripts/durable_watch.py arm "$RUN_DIR" task-1 task-2 --interval-seconds 30
+python3 -B skills/orchestrator/scripts/durable_watch.py status "$RUN_DIR"
+systemctl --user list-units 'orch-watch*'
+python3 -B skills/orchestrator/scripts/durable_watch.py disarm "$RUN_DIR"
+```
+
+Pass task directory names relative to the run directory. Repeating `arm` with
+the same configuration is safe and reuses the existing timer. `status` reports
+the exact timer and each task's result/disposition presence. `disarm` stops the
+timer and its active reconcile service, then removes its config; normal
+completion disarms the timer automatically but leaves the config until an
+explicit `disarm`. After upgrading from a version that did not use the
+allowlisted launcher, disarm and re-arm an existing watch so its transient
+service is recreated with the isolated command. Set `ORCH_WATCH_NTFY_URL` or
+`NTFY_URL` in the environment for `arm` when notification routing differs from
+the shared publisher's default. The URL is never passed as a command-line
+argument or copied into the transient unit environment.
+
 ## CLI launch and observation
 
 ```sh
