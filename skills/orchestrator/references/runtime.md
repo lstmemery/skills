@@ -263,6 +263,9 @@ This clears the systemd user manager's inherited environment before the watcher
 starts. Reconcile reads the URL and token only from their private files (the
 config stores the URL hash and file paths, not their values), using the same
 private token file as the shared `claude-settings/ntfy/publisher.sh` sender.
+The configured `NTFY_TOKEN_FILE` path is retained as given and checked for
+symlinks when arming and before each read. Watch configurations created before
+this path policy must be disarmed and armed again before notifications resume.
 The route must use HTTPS, except that HTTP is accepted for `localhost` and
 loopback IP addresses. Do not use plain HTTP for a LAN ntfy server: the bearer
 token would be visible to network observers. Authenticated sends never follow

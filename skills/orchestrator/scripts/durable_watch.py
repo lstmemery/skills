@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import re
 import stat
 import subprocess
 import sys
@@ -111,8 +110,42 @@ def write_private_text(path: Path, value: str) -> None:
     write_private_atomic(path, serialize)
 
 
+def expand_private_path(path: Path, label: str) -> Path:
+    try:
+        return Path(path).expanduser()
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise WatchError(f"{label} is unavailable") from error
+
+
+def private_path_without_symlinks(path: Path, label: str) -> Path:
+    """Expand a private-file path and reject symlinks in every existing component."""
+    try:
+        path = expand_private_path(path, label)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        current = Path(path.anchor)
+        for component in path.parts[1:]:
+            if component == "..":
+                current = current.parent
+                continue
+            current /= component
+            try:
+                details = current.lstat()
+            except FileNotFoundError:
+                # The eventual open will report a missing component safely.
+                break
+            if stat.S_ISLNK(details.st_mode):
+                raise WatchError(f"{label} must not use a symbolic link")
+    except WatchError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise WatchError(f"{label} is unavailable") from error
+    return path
+
+
 def read_private_text(path: Path, label: str) -> str:
     """Read a regular file only when it is mode-600 and owned by the current user."""
+    path = private_path_without_symlinks(path, label)
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as error:
@@ -185,50 +218,56 @@ def publish(event: dict, config: dict) -> None:
         url = read_private_text(Path(config["ntfy_url_file"]), "ntfy route")
         if hashlib.sha256(url.encode()).hexdigest() != config.get("ntfy_url_sha256"):
             raise WatchError("ntfy route does not match the stored watch config")
-        token = read_private_text(Path(config["ntfy_token_file"]), "ntfy token")
+        if config.get("ntfy_token_path_checked") is not True:
+            raise WatchError("ntfy token path must be re-armed")
+        token_path = Path(config["ntfy_token_file"])
+        token_base = config.get("ntfy_token_file_base")
+        if token_base and not token_path.expanduser().is_absolute():
+            token_path = Path(token_base) / token_path
+        token = read_private_text(token_path, "ntfy token")
     except WatchError as error:
         print(f"durable-watch: {error}; event is recorded", file=sys.stderr)
         return
-    except (KeyError, OSError, UnicodeError):
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         print("durable-watch: ntfy route unavailable; event is recorded", file=sys.stderr)
         return
-    payload = f"{event['task_dir']} wrote result.json in {event['run_dir']}"
-    request = urllib.request.Request(
-        url,
-        data=payload.encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Title": config.get("notification_title", "Orchestrator worker result"),
-            "Priority": "3",
-            "Content-Type": "text/plain; charset=utf-8",
-        },
-        method="POST",
-    )
     try:
+        payload = f"{event['task_dir']} wrote result.json in {event['run_dir']}"
+        request = urllib.request.Request(
+            url,
+            data=payload.encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Title": config.get("notification_title", "Orchestrator worker result"),
+                "Priority": "3",
+                "Content-Type": "text/plain; charset=utf-8",
+            },
+            method="POST",
+        )
         opener = urllib.request.build_opener(NoRedirectHandler())
         with opener.open(request, timeout=45) as response:
             status = response.status
-            response_body = response.read(65536)
     except urllib.error.HTTPError as error:
-        status = error.code
-        response_body = error.read(65536)
-    except (OSError, TimeoutError, urllib.error.URLError):
+        try:
+            status = error.code
+        except Exception:
+            status = None
+        try:
+            error.close()
+        except Exception:
+            pass
+    except Exception:
         print("durable-watch: ntfy publish failed; event is recorded", file=sys.stderr)
         return
-    if 300 <= status < 400:
-        print(f"durable-watch: ntfy publish failed (HTTP {status}; redirect not followed); event is recorded", file=sys.stderr)
+    status_text = (
+        f"HTTP {status}"
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599
+        else "HTTP status unavailable"
+    )
+    if not isinstance(status, int) or isinstance(status, bool) or not 200 <= status < 300:
+        print(f"durable-watch: ntfy publish failed ({status_text}); event is recorded", file=sys.stderr)
         return
-    if not 200 <= status < 300:
-        print(f"durable-watch: ntfy publish failed (HTTP {status}); event is recorded", file=sys.stderr)
-        return
-    try:
-        message_id = json.loads(response_body.decode("utf-8")).get("id")
-    except (AttributeError, UnicodeError, json.JSONDecodeError):
-        message_id = None
-    if isinstance(message_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", message_id):
-        print(f"durable-watch: ntfy accepted (HTTP {status}; id={message_id})", file=sys.stderr)
-    else:
-        print(f"durable-watch: ntfy accepted (HTTP {status})", file=sys.stderr)
+    print(f"durable-watch: ntfy publish succeeded ({status_text}); event is recorded", file=sys.stderr)
 
 
 def reconcile_once(run_dir: Path) -> dict:
@@ -369,7 +408,17 @@ def command_arm(args: argparse.Namespace) -> int:
         Path.home() / "agents" / "claude-settings" / "ntfy" / "publisher.sh"
     )
     token_value = os.environ.get("NTFY_TOKEN_FILE")
-    token_file = Path(token_value).expanduser() if token_value else publisher.resolve().parents[2] / "keys" / "ntfy-machines-token"
+    token_file = Path(token_value) if token_value else publisher.resolve().parents[2] / "keys" / "ntfy-machines-token"
+    token_path_for_read = token_file
+    token_file_base = None
+    if url:
+        token_path_for_read = expand_private_path(token_file, "ntfy token")
+        if token_value and not token_path_for_read.is_absolute():
+            token_file_base = str(Path.cwd())
+        configured_path = token_path_for_read
+        if token_file_base:
+            configured_path = Path(token_file_base) / token_file
+        private_path_without_symlinks(configured_path, "ntfy token")
     config = {
         "schema_version": VERSION,
         "tasks": tasks,
@@ -377,9 +426,12 @@ def command_arm(args: argparse.Namespace) -> int:
         "notify": url is not None,
         "ntfy_url_sha256": hashlib.sha256(url.encode()).hexdigest() if url else None,
         "ntfy_url_file": str((run_dir / NTFY_URL_FILE).resolve()),
-        "ntfy_token_file": str(token_file.resolve()),
+        "ntfy_token_file": token_value if token_value else str(token_file),
+        "ntfy_token_path_checked": True,
         "notification_title": args.notification_title,
     }
+    if token_file_base:
+        config["ntfy_token_file_base"] = token_file_base
     timer = unit_base(run_dir) + ".timer"
     load_state = systemd_property(timer, "LoadState")
     active_state = systemd_property(timer, "ActiveState")

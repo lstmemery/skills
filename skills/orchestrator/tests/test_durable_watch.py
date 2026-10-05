@@ -44,6 +44,31 @@ class DurableWatchTest(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
+    def start_ntfy_server(self, response_id):
+        received = []
+
+        class NtfyHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                received.append((self.path, dict(self.headers), body))
+                response = json.dumps({"id": response_id}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format, *args):
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), NtfyHandler)
+        server_thread = Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(server.shutdown)
+        return server, received
+
     def test_reconcile_records_each_new_result_once_and_ignores_unlisted_dirs(self):
         (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
         (self.run_dir / "stray").mkdir()
@@ -92,28 +117,7 @@ class DurableWatchTest(unittest.TestCase):
         stop.assert_called_once_with(self.run_dir.resolve(), nonblocking=True)
 
     def test_new_result_uses_the_private_ntfy_route_once(self):
-        received = []
-
-        class NtfyHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                received.append((self.path, dict(self.headers), body))
-                response = json.dumps({"id": "test-message-id"}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(response)))
-                self.end_headers()
-                self.wfile.write(response)
-
-            def log_message(self, format, *args):
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), NtfyHandler)
-        server_thread = Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server_thread.join, 2)
-        self.addCleanup(server.shutdown)
+        server, received = self.start_ntfy_server("test-message-id")
         config_path = self.run_dir / durable_watch.CONFIG
         config = json.loads(config_path.read_text(encoding="utf-8"))
         route = f"http://127.0.0.1:{server.server_port}/test/topic"
@@ -125,6 +129,7 @@ class DurableWatchTest(unittest.TestCase):
             "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
             "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
             "ntfy_token_file": str(token_file),
+            "ntfy_token_path_checked": True,
             "notification_title": "Orchestrator worker result",
         })
         durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
@@ -144,7 +149,8 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(received[0][1]["Title"], "Orchestrator worker result")
         self.assertEqual(received[0][1]["Priority"], "3")
         self.assertEqual(received[0][2], b"task-a wrote result.json in run")
-        self.assertIn("ntfy accepted (HTTP 200; id=test-message-id)", output.getvalue())
+        self.assertIn("ntfy publish succeeded (HTTP 200); event is recorded", output.getvalue())
+        self.assertNotIn("test-message-id", output.getvalue())
         self.assertNotIn(route, output.getvalue())
         self.assertNotIn("unit-test-token", output.getvalue())
 
@@ -160,6 +166,7 @@ class DurableWatchTest(unittest.TestCase):
             "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
             "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
             "ntfy_token_file": str(token_file),
+            "ntfy_token_path_checked": True,
         }
         durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
         delivered = []
@@ -197,7 +204,7 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(len(openers), 1)
         self.assertEqual(delivered, [("ntfy.example.invalid", "Bearer fake")])
         self.assertIn(
-            "ntfy publish failed (HTTP 302; redirect not followed); event is recorded",
+            "ntfy publish failed (HTTP 302); event is recorded",
             output.getvalue(),
         )
         self.assertNotIn(redirect_target, output.getvalue())
@@ -301,6 +308,7 @@ class DurableWatchTest(unittest.TestCase):
                 "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
                 "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
                 "ntfy_token_file": str(token_file),
+                "ntfy_token_path_checked": True,
                 "notification_title": "Orchestrator worker result",
             })
             durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
@@ -351,32 +359,131 @@ class DurableWatchTest(unittest.TestCase):
         self.assertIn("ntfy token is unavailable", errors)
         assert_event_stays_redacted(outcome, errors)
 
+    def test_arm_and_read_refuse_a_direct_token_symlink(self):
+        (self.run_dir / durable_watch.CONFIG).unlink()
+        token = "fake-token-1159"
+        target = self.run_dir / "real-token"
+        target.write_text(token + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        override = self.run_dir / "token-override"
+        override.symlink_to(target)
+        route = "http://127.0.0.1:12345/topic-fake-1159"
+        args = type("Args", (), {
+            "run_dir": str(self.run_dir),
+            "tasks": ["task-a"],
+            "interval_seconds": 30,
+            "notification_title": "Orchestrator worker result",
+        })()
+
+        with mock.patch.dict(os.environ, {"NTFY_URL": route, "NTFY_TOKEN_FILE": str(override)}, clear=True), \
+                mock.patch.object(durable_watch, "systemd_property", return_value="not-found"):
+            with self.assertRaises(durable_watch.WatchError) as raised:
+                durable_watch.command_arm(args)
+        self.assertNotIn(token, str(raised.exception))
+        self.assertNotIn(route, str(raised.exception))
+        self.assertFalse((self.run_dir / durable_watch.CONFIG).exists())
+        with self.assertRaises(durable_watch.WatchError) as raised:
+            durable_watch.read_private_text(override, "ntfy token")
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_arm_and_read_refuse_a_parent_directory_token_symlink(self):
+        (self.run_dir / durable_watch.CONFIG).unlink()
+        token = "fake-token-1159"
+        target_dir = self.run_dir / "real-token-dir"
+        target_dir.mkdir()
+        target = target_dir / "token"
+        target.write_text(token + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        parent_link = self.run_dir / "token-dir-override"
+        parent_link.symlink_to(target_dir, target_is_directory=True)
+        override = parent_link / "token"
+        route = "http://127.0.0.1:12345/topic-fake-1159"
+        args = type("Args", (), {
+            "run_dir": str(self.run_dir),
+            "tasks": ["task-a"],
+            "interval_seconds": 30,
+            "notification_title": "Orchestrator worker result",
+        })()
+
+        with mock.patch.dict(os.environ, {"NTFY_URL": route, "NTFY_TOKEN_FILE": str(override)}, clear=True), \
+                mock.patch.object(durable_watch, "systemd_property", return_value="not-found"):
+            with self.assertRaises(durable_watch.WatchError) as raised:
+                durable_watch.command_arm(args)
+        self.assertNotIn(token, str(raised.exception))
+        self.assertNotIn(route, str(raised.exception))
+        self.assertFalse((self.run_dir / durable_watch.CONFIG).exists())
+        with self.assertRaises(durable_watch.WatchError) as raised:
+            durable_watch.read_private_text(override, "ntfy token")
+        self.assertNotIn(token, str(raised.exception))
+
+    def test_reconcile_rechecks_token_path_after_arm(self):
+        (self.run_dir / durable_watch.CONFIG).unlink()
+        route = "http://127.0.0.1:12345/topic-fake-1159"
+        token = "fake-token-1159"
+        token_file = self.run_dir / "configured-token"
+        token_file.write_text(token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        target = self.run_dir / "later-target-token"
+        target.write_text(token + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        args = type("Args", (), {
+            "run_dir": str(self.run_dir),
+            "tasks": ["task-a"],
+            "interval_seconds": 30,
+            "notification_title": "Orchestrator worker result",
+        })()
+
+        arm_output = io.StringIO()
+        with mock.patch.dict(os.environ, {"NTFY_URL": route, "NTFY_TOKEN_FILE": str(token_file)}, clear=True), \
+                mock.patch.object(durable_watch, "systemd_property", return_value="not-found"), \
+                mock.patch.object(durable_watch.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                redirect_stdout(arm_output):
+            self.assertEqual(durable_watch.command_arm(args), 0)
+        token_file.unlink()
+        token_file.symlink_to(target)
+        (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+                durable_watch.urllib.request, "build_opener", side_effect=AssertionError("request must not be sent")), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(durable_watch.main(["reconcile", str(self.run_dir)]), 0)
+
+        event_text = (self.run_dir / durable_watch.EVENTS).read_text(encoding="utf-8")
+        for sink in (stdout.getvalue(), stderr.getvalue(), event_text):
+            self.assertNotIn(route, sink)
+            self.assertNotIn(token, sink)
+        self.assertIn("ntfy token must not use a symbolic link", stderr.getvalue())
+
+    def test_unmarked_existing_config_cannot_publish_with_a_canonicalized_path(self):
+        route = "https://notify.example.invalid/topic-fake-1159"
+        token = "fake-token-1159"
+        token_file = self.run_dir / "canonical-token"
+        token_file.write_text(token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        config = {
+            "notify": True,
+            "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
+            "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
+            "ntfy_token_file": str(token_file),
+        }
+        durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
+        output = io.StringIO()
+        with mock.patch.object(
+                durable_watch.urllib.request, "build_opener", side_effect=AssertionError("request must not be sent")), \
+                redirect_stderr(output):
+            durable_watch.publish({"task_dir": "task-a", "run_dir": "run"}, config)
+        self.assertIn("ntfy token path must be re-armed", output.getvalue())
+        self.assertNotIn(route, output.getvalue())
+        self.assertNotIn(token, output.getvalue())
+
     def test_secrets_never_reach_any_runtime_sink(self):
         """SP3: arm and reconcile keep the route and token out of every runtime sink."""
-        received = []
-
-        class NtfyHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                received.append(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                response = json.dumps({"id": "sink-check-id"}).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(response)))
-                self.end_headers()
-                self.wfile.write(response)
-
-            def log_message(self, format, *args):
-                return
-
-        server = HTTPServer(("127.0.0.1", 0), NtfyHandler)
-        server_thread = Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server_thread.join, 2)
-        self.addCleanup(server.shutdown)
         (self.run_dir / durable_watch.CONFIG).unlink()
-        route = f"http://127.0.0.1:{server.server_port}/test/private-topic-1159"
         token = "unit-test-sink-token"
+        server, received = self.start_ntfy_server(token)
+        route = f"http://127.0.0.1:{server.server_port}/test/private-topic-1159"
         token_file = self.run_dir / "sink-token"
         token_file.write_text(token + "\n", encoding="utf-8")
         token_file.chmod(0o600)
@@ -400,6 +507,8 @@ class DurableWatchTest(unittest.TestCase):
                 mock.patch.object(durable_watch.subprocess, "run", side_effect=capture_systemd_run), \
                 redirect_stdout(arm_output):
             self.assertEqual(durable_watch.command_arm(args), 0)
+        config = json.loads((self.run_dir / durable_watch.CONFIG).read_text(encoding="utf-8"))
+        self.assertEqual(config["ntfy_token_file"], str(token_file))
 
         (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
         reconcile_output = io.StringIO()
@@ -438,8 +547,46 @@ class DurableWatchTest(unittest.TestCase):
         for sink, text in sinks.items():
             self.assertNotIn(route, text, sink)
             self.assertNotIn(token, text, sink)
-        self.assertIn("ntfy accepted (HTTP 200; id=sink-check-id)", sinks["journal"])
-        self.assertEqual(received, [f"task-a wrote result.json in {self.run_dir.name}".encode("utf-8")])
+        self.assertNotIn(token, sinks["journal"])
+        self.assertIn("ntfy publish succeeded (HTTP 200); event is recorded", sinks["journal"])
+        self.assertEqual(sinks["reconcile_stdout"], "")
+        self.assertEqual(received[0][1]["Authorization"], f"Bearer {token}")
+        self.assertEqual(received[0][2], f"task-a wrote result.json in {self.run_dir.name}".encode("utf-8"))
+
+    def test_network_exception_does_not_leak_route_or_token(self):
+        route = "https://notify.example.invalid/topic-fake-1159"
+        token = "fake-token-1159"
+        token_file = self.run_dir / "network-token"
+        token_file.write_text(token + "\n", encoding="utf-8")
+        token_file.chmod(0o600)
+        config = json.loads((self.run_dir / durable_watch.CONFIG).read_text(encoding="utf-8"))
+        config.update({
+            "notify": True,
+            "ntfy_url_sha256": hashlib.sha256(route.encode()).hexdigest(),
+            "ntfy_url_file": str(self.run_dir / durable_watch.NTFY_URL_FILE),
+            "ntfy_token_file": str(token_file),
+            "ntfy_token_path_checked": True,
+        })
+        durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, route)
+        durable_watch.write_config(self.run_dir / durable_watch.CONFIG, config)
+        (self.task_a / "result.json").write_text('{"outcome":"ready"}\n', encoding="utf-8")
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                raise urllib.error.URLError(f"connection failed for {route} using Bearer {token}")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(durable_watch.urllib.request, "build_opener", return_value=FakeOpener()), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(durable_watch.main(["reconcile", str(self.run_dir)]), 0)
+
+        event_text = (self.run_dir / durable_watch.EVENTS).read_text(encoding="utf-8")
+        for sink in (stdout.getvalue(), stderr.getvalue(), event_text):
+            self.assertNotIn(route, sink)
+            self.assertNotIn(token, sink)
+        self.assertIn("ntfy publish failed; event is recorded", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_disarm_clears_configuration_before_changed_watch_is_armed(self):
         durable_watch.write_private_text(self.run_dir / durable_watch.NTFY_URL_FILE, "https://notify.example.invalid/topic")
