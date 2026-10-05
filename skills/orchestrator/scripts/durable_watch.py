@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import stat
 import subprocess
@@ -27,13 +28,8 @@ NTFY_URL_FILE = Path(".durable-watch/ntfy-url")
 LOCK = Path(".durable-watch/reconcile.lock")
 EVENTS = Path("flags/events.jsonl")
 VERSION = 1
-NTFY_CREDENTIAL_ENV_VARS = (
-    "NTFY_URL",
-    "ORCH_WATCH_NTFY_URL",
-    "NTFY_TOKEN",
-    "NTFY_TOKEN_FILE",
-    "NTFY_PASSWORD",
-)
+SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WATCHER_ENVIRONMENT_NAMES = ("PATH", "HOME", "LANG", "XDG_RUNTIME_DIR")
 
 
 class WatchError(Exception):
@@ -283,6 +279,30 @@ def systemd_property(unit: str, name: str) -> str:
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else "unavailable"
 
 
+def watcher_environment() -> dict[str, str]:
+    """Return the complete environment allowed for systemd-run and the watcher."""
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as error:
+        raise WatchError("could not resolve the current user's home directory") from error
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return {
+        "PATH": SYSTEM_PATH,
+        "HOME": home,
+        "LANG": "C.UTF-8",
+        "XDG_RUNTIME_DIR": runtime_dir,
+    }
+
+
+def watcher_exec_start(run_dir: Path, environment: dict[str, str]) -> list[str]:
+    """Build ExecStart so env -i clears manager variables before Python starts."""
+    return [
+        "/usr/bin/env", "-i",
+        *(f"{name}={environment[name]}" for name in WATCHER_ENVIRONMENT_NAMES),
+        sys.executable, "-B", str(Path(__file__).resolve()), "reconcile", str(run_dir),
+    ]
+
+
 def stop_units(run_dir: Path, service: bool = False, nonblocking: bool = False) -> None:
     base = unit_base(run_dir)
     units = [base + ".timer"] + ([base + ".service"] if service else [])
@@ -370,16 +390,13 @@ def command_arm(args: argparse.Namespace) -> int:
             "systemd-run", "--user", "--quiet", f"--unit={unit_base(run_dir)}.service",
             "--on-active=1s", f"--on-unit-active={args.interval_seconds}s",
             "--timer-property=AccuracySec=1s",
-            "-p", f"UnsetEnvironment={' '.join(NTFY_CREDENTIAL_ENV_VARS)}",
         ]
-        command.extend([
-            sys.executable, "-B", str(Path(__file__).resolve()), "reconcile", str(run_dir),
-        ])
+        environment = watcher_environment()
+        command.extend(watcher_exec_start(run_dir, environment))
+    if load_state != "not-found":
+        environment = watcher_environment()
     try:
-        systemd_run_env = os.environ.copy()
-        for name in NTFY_CREDENTIAL_ENV_VARS:
-            systemd_run_env.pop(name, None)
-        result = subprocess.run(command, capture_output=True, check=False, timeout=15, env=systemd_run_env)
+        result = subprocess.run(command, capture_output=True, check=False, timeout=15, env=environment)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise WatchError("could not arm the systemd watcher") from error
     if result.returncode != 0:

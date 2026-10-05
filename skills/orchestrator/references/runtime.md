@@ -257,13 +257,15 @@ in `flags/events.jsonl`, and stops itself after every listed task has a
 user's systemd manager to remain running. If `NTFY_URL` or
 `ORCH_WATCH_NTFY_URL` is set while arming, the URL is saved in a mode-600 file
 under `.durable-watch/`; the transient unit receives only the run directory.
-The service explicitly unsets notification credential variables inherited from
-the systemd user manager. Reconcile reads the URL and token only from their
-private files (the config stores the URL hash and file paths, not their values),
-using the same private token file as the shared
-`claude-settings/ntfy/publisher.sh` sender. Notifications are best-effort; the
-event file is the durable record. `disarm` stops the units and clears the stored
-watch config and URL so changed settings can be armed again.
+The transient service starts Python through `/usr/bin/env -i`, passing only a
+fixed system `PATH`, the account `HOME`, `LANG=C.UTF-8`, and `XDG_RUNTIME_DIR`.
+This clears the systemd user manager's inherited environment before the watcher
+starts. Reconcile reads the URL and token only from their private files (the
+config stores the URL hash and file paths, not their values), using the same
+private token file as the shared `claude-settings/ntfy/publisher.sh` sender.
+Notifications are best-effort; the event file is the durable record. `disarm`
+stops the units and clears the stored watch config and URL so changed settings
+can be armed again.
 
 ```sh
 RUN_DIR=/absolute/path/to/run
@@ -278,10 +280,12 @@ the same configuration is safe and reuses the existing timer. `status` reports
 the exact timer and each task's result/disposition presence. `disarm` stops the
 timer and its active reconcile service, then removes its config; normal
 completion disarms the timer automatically but leaves the config until an
-explicit `disarm`. Set `ORCH_WATCH_NTFY_URL` or `NTFY_URL` in the environment
-for `arm` when notification routing differs from the shared publisher's
-default. The URL is never passed as a command-line argument or copied into the
-transient unit environment.
+explicit `disarm`. After upgrading from a version that did not use the
+allowlisted launcher, disarm and re-arm an existing watch so its transient
+service is recreated with the isolated command. Set `ORCH_WATCH_NTFY_URL` or
+`NTFY_URL` in the environment for `arm` when notification routing differs from
+the shared publisher's default. The URL is never passed as a command-line
+argument or copied into the transient unit environment.
 
 ## CLI launch and observation
 

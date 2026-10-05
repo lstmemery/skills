@@ -6,6 +6,7 @@ import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 from threading import Thread
@@ -146,9 +147,11 @@ class DurableWatchTest(unittest.TestCase):
         self.assertNotIn(route, output.getvalue())
         self.assertNotIn("unit-test-token", output.getvalue())
 
-    def test_arm_keeps_notification_route_out_of_systemd_arguments(self):
+    def test_arm_starts_watcher_with_an_allowlisted_environment(self):
         (self.run_dir / durable_watch.CONFIG).unlink()
         secret_url = "http://localhost/a"
+        simulated_manager_key = "synthetic-unknown-api-key-canary"
+        runtime_dir = "/run/user/test"
         args = type("Args", (), {
             "run_dir": str(self.run_dir),
             "tasks": ["task-a"],
@@ -163,7 +166,11 @@ class DurableWatchTest(unittest.TestCase):
             launch_environments.append(kwargs["env"])
             return mock.Mock(returncode=0)
 
-        with mock.patch.dict(os.environ, {"NTFY_URL": secret_url}, clear=True), \
+        with mock.patch.dict(os.environ, {
+                "NTFY_URL": secret_url,
+                "FOO_API_KEY": simulated_manager_key,
+                "XDG_RUNTIME_DIR": runtime_dir,
+        }, clear=True), \
                 mock.patch.object(durable_watch, "systemd_property", return_value="not-found"), \
                 mock.patch.object(durable_watch.subprocess, "run", side_effect=capture_systemd_run), \
                 redirect_stdout(io.StringIO()):
@@ -172,17 +179,44 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(len(launched), 1)
         argv = launched[0]
         self.assertFalse(any(secret_url in value for value in argv))
-        unset_environment = [
-            argv[index + 1]
-            for index, value in enumerate(argv[:-1])
-            if value == "-p" and argv[index + 1].startswith("UnsetEnvironment=")
+        service_argv = argv[argv.index("--timer-property=AccuracySec=1s") + 1:]
+        system_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        allowlisted_environment = [
+            f"PATH={system_path}",
+            f"HOME={Path.home()}",
+            "LANG=C.UTF-8",
+            f"XDG_RUNTIME_DIR={runtime_dir}",
         ]
-        self.assertEqual(unset_environment, [
-            "UnsetEnvironment=NTFY_URL ORCH_WATCH_NTFY_URL NTFY_TOKEN NTFY_TOKEN_FILE NTFY_PASSWORD",
+        self.assertEqual(service_argv[:2], ["/usr/bin/env", "-i"])
+        self.assertEqual(service_argv[2:6], allowlisted_environment)
+        self.assertEqual(service_argv[6:], [
+            sys.executable, "-B", str(PACKAGE / "scripts" / "durable_watch.py"),
+            "reconcile", str(self.run_dir),
         ])
-        self.assertFalse(any(value.startswith("--setenv=") for value in argv))
-        self.assertNotIn("NTFY_URL", launch_environments[0])
+        self.assertEqual(launch_environments[0], {
+            "PATH": system_path,
+            "HOME": str(Path.home()),
+            "LANG": "C.UTF-8",
+            "XDG_RUNTIME_DIR": runtime_dir,
+        })
         self.assertFalse(any(secret_url in value for value in launch_environments[0].values()))
+
+        # Exercise the exact env -i prefix with a manager-only unknown key.
+        probe_argv = service_argv[:6] + [
+            sys.executable,
+            "-c",
+            "import os; print('\\n'.join(sorted(os.environ)))",
+        ]
+        probe = subprocess.run(
+            probe_argv,
+            env={"FOO_API_KEY": simulated_manager_key},
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(probe.stdout.splitlines(), ["HOME", "LANG", "PATH", "XDG_RUNTIME_DIR"])
+        self.assertNotIn("FOO_API_KEY", probe.stdout)
+
         secret_path = self.run_dir / durable_watch.NTFY_URL_FILE
         self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)
         self.assertEqual(secret_path.read_text(encoding="utf-8").strip(), secret_url)
