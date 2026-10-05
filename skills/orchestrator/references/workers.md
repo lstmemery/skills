@@ -34,6 +34,28 @@ close owned workspaces. Keep coordinator task folders to briefs and manifests;
 the helper owns launch state, receipts, results, and collected artifacts. Do not
 copy launcher, watcher, or finish scripts into task folders.
 
+For coordinator flows outside managed Herdr jobs, use the public task-local
+helpers. `watch-results.py` reads a task ID list inside the run directory and
+watches only `tasks/<task-id>/result.json`; it exits on the first new result,
+returns 1 on timeout, and persists fingerprints in the run directory. Existing
+result fingerprints found elsewhere in the run are treated as already seen, so
+copying one into its task directory does not wake the watcher.
+
+```sh
+python3 scripts/watch-results.py "$RUN_DIR" "$RUN_DIR/task-ids.txt" \
+  --timeout-seconds 3300 --interval-seconds 20
+python3 scripts/finish-worker.py "$RUN_DIR" "$TASK_ID" \
+  --revision "$REVISION" --summary "Finished candidate validation."
+```
+
+`finish-worker.py` requires the assignment revision explicitly, validates only
+the canonical task-local result, maps `ready`/`blocked`/`failed` to the matching
+terminal disposition and location status, releases the lease ID and closes the
+workspace recorded in that task's `location.json`, then appends the run state
+line. An invalid result remains undispositioned unless the coordinator supplies
+`--invalid-status`, `--summary`, and `--invalid-evidence`; the validation error
+and coordinator evidence are retained in `disposition.json`.
+
 For a read-only review of an existing candidate, share its pinned source and put
 review output outside that checkout. If the reviewer needs to edit source or run
 commands that change checkout files, give it separate isolation first. Preserve
