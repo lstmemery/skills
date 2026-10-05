@@ -32,33 +32,33 @@ class AdmissionTest(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_first_provider_lease_is_admitted(self):
-        result = self.store.acquire("zai", "glm-4.5", "run-a-job-a", cap=4)
+        result = self.store.acquire("codex", "gpt-6-luna", "run-a-job-a", cap=4)
 
         self.assertTrue(result["admitted"])
         self.assertEqual(result["provider_active"], 1)
         self.assertEqual(result["model_active"], 1)
 
     def test_cli_acquire_and_separate_status_share_the_provider_count(self):
-        acquired = self.call_cli("acquire", "--provider", "zai", "--model", "glm-4.5",
+        acquired = self.call_cli("acquire", "--provider", "codex", "--model", "gpt-6-luna",
                                  "--lease-id", "direct-a")
-        observed = self.call_cli("status", "--provider", "zai")
+        observed = self.call_cli("status", "--provider", "codex")
 
         self.assertTrue(acquired["admitted"])
         self.assertEqual(observed["active_count"], 1)
         self.assertEqual(observed["leases"][0]["lease_id"], "direct-a")
         released = self.call_cli("release", "--lease-id", "direct-a")
         self.assertTrue(released["released"])
-        self.assertEqual(self.call_cli("status", "--provider", "zai")["active_count"], 0)
+        self.assertEqual(self.call_cli("status", "--provider", "codex")["active_count"], 0)
 
     def test_retry_after_blocks_only_that_provider_model_until_expiry(self):
         current_time = [1000.0]
         store = AdmissionStore(self.root / "clock-state", clock=lambda: current_time[0])
-        store.note_rate_limit("zai", "glm-4.5", 12, source="retry-after")
+        store.note_rate_limit("codex", "gpt-6-luna", 12, source="retry-after")
 
-        blocked = store.acquire("zai", "glm-4.5", "same-model", cap=4)
-        other_model = store.acquire("zai", "glm-4.7", "other-model", cap=4)
+        blocked = store.acquire("codex", "gpt-6-luna", "same-model", cap=4)
+        other_model = store.acquire("codex", "another-model", "other-model", cap=4)
         current_time[0] = 1012.0
-        resumed = store.acquire("zai", "glm-4.5", "after-wait", cap=4)
+        resumed = store.acquire("codex", "gpt-6-luna", "after-wait", cap=4)
 
         self.assertEqual((blocked["admitted"], blocked["reason"], blocked["retry_at"]),
                          (False, "backoff", 1012.0))
@@ -66,32 +66,37 @@ class AdmissionTest(unittest.TestCase):
         self.assertTrue(resumed["admitted"])
 
     def test_provider_cap_is_shared_across_models_and_release_reopens_capacity(self):
-        first = self.call_cli("acquire", "--provider", "zai", "--model", "glm-4.5",
-                              "--lease-id", "zai-first")
-        second = self.call_cli("acquire", "--provider", "zai", "--model", "glm-4.7",
-                               "--lease-id", "zai-second")
-        denied = self.call_cli("acquire", "--provider", "zai", "--model", "other-model",
-                               "--lease-id", "zai-third")
+        policy = json.loads((PACKAGE / "launch-policy.json").read_text())
+        policy["provider_admission"]["provider_caps"]["codex"] = 2
+        policy_path = self.root / "policy.json"
+        policy_path.write_text(json.dumps(policy))
+        policy_arg = ("--policy", str(policy_path))
+        first = self.call_cli("acquire", "--provider", "codex", "--model", "gpt-6-luna",
+                              "--lease-id", "codex-first", *policy_arg)
+        second = self.call_cli("acquire", "--provider", "codex", "--model", "another-model",
+                               "--lease-id", "codex-second", *policy_arg)
+        denied = self.call_cli("acquire", "--provider", "codex", "--model", "other-model",
+                               "--lease-id", "codex-third", *policy_arg)
 
         self.assertTrue(first["admitted"])
         self.assertTrue(second["admitted"])
         self.assertEqual(second["provider_active"], 2)
         self.assertFalse(denied["admitted"])
         self.assertEqual(denied["reason"], "capacity")
-        self.call_cli("release", "--lease-id", "zai-first")
-        self.assertTrue(self.call_cli("acquire", "--provider", "zai", "--model", "other-model",
-                                      "--lease-id", "zai-after-release")["admitted"])
+        self.call_cli("release", "--lease-id", "codex-first")
+        self.assertTrue(self.call_cli("acquire", "--provider", "codex", "--model", "other-model",
+                                      "--lease-id", "codex-after-release", *policy_arg)["admitted"])
 
     def test_concurrent_acquisitions_cannot_exceed_a_provider_cap(self):
         stores = [AdmissionStore(self.root / "race-state") for _ in range(8)]
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(
-                lambda index: stores[index].acquire("zai", "glm-4.5", f"parallel-{index}", cap=4),
+                lambda index: stores[index].acquire("codex", "gpt-6-luna", f"parallel-{index}", cap=4),
                 range(8),
             ))
 
         self.assertEqual(sum(result["admitted"] for result in results), 4)
-        self.assertEqual(stores[0].status("zai")["active_count"], 4)
+        self.assertEqual(stores[0].status("codex")["active_count"], 4)
 
     def test_rate_limit_metadata_and_bounded_default_are_parsed(self):
         retry = rate_limit_from_output(
@@ -135,9 +140,9 @@ class AdmissionTest(unittest.TestCase):
 
     def test_cli_uses_bounded_default_when_rate_limit_has_no_metadata(self):
         before = time.time()
-        recorded = self.call_cli("rate-limit", "--provider", "zai", "--model", "glm-4.5")
-        observed = self.call_cli("status", "--provider", "zai", "--model", "glm-4.5")
-        denied = self.call_cli("acquire", "--provider", "zai", "--model", "glm-4.5",
+        recorded = self.call_cli("rate-limit", "--provider", "codex", "--model", "gpt-6-luna")
+        observed = self.call_cli("status", "--provider", "codex", "--model", "gpt-6-luna")
+        denied = self.call_cli("acquire", "--provider", "codex", "--model", "gpt-6-luna",
                                "--lease-id", "retry-too-soon")
 
         delay = observed["backoffs"][0]["until"] - before

@@ -5,7 +5,6 @@
   "provider_admission": {
     "default_provider_cap": 4,
     "provider_caps": {
-      "zai": 2,
       "opencode-go": 2,
       "codex": 8,
       "openai-codex": 8

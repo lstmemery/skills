@@ -60,7 +60,7 @@ class JobsTest(unittest.TestCase):
         self.manifest.write_text(json.dumps(manifest))
 
     def write_add_job(self, job_id="job-added", task_id="task-added", revision=1,
-                      runtime="pi", provider="zai", model="glm-5.3-flash", effort="high",
+                      runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high",
                       retry_override=None):
         add_manifest = self.root / "add-manifest.json"
         job = {"job_id": job_id, "name": "Incremental fixture", "task_kind": "ordinary",
@@ -213,8 +213,31 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(state["jobs"][0]["attempt_id"], prior_attempt)
         self.assertEqual(sum(event["action"] == "start" and event["job_id"] == "job0"
                              for event in self.events()), 1)
-        self.assertEqual(state["jobs"][1]["provider"], "zai")
-        self.assertEqual(state["jobs"][1]["resolved_model"], "glm-5.3-flash")
+        self.assertEqual(state["jobs"][1]["provider"], "llama-local")
+        self.assertEqual(state["jobs"][1]["resolved_model"], "qwen3.8-27b-uncensored")
+
+    def test_old_zai_run_record_still_loads(self):
+        self.call()
+        state = self.state()
+        spec = state["request"]["jobs"][0]
+        spec["route"] = {"mode": "agent", "runtime": "pi"}
+        spec["kind"] = "pi"
+        spec["provider"] = "zai"
+        spec["model"] = "glm-5.3-flash"
+        spec["override"] = {"runtime": "pi", "provider": "zai", "model": "glm-5.3-flash",
+                             "instruction": "Legacy fixture from a retired provider."}
+        state["jobs"][0]["spec"] = copy.deepcopy(spec)
+        state["jobs"][0]["resolved_model"] = "glm-5.3-flash"
+        state["jobs"][0]["provider"] = "zai"
+        state["jobs"][0]["admission_model"] = "glm-5.3-flash"
+        state["request_digest"] = digest(encoded(state["request"]))
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        legacy = Engine(self.run, None, None)
+        legacy.load()
+
+        self.assertEqual(legacy.state["jobs"][0]["provider"], "zai")
+        self.assertEqual(legacy.state["jobs"][0]["resolved_model"], "glm-5.3-flash")
 
     def test_add_applies_the_run_pinned_retry_override_to_matching_workers(self):
         retry_override = {"pi": {"max_retries": 10, "max_agent_delay_ms": 120000}}
@@ -430,7 +453,7 @@ class JobsTest(unittest.TestCase):
         self.assertIn("visible Working marker", result["jobs"][0]["issue"])
 
     def test_non_codex_startup_dialog_is_detected_before_sending_the_task_prompt(self):
-        self.write_jobs(1, runtime="pi", provider="zai", model="glm-5.3-flash")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
         self.configure(jobs={"job0": "blocked"})
 
         code, result = self.call()
@@ -440,7 +463,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
     def test_pi_provider_override_without_model_is_rejected_in_manifest_validation(self):
-        self.write_jobs(1, runtime="pi", provider="zai")
+        self.write_jobs(1, runtime="pi", provider="llama-local")
 
         code, result = self.call(real=True, preview=True)
 
@@ -526,22 +549,22 @@ class JobsTest(unittest.TestCase):
             if event["action"] in ("start", "prompt", "jail", "observe"):
                 self.assertTrue(event["pane_id"].startswith("moved:"))
 
-    def test_eight_pi_jobs_share_four_host_slots_with_direct_launches(self):
+    def test_eight_codex_jobs_share_four_host_slots_with_direct_launches(self):
         policy = json.loads(self.policy.read_text())
-        policy["provider_admission"]["provider_caps"]["zai"] = 4
+        policy["provider_admission"]["provider_caps"]["codex"] = 4
         self.policy.write_text(json.dumps(policy))
-        self.write_jobs(8, runtime="pi", concurrency=8, provider="zai", model="glm-4.5")
+        self.write_jobs(8, runtime="codex", concurrency=8, provider="codex", model="gpt-6-luna")
         self.configure(jobs={f"job{index}": "working" for index in range(4)})
 
         _, result = self.call(wait_seconds=0.5)
         direct_status = subprocess.run(
             [sys.executable, "-B", str(PACKAGE / "scripts/herdr-admission.py"),
-             "status", "--provider", "zai"],
+             "status", "--provider", "codex"],
             capture_output=True, text=True, timeout=5,
         )
         direct_acquire = subprocess.run(
             [sys.executable, "-B", str(PACKAGE / "scripts/herdr-admission.py"),
-             "acquire", "--provider", "zai", "--model", "glm-4.5", "--lease-id", "direct-extra",
+             "acquire", "--provider", "codex", "--model", "gpt-6-luna", "--lease-id", "direct-extra",
              "--policy", str(self.policy)],
             capture_output=True, text=True, timeout=5,
         )
@@ -550,12 +573,12 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(direct_acquire.returncode, 0, direct_acquire.stderr)
         self.assertEqual(sum(event["action"] == "split" for event in self.events()), 4)
         self.assertEqual(sum(job["phase"] == "pending" for job in result["jobs"]), 4)
-        self.assertEqual(result["provider_active"]["zai"], 4)
+        self.assertEqual(result["provider_active"]["codex"], 4)
         self.assertEqual(json.loads(direct_status.stdout)["active_count"], 4)
         self.assertFalse(json.loads(direct_acquire.stdout)["admitted"])
 
     def test_rate_limited_assignment_retries_after_backoff_without_losing_lease_or_artifacts(self):
-        self.write_jobs(2, runtime="pi", provider="zai", model="glm-4.5")
+        self.write_jobs(2, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
         manifest = json.loads(self.manifest.read_text())
         manifest["jobs"][0]["cwd"] = str(self.root)
         manifest["jobs"][0]["writes_repository"] = True
@@ -588,7 +611,7 @@ class JobsTest(unittest.TestCase):
         self.assertGreaterEqual(second_job_splits[0]["at"], retry["retry_at"])
 
     def test_explicit_start_rate_limit_retries_even_without_a_registered_worker(self):
-        self.write_jobs(1, runtime="pi", provider="zai", model="glm-4.5")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
         self.configure(jobs={"job0": "rate_limited_start_once"})
 
         code, result = self.call(wait_seconds=1.2)
@@ -605,7 +628,7 @@ class JobsTest(unittest.TestCase):
         self.assertNotEqual(retry["attempt_id"], job["attempt_id"])
 
     def test_managed_rate_limit_uses_bounded_default_when_metadata_is_absent(self):
-        self.write_jobs(1, runtime="pi", provider="zai", model="glm-4.5")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
         self.configure(jobs={"job0": "rate_limited_without_metadata_once"})
 
         before = time.time()

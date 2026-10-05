@@ -119,8 +119,8 @@ state and configured provider caps:
 
 ```sh
 python3 /path/to/orchestrator/scripts/herdr-admission.py acquire \
-  --provider zai --model glm-4.5 --lease-id TASK_ATTEMPT --run-id TASK_ID
-python3 /path/to/orchestrator/scripts/herdr-admission.py status --provider zai
+  --provider codex --model gpt-6-luna --lease-id TASK_ATTEMPT --run-id TASK_ID
+python3 /path/to/orchestrator/scripts/herdr-admission.py status --provider codex
 python3 /path/to/orchestrator/scripts/herdr-admission.py release --lease-id TASK_ATTEMPT
 ```
 
@@ -142,7 +142,7 @@ attempt's admission lease:
 
 ```sh
 python3 /path/to/orchestrator/scripts/herdr-admission.py rate-limit \
-  --provider zai --model glm-4.5 --retry-after 30
+  --provider codex --model gpt-6-luna --retry-after 30
 ```
 
 Use `--reset-at` when the provider supplies reset metadata. If neither is
