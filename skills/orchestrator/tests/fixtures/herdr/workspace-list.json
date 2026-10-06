@@ -1,0 +1,108 @@
+{
+  "id": "<redacted>",
+  "result": {
+    "type": "workspace_list",
+    "workspaces": [
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "idle",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 1,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "done",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 2,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "unknown",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 3,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "idle",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 4,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "idle",
+        "focused": true,
+        "label": "<redacted>",
+        "number": 5,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "done",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 6,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "working",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 7,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "working",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 8,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "working",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 9,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      },
+      {
+        "active_tab_id": "<redacted>",
+        "agent_status": "working",
+        "focused": false,
+        "label": "<redacted>",
+        "number": 10,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "<redacted>"
+      }
+    ]
+  }
+}

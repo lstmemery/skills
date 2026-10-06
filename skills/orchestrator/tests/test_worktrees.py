@@ -114,7 +114,8 @@ class WorktreeAllocationTest(unittest.TestCase):
             "herdr_pane_help_sha256": digest(pane_help),
             "orchestrator_help_sha256": digest(orchestrator_help),
             "supported_kinds": ["codex"], "server_version": "fixture-v1",
-            "paths": {"session_id": ["session"], "server_version": ["version"],
+            "paths": {"session_id": ["server", "socket"],
+                      "server_version": ["server", "version"],
                       "agent_state": ["state"], "agent_pane_id": ["pane"],
                       "agent_kind": ["kind"], "agent_name": ["name"]},
             "jail_export": None,
@@ -125,14 +126,14 @@ class WorktreeAllocationTest(unittest.TestCase):
             adapter.calls.append(argv)
             if argv == ["herdr", "--help"]:
                 return help_bytes
-            if argv == ["herdr", "agent"]:
+            if argv == ["herdr", "agent", "--help"]:
                 return agent_help
-            if argv == ["herdr", "pane"]:
+            if argv == ["herdr", "pane", "--help"]:
                 return pane_help
             if argv == ["orchestrator", "help", "--json", "--compact"]:
                 return orchestrator_help
-            if argv == ["herdr", "status"]:
-                return b'{"session":"fixture-session","version":"fixture-v1"}'
+            if argv == ["herdr", "status", "--json"]:
+                return b'{"server":{"socket":"fixture-socket","version":"fixture-v1"}}'
             if argv[:2] == ["orchestrator", "doctor"]:
                 return b'{"runtimeSummary":{"availableIds":["codex"]}}'
             return b'{"result":{}}'
@@ -171,7 +172,7 @@ class WorktreeAllocationTest(unittest.TestCase):
         with patch.dict(os.environ, env):
             result = adapter.preflight({"jobs": [job]})
 
-        self.assertEqual(result["session_id"], "fixture-session")
+        self.assertEqual(result["session_id"], "fixture-socket")
 
     def test_managed_writer_rejects_stale_lease_before_launch(self):
         repo, worktree, base = self.git_fixture()

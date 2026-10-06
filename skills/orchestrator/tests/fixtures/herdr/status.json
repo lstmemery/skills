@@ -1,0 +1,41 @@
+{
+  "client": {
+    "binary": "<redacted>",
+    "channel": "stable",
+    "endpoint_capabilities": [
+      "<redacted>",
+      "<redacted>",
+      "<redacted>"
+    ],
+    "endpoint_protocol_generation": 1,
+    "protocol": 22,
+    "remote_bridge_idle_timeout": true,
+    "remote_host_bridge": true,
+    "session": null,
+    "version": "0.9.3"
+  },
+  "server": {
+    "capabilities": {
+      "detached_server_daemon": true,
+      "endpoint_protocol_generation": 1,
+      "health_check": true,
+      "live_handoff": true,
+      "ssh_agent_registration": true,
+      "surface_interest": true
+    },
+    "compatible": true,
+    "endpoint_compatible": true,
+    "protocol": 22,
+    "restart_needed": false,
+    "running": true,
+    "server_binary_stale": false,
+    "session": null,
+    "socket": "<redacted>",
+    "status": "running",
+    "version": "0.9.3"
+  },
+  "update": {
+    "restart_needed": false,
+    "server_binary_stale": false
+  }
+}

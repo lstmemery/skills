@@ -1,0 +1,21 @@
+{
+  "id": "<redacted>",
+  "result": {
+    "agent": {
+      "agent": "omp",
+      "agent_status": "idle",
+      "cwd": "<redacted>",
+      "focused": false,
+      "foreground_cwd": "<redacted>",
+      "pane_id": "<redacted>",
+      "revision": 2,
+      "state_change_seq": 4241,
+      "tab_id": "<redacted>",
+      "terminal_id": "<redacted>",
+      "terminal_title": "<redacted>",
+      "terminal_title_stripped": "<redacted>",
+      "workspace_id": "<redacted>"
+    },
+    "type": "agent_info"
+  }
+}

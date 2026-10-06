@@ -126,24 +126,27 @@ class NativeTransport:
     def read(self, argv):
         return parse_json(self.raw(argv))
 
+    def read_terminal(self, argv):
+        return self.raw(argv).decode("utf-8")
+
     def preflight(self, request, existing=None, status_only=False):
         for job in request["jobs"]:
             label = job.get("job_id", "job") if isinstance(job, dict) else "job"
             validate_writer_intent(job, label)
         help_bytes = self.raw([self.herdr, "--help"])
-        agent_help = self.raw([self.herdr, "agent"])
-        pane_help = self.raw([self.herdr, "pane"])
+        agent_help = self.raw([self.herdr, "agent", "--help"])
+        pane_help = self.raw([self.herdr, "pane", "--help"])
         orchestrator_help = self.raw([self.orchestrator, "help", "--json", "--compact"])
         if (digest(help_bytes) != self.binding["herdr_help_sha256"]
                 or digest(agent_help) != self.binding["herdr_agent_help_sha256"]
                 or digest(pane_help) != self.binding["herdr_pane_help_sha256"]
                 or digest(orchestrator_help) != self.binding["orchestrator_help_sha256"]):
             raise JobError("unavailable_capability", "CLI help contract changed; reverify the host binding")
-        status = self.read([self.herdr, "status"])
+        status = self.read([self.herdr, "status", "--json"])
         paths = self.binding["paths"]
         if at(status, paths["server_version"]) != self.binding["server_version"]:
             raise JobError("unavailable_capability", "Herdr server version changed; reverify the host binding")
-        session = text(at(status, paths["session_id"]), "host session identity", 4096)
+        host_endpoint = text(at(status, paths["session_id"]), "host endpoint identity", 4096)
         kinds = self.binding["supported_kinds"]
         if not isinstance(kinds, list) or not all(isinstance(kind, str) for kind in kinds):
             raise JobError("unavailable_capability", "supported_kinds must list verified Herdr kinds")
@@ -200,7 +203,7 @@ class NativeTransport:
                 if len(set(matches)) != 1:
                     raise JobError("unavailable_capability", f"exact model unavailable or ambiguous: {job['model']}")
                 models[job["job_id"]] = matches[0]
-        return {"session_id": session, "models": models, "binding": self.binding}
+        return {"session_id": host_endpoint, "models": models, "binding": self.binding}
 
     def check_export(self):
         export = self.binding["jail_export"]
@@ -314,6 +317,8 @@ class NativeTransport:
                 moved = at(result, ["result", "move_result"])
                 pane_id = text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)
                 workspace = moved.get("workspace") if isinstance(moved, dict) else None
+                if not isinstance(workspace, dict):
+                    workspace = moved.get("created_workspace") if isinstance(moved, dict) else None
                 workspace_id = (workspace.get("workspace_id") if isinstance(workspace, dict) else None)
                 workspace_id = workspace_id or (moved.get("workspace_id") if isinstance(moved, dict) else None)
                 response = {"pane_id": pane_id}
@@ -342,8 +347,8 @@ class NativeTransport:
                     raise EffectUnknown("Pi retry environment command was rejected; inspect the owned pane")
             expected = marker + profile["agent_dir"] + "__" + profile["session_dir"]
             while self.deadline.remaining():
-                terminal = self.read([self.herdr, "pane", "read", pane,
-                                      "--source", "recent-unwrapped", "--lines", "100"])
+                terminal = self.read_terminal([self.herdr, "pane", "read", pane,
+                                               "--source", "recent-unwrapped", "--lines", "100"])
                 if expected in self.terminal_output(terminal):
                     return {"retry_environment_verified": True}
                 time.sleep(min(0.1, self.deadline.remaining()))
@@ -363,8 +368,8 @@ class NativeTransport:
         codex = agent_route and job["spec"]["route"]["runtime"] == "codex"
         output = None
         if agent_route:
-            terminal = self.read([self.herdr, "pane", "read", job["pane_id"],
-                                  "--source", "visible", "--lines", "200"])
+            terminal = self.read_terminal([self.herdr, "pane", "read", job["pane_id"],
+                                           "--source", "visible", "--lines", "200"])
             output = self.terminal_output(terminal)
         pending = job.get("pending_effect")
         prompt_may_be_echoed = (job.get("phase") == "submitted"
