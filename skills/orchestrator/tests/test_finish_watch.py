@@ -112,6 +112,58 @@ class FinishWatchTest(unittest.TestCase):
         self.assertEqual(stdout, "DONE task-arrives\n")
         self.assertEqual(stderr, "")
 
+    def test_watch_resolves_each_path_argument_from_caller_directory(self):
+        watch_script = PACKAGE / "scripts" / "watch-results.py"
+        path_modes = [
+            (run_absolute, task_list_absolute, state_file_absolute)
+            for run_absolute in (False, True)
+            for task_list_absolute in (False, True)
+            for state_file_absolute in (False, True)
+        ]
+
+        for index, (run_absolute, task_list_absolute, state_file_absolute) in enumerate(path_modes):
+            with self.subTest(
+                run_absolute=run_absolute,
+                task_list_absolute=task_list_absolute,
+                state_file_absolute=state_file_absolute,
+            ):
+                caller = self.run_dir / "path-cases" / f"case-{index}"
+                run = caller / "run"
+                run.mkdir(parents=True)
+                task_list = run / "task-ids.txt"
+                task_list.write_text("task-arrives\n")
+                state_file = run / ".watch-state.json"
+
+                run_argument = str(run) if run_absolute else "run"
+                task_list_argument = (
+                    str(task_list) if task_list_absolute else "run/task-ids.txt"
+                )
+                state_file_argument = (
+                    str(state_file) if state_file_absolute else "run/.watch-state.json"
+                )
+                process = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        str(watch_script),
+                        run_argument,
+                        task_list_argument,
+                        "--timeout-seconds",
+                        "0",
+                        "--state-file",
+                        state_file_argument,
+                    ],
+                    cwd=caller,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertEqual(process.returncode, 1, process.stderr)
+                self.assertEqual(process.stdout, "TIMEOUT\n")
+                self.assertEqual(process.stderr, "")
+                self.assertTrue(state_file.is_file())
+
     @patch("finish_watch.subprocess.run")
     def test_close_herdr_workspace_uses_exact_argv_without_a_shell(self, run):
         run.return_value = subprocess.CompletedProcess(

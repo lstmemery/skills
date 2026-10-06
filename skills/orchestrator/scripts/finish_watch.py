@@ -216,8 +216,6 @@ class ResultWatcher:
             for task_id in self.task_ids
         }
         self.state_file = Path(state_file) if state_file is not None else self.run_dir / ".watch-results-state.json"
-        if not self.state_file.is_absolute():
-            self.state_file = self.run_dir / self.state_file
         self._check_state_path()
         if self.state_file.exists():
             state = _regular_json(self.state_file, "watch state")
@@ -400,9 +398,14 @@ def _positive_float(value):
     return parsed
 
 
+def _caller_path(value):
+    """Interpret CLI paths relative to the caller's working directory."""
+    return Path(os.path.abspath(os.fspath(value)))
+
+
 def finish_main(argv=None):
     parser = argparse.ArgumentParser(description="Validate and finish one coordinator task result.")
-    parser.add_argument("run_dir", type=Path)
+    parser.add_argument("run_dir", type=_caller_path)
     parser.add_argument("task_id")
     parser.add_argument("--revision", required=True, type=_positive_int)
     parser.add_argument("--summary")
@@ -431,23 +434,20 @@ def finish_main(argv=None):
 
 def watch_main(argv=None):
     parser = argparse.ArgumentParser(description="Watch canonical task directories for one new result.")
-    parser.add_argument("run_dir", type=Path)
-    parser.add_argument("task_list", type=Path)
+    parser.add_argument("run_dir", type=_caller_path)
+    parser.add_argument("task_list", type=_caller_path)
     parser.add_argument("--timeout-seconds", type=_nonnegative_float, default=3300)
     parser.add_argument("--interval-seconds", type=_positive_float, default=20)
-    parser.add_argument("--state-file", type=Path)
+    parser.add_argument("--state-file", type=_caller_path)
     args = parser.parse_args(argv)
     try:
         task_ids = read_task_list(args.run_dir, args.task_list)
-        state_file = args.state_file
-        if state_file is not None and not state_file.is_absolute():
-            state_file = args.run_dir / state_file
         task_id = watch_for_result(
             args.run_dir,
             task_ids,
             args.timeout_seconds,
             args.interval_seconds,
-            state_file,
+            args.state_file,
         )
     except (records.JobError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
