@@ -208,6 +208,14 @@
       "routing_critical": true,
       "triggers": "skills/writing-for-humans/tests/trigger-cases.json",
       "rationale": "Prose-only copy-editing guidance; no executable code. The leave-code-and-data-alone refusal boundary is guarded by trigger fixtures."
+    },
+    {
+      "name": "ticket-readiness",
+      "coverage": "no-suite",
+      "suites": [],
+      "routing_critical": false,
+      "triggers": null,
+      "rationale": "Prose-only, read-only review skill (SKILL.md); no executable code. Behaviour is exercised by maintainer eval data in skills/ticket-readiness/evals/ (fixtures + expectations), which the ordinary workflow does not load."
     }
   ]
 }
