@@ -42,6 +42,9 @@ acceptance of worker output.
 - Local commits are allowed. Present code for the user's decision before opening
   a PR or applying/merging changes into the target branch, including local-only
   fixes. Approval to open a PR does not also authorize its later merge.
+- When writing worker briefs or making commits, omit AI co-author and attribution
+  trailers from commit messages and PR bodies, including any that a harness or
+  template might otherwise request.
 - Every coding task runs the repository's applicable checks and the existing
   `code-review` skill's Standards/Spec review before human inspection. Resolve
   accepted findings and record any rejection with its reason. Follow that

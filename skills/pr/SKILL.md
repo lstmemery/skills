@@ -33,6 +33,9 @@ Use this template for writing the PR body:
 <optional: potential ramifications of merge>
 ```
 
+Do not add AI co-author or attribution trailers to the PR body or associated
+commit-message suggestions.
+
 If the repository or the user provides a PR template, follow it and map these sections onto it.
 
 ## Sections
