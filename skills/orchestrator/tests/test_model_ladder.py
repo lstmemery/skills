@@ -49,6 +49,21 @@ class LadderTest(unittest.TestCase):
                                             "jobs": [{**self.job, **values}]}))
         return prepare(self.manifest, self.policy)["jobs"][0]
 
+    @staticmethod
+    def fallback_evidence(reason):
+        if reason == "exhausted":
+            return {"source": "quota-api", "observed_at": "2026-10-10T16:00:00Z",
+                    "quota": {"remaining": 0}}
+        return {"source": "provider", "observed_at": "2026-10-10T16:00:00Z",
+                "error": {"kind": reason, "message": "observed provider response", "code": "fixture"}}
+
+    @staticmethod
+    def escalation(level):
+        return {"previous_level": level - 1,
+                "failure": {"kind": "failure", "source": "fixture-run",
+                             "observed_at": "2026-10-10T15:59:00Z", "summary": "lower level failed"},
+                "expected_improvement": "complete the assigned task"}
+
     def fixture(self):
         fixture = test_transport.TransportTest()
         fixture.setUp()
@@ -63,7 +78,7 @@ class LadderTest(unittest.TestCase):
         for level, pair in enumerate(EXPECTED, 1):
             for index, expected in enumerate(pair):
                 with self.subTest(level=level, choice=index):
-                    fallback = {"reason": "unavailable", "evidence": "Pinned primary catalog lacks exact model"} if index else None
+                    fallback = {"reason": "unavailable", "evidence": self.fallback_evidence("unavailable")} if index else None
                     selection = select(levels, level, fallback)
                     self.assertEqual(tuple(selection["requested"].values()), expected)
                     model, effort, harness, provider = expected
@@ -71,6 +86,8 @@ class LadderTest(unittest.TestCase):
                     native_provider = "opencode-go" if provider == "opencode go" else provider
                     self.assertEqual((selection["runtime"], selection["provider"]), (runtime, native_provider))
                     arguments = {"model_level": level}
+                    if level > 1:
+                        arguments["escalation"] = self.escalation(level)
                     if fallback:
                         arguments["model_fallback"] = fallback
                     spec = self.prepared(**arguments)
@@ -99,12 +116,11 @@ class LadderTest(unittest.TestCase):
         self.assertNotIn("model_route", explicit)
         self.assertEqual((explicit["route"]["runtime"], explicit["model"], explicit["override"]["effort"]),
                          ("codex", "gpt-6.1-sol", "high"))
-        named = self.prepared(override={"instruction": "Named harness", "runtime": "omp"})
-        self.assertEqual(named["route"]["runtime"], "omp")
-        self.assertIsNone(named["model"])
+        with self.assertRaises(JobError):
+            self.prepared(override={"instruction": "Named harness", "runtime": "omp"})
         effort_only = self.prepared(override={"instruction": "Pinned effort", "effort": "max"})
-        self.assertEqual(effort_only["override"]["effort"], "max")
-        self.assertIsNone(effort_only["model"])
+        self.assertEqual((effort_only["model"], effort_only["provider"], effort_only["override"]["effort"]),
+                         ("gpt-6-luna", "codex", "max"))
         instruction = self.prepared(override={"instruction": "Preserve the user's scope"})
         self.assertEqual(instruction["override"]["instruction"], "Preserve the user's scope")
         with self.assertRaises(JobError):
@@ -119,7 +135,8 @@ class LadderTest(unittest.TestCase):
 
     def test_preflight_rejects_opencode_go_codex_spec_before_host_discovery(self):
         fixture = self.fixture()
-        spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit", "evidence": "Observed 429"})
+        spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit",
+                          "evidence": self.fallback_evidence("rate_limit")})
         spec["route"]["runtime"] = "codex"
         spec["kind"] = "codex"
         with self.assertRaisesRegex(JobError, "OpenCode Go requires the Pi harness"):
@@ -136,7 +153,8 @@ class LadderTest(unittest.TestCase):
 
     def test_effect_refuses_opencode_go_codex_route_before_any_action(self):
         fixture = self.fixture()
-        spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit", "evidence": "Observed 429"})
+        spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit",
+                          "evidence": self.fallback_evidence("rate_limit")})
         spec["route"]["runtime"] = "codex"
         job = {"spec": spec, "pane_id": "old:1", "agent_name": "route-test", "resolved_model": None}
         fake = test_transport.FakeHerdr()
@@ -147,8 +165,8 @@ class LadderTest(unittest.TestCase):
 
     def test_same_level_fallback_requires_concrete_reason_and_retains_evidence(self):
         for reason in ("unavailable", "rate_limit", "exhausted"):
-            fallback = {"reason": reason, "evidence": "Recorded provider error at 2026-10-10T16:00Z"}
-            job = self.prepared(model_level=7, model_fallback=fallback)
+            fallback = {"reason": reason, "evidence": self.fallback_evidence(reason)}
+            job = self.prepared(model_level=7, escalation=self.escalation(7), model_fallback=fallback)
             self.assertEqual((job["model_route"]["level"], job["model"], job["override"]["effort"]),
                              (7, "claude-sonnet-5-5", "high"))
             self.assertEqual(job["model_route"]["fallback"], fallback)
@@ -157,11 +175,14 @@ class LadderTest(unittest.TestCase):
                          {"reason": "slow", "evidence": "A difficult task"},
                          {"reason": "rate_limit", "evidence": "429", "level": 8}):
             with self.subTest(fallback=fallback), self.assertRaises(JobError):
-                self.prepared(model_level=7, model_fallback=fallback)
+                self.prepared(model_level=7, escalation=self.escalation(7), model_fallback=fallback)
         with self.assertRaises(JobError):
             self.prepared(model_fallback={"reason": "unavailable", "evidence": "Missing model"})
         with self.assertRaises(JobError):
-            self.prepared(model_level=7, model_fallback={"reason": "rate_limit", "evidence": "429"},
+            self.prepared(model_level=7, escalation=self.escalation(7),
+                          model_fallback={"reason": "rate_limit", "evidence": {"source": "fixture",
+                              "observed_at": "2026-10-10T16:00:00Z",
+                              "error": {"kind": "rate_limit", "message": "429"}}},
                           override={"instruction": "Pinned effort", "effort": "max"})
 
     def test_jail_and_shopping_boundaries_are_preserved(self):
@@ -218,14 +239,14 @@ class LadderTest(unittest.TestCase):
     def test_installed_catalog_shapes_and_provider_disambiguation(self):
         self.assertEqual(catalog_models({"models": [{"id": "old"}]}, "codex"), [{"id": "old"}])
         fixture = self.fixture()
-        spec = self.prepared(model_level=6)
+        spec = self.prepared(model_level=6, escalation=self.escalation(6))
         fixture.catalog = {"runtimes": [{"id": "codex", "status": "available", "models": [{"id": "gpt-6.1-sol"}]}]}
         result = fixture.adapter.preflight({"jobs": [spec]})
         self.assertEqual(result["models"], {spec["job_id"]: "gpt-6.1-sol"})
         table = "provider model context max-out thinking images\nopencode-go mimo-v2.6-pro 1M 128K yes yes\nopenrouter mimo-v2.6-pro 1M 128K yes yes\n"
         fixture.adapter.read_terminal = lambda argv: table
         fixture.adapter.pi_model_efforts = lambda provider, model: ["low", "high", "max"]
-        spec = self.prepared(model_level=5)
+        spec = self.prepared(model_level=5, escalation=self.escalation(5))
         result = fixture.adapter.preflight({"jobs": [spec]})
         self.assertEqual(result["models"], {spec["job_id"]: "opencode-go/mimo-v2.6-pro"})
         with self.assertRaises(JobError):
@@ -236,7 +257,7 @@ class LadderTest(unittest.TestCase):
         fixture.adapter.read_terminal = lambda argv: "provider model context max-out thinking images\nopencode-go mimo-v2.6-pro 1M 128K yes yes\n"
         fixture.adapter.pi_model_efforts = lambda provider, model: ["off", "minimal", "low", "medium", "high"]
         with self.assertRaisesRegex(JobError, "native Pi would clamp"):
-            fixture.adapter.preflight({"jobs": [self.prepared(model_level=5)]})
+            fixture.adapter.preflight({"jobs": [self.prepared(model_level=5, escalation=self.escalation(5))]})
         self.assertFalse(any(call[1:3] in (["pane", "split"], ["agent", "start"]) for call in fixture.calls))
 
     def test_partial_catalogs_and_exact_model_gaps_precede_effects(self):
@@ -245,7 +266,7 @@ class LadderTest(unittest.TestCase):
                         {"models": [{"id": "opus"}]}):
             fixture.catalog = catalog
             with self.assertRaises(JobError):
-                fixture.adapter.preflight({"jobs": [self.prepared(model_level=8)]})
+                        fixture.adapter.preflight({"jobs": [self.prepared(model_level=8, escalation=self.escalation(8))]})
         self.assertFalse(any(call[1:3] in (["pane", "split"], ["agent", "start"]) for call in fixture.calls))
 
     def test_opencode_go_fallback_uses_pi_offline_catalog_and_effort_metadata(self):
@@ -256,8 +277,8 @@ class LadderTest(unittest.TestCase):
         discovered = []
         fixture.adapter.read_terminal = lambda argv: discovered.append(argv) or table
         fixture.adapter.pi_model_efforts = lambda provider, model: ["off", "low", "medium", "high", "xhigh", "max"]
-        spec = self.prepared(model_level=4,
-                             model_fallback={"reason": "rate_limit", "evidence": "Pinned 429"})
+        spec = self.prepared(model_level=4, escalation=self.escalation(4),
+                             model_fallback={"reason": "rate_limit", "evidence": self.fallback_evidence("rate_limit")})
         result = fixture.adapter.preflight({"jobs": [spec]})
         self.assertEqual(result["models"][spec["job_id"]], "opencode-go/gpt-6-luna")
         self.assertEqual(discovered, [["pi", "--offline", "--list-models"]])
