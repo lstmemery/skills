@@ -13,6 +13,7 @@ import re
 import time
 
 from .records import JobError, encoded, fields, integer, load_json, policy_record, save, text, version
+from .model_ladder import billing_pool
 
 
 STATE_NAME = "provider-admission.json"
@@ -21,14 +22,17 @@ POLICY_PATH = Path(__file__).resolve().parents[2] / "launch-policy.json"
 
 
 def normalize_provider(value):
-    value = text(value, "provider", 100).strip()
+    value = billing_pool(text(value, "provider", 100))
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", value) is None:
         raise JobError("invalid_input", "provider must be a simple provider identifier")
     return value.casefold()
 
 
 def normalize_model(value):
-    return text(value, "model", 200).strip().casefold()
+    value = text(value, "model", 200).strip().casefold()
+    if "/" in value and billing_pool(value.split("/", 1)[0]) in ("codex", "claude", "opencode-go"):
+        return text(value.split("/", 1)[1], "native model", 200)
+    return value
 
 
 def _retry_after(value, now):
@@ -209,18 +213,31 @@ class AdmissionStore:
         for lease in state["leases"]:
             fields(lease, ["lease_id", "provider", "model", "run_id", "acquired_at", "cap"], label="admission lease")
             text(lease["lease_id"], "lease_id", 512)
-            normalize_provider(lease["provider"])
-            normalize_model(lease["model"])
+            lease["provider"] = normalize_provider(lease["provider"])
+            lease["model"] = normalize_model(lease["model"])
             text(lease["run_id"], "run_id", 1024)
             integer(lease["cap"], "cap", 1, 64)
             self._timestamp(lease["acquired_at"], "acquired_at")
+        original_backoff_keys = set()
         for backoff in state["backoffs"]:
             fields(backoff, ["provider", "model", "until", "recorded_at", "source"], label="provider backoff")
-            normalize_provider(backoff["provider"])
-            normalize_model(backoff["model"])
+            original_key = (text(backoff["provider"], "backoff provider").casefold(),
+                            text(backoff["model"], "backoff model").strip().casefold())
+            if original_key in original_backoff_keys:
+                raise JobError("invalid_input", "admission state contains duplicate backoff keys")
+            original_backoff_keys.add(original_key)
+            backoff["provider"] = normalize_provider(backoff["provider"])
+            backoff["model"] = normalize_model(backoff["model"])
             self._timestamp(backoff["until"], "backoff until")
             self._timestamp(backoff["recorded_at"], "backoff recorded_at")
             text(backoff["source"], "backoff source", 100)
+        # Older alias-keyed backoffs can collide after pool migration; retain the later reset.
+        merged = {}
+        for item in state["backoffs"]:
+            key = (item["provider"], item["model"].casefold())
+            if key not in merged or item["until"] > merged[key]["until"]:
+                merged[key] = item
+        state["backoffs"] = list(merged.values())
         self._unique(state)
         return state
 
@@ -261,9 +278,10 @@ class AdmissionStore:
             if existing:
                 if (existing["provider"].casefold(), existing["model"].casefold()) != (provider_key, model_key):
                     raise JobError("conflict", "lease_id already belongs to a different provider or model")
-                backoff = next((item for item in state["backoffs"]
+                backoff = max((item for item in state["backoffs"]
                                 if item["provider"].casefold() == provider_key
-                                and item["model"].casefold() == model_key and item["until"] > now), None)
+                                and item["model"].casefold() in (model_key, "*") and item["until"] > now),
+                              key=lambda item: item["until"], default=None)
                 if backoff and not bypass_admission:
                     if pruned:
                         self._save(state)
@@ -274,9 +292,10 @@ class AdmissionStore:
                     self._save(state)
                 return self._admission_result(state, provider_key, model_key, cap, admitted=True, lease_id=lease_id)
 
-            backoff = next((item for item in state["backoffs"]
+            backoff = max((item for item in state["backoffs"]
                             if item["provider"].casefold() == provider_key
-                            and item["model"].casefold() == model_key and item["until"] > now), None)
+                            and item["model"].casefold() in (model_key, "*") and item["until"] > now),
+                              key=lambda item: item["until"], default=None)
             if backoff and not bypass_admission:
                 result = self._admission_result(state, provider_key, model_key, cap, admitted=False,
                                                 reason="backoff", retry_at=backoff["until"])
@@ -364,7 +383,7 @@ class AdmissionStore:
             backoffs = [item for item in state["backoffs"]
                         if item["until"] > now
                         and (provider_key is None or item["provider"].casefold() == provider_key)
-                        and (model_key is None or item["model"].casefold() == model_key)]
+                        and (model_key is None or item["model"].casefold() in (model_key, "*"))]
             if pruned:
                 self._save(state)
             return {"provider": provider_key, "model": model_key,
@@ -393,7 +412,7 @@ def parser():
     status.add_argument("--model")
     rate_limit = commands.add_parser("rate-limit", help="record a provider/model rate-limit backoff")
     rate_limit.add_argument("--provider", required=True)
-    rate_limit.add_argument("--model", required=True)
+    rate_limit.add_argument("--model", required=True, help="exact model, or '*' for observed billing-pool exhaustion")
     choice = rate_limit.add_mutually_exclusive_group()
     choice.add_argument("--retry-after", help="Retry-After delta seconds or HTTP date")
     choice.add_argument("--reset-at", help="provider reset timestamp or delay in seconds")

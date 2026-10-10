@@ -34,6 +34,7 @@ class JobsTest(unittest.TestCase):
         self.task.write_text("Inspect the assigned fixture. Literal `printf secret` and $(touch SHOULD_NOT_EXIST).\n")
         self.policy = self.root / "policy.json"
         self.policy.write_bytes(POLICY.read_bytes())
+        (self.root / "model-ladder.csv").write_bytes((PACKAGE / "model-ladder.csv").read_bytes())
         self.manifest = self.root / "manifest.json"
         self.fixture = self.root / "fixture.json"
         self.write_jobs(1)
@@ -895,12 +896,14 @@ class JobsTest(unittest.TestCase):
         self.assertFalse((self.root / "events.json").exists())
         self.assertFalse((self.run / "state.json").exists())
 
-    def test_ordinary_default_requires_a_runtime_decision(self):
+    def test_ordinary_default_uses_cheapest_ladder_level(self):
         manifest = json.loads(self.manifest.read_text())
         del manifest["jobs"][0]["override"]
         self.manifest.write_text(json.dumps(manifest))
         code, result = self.call(preview=True)
-        self.assertEqual((code, result["error"]), (5, "decision_needed"))
+        self.assertEqual(code, 0)
+        self.assertEqual((result["jobs"][0]["model"], result["jobs"][0]["effort"]),
+                         ("gpt-6-luna", "low"))
 
     def test_override_instruction_leads_the_worker_prompt(self):
         self.call()

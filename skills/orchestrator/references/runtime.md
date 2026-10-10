@@ -31,7 +31,9 @@ avoid expanding this task into unrelated host provisioning.
 
 ## Models and quotas
 
-Omit an explicit model when the user has no requirement. Before passing one, use
+For ordinary agents, select the default/level through
+[model routing](model-routing.md); explicit user pins win. Keep jail defaults
+outside that ladder. Before passing a model, use
 `orchestrator models <runtime> --json --compact` or the selected harness's live
 equivalent. Match requested labels to returned IDs/aliases; preserve provider-native
 values. Resolve latest/default through returned metadata, not version-name sorting.

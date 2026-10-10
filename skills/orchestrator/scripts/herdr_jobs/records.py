@@ -216,9 +216,16 @@ def absolute(value, base):
 
 
 def policy_record(value):
+    # model_ladder imports the shared validators in records.
+    from .model_ladder import billing_pool
+
     fields(value, ["schema_version", "default_concurrency", "max_concurrency", "topology", "routes", "runtime_kinds"],
-           ["provider_admission", "jail_stream_idle_timeout_ms"])
+           ["provider_admission", "jail_stream_idle_timeout_ms", "model_ladder"])
     version(value["schema_version"])
+    if "model_ladder" in value:
+        ladder = fields(value["model_ladder"], ["csv", "default_level"], label="model_ladder")
+        text(ladder["csv"], "model ladder CSV path", 4096)
+        integer(ladder["default_level"], "default model level", 1, 8)
     if value["topology"] != "new-workspace":
         invalid("version 1 supports new-workspace topology only")
     value["jail_stream_idle_timeout_ms"] = jail_stream_idle_timeout_record(
@@ -254,13 +261,20 @@ def policy_record(value):
     if not isinstance(admission["provider_caps"], dict):
         invalid("provider_caps must be an object")
     normalized_caps = {}
+    original_keys = set()
     for provider, cap in admission["provider_caps"].items():
         text(provider, "provider cap key", 100)
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
             invalid("provider cap keys must be simple provider identifiers")
-        normalized_provider = provider.casefold()
-        if normalized_provider in normalized_caps:
+        if provider.casefold() in original_keys:
             invalid(f"duplicate provider cap key after case normalization: {provider}")
+        original_keys.add(provider.casefold())
+        normalized_provider = billing_pool(provider)
+        if normalized_provider in normalized_caps:
+            # Older policies gave aliases independent caps; use the stricter shared cap.
+            normalized_caps[normalized_provider] = min(normalized_caps[normalized_provider],
+                                                       integer(cap, f"provider cap for {provider}", 1, 64))
+            continue
         normalized_caps[normalized_provider] = integer(cap, f"provider cap for {provider}", 1, 64)
     admission["provider_caps"] = normalized_caps
     value["provider_admission"] = admission
@@ -276,8 +290,19 @@ def ensure_task_admitted(task_kind, job_id):
 
 
 def prepare(manifest_path, policy_path):
+    # The routing module uses these record validators; load it after module initialization.
+    from .model_ladder import HARNESS_ALIASES, billing_pool, load_ladder, select
+
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
+    ladder_config = policy.get("model_ladder")
+    ladder_levels = None
+    if ladder_config is not None:
+        ladder_path = Path(policy_path).absolute().parent / ladder_config["csv"]
+        ladder_bytes = read_regular(ladder_path, 65536)
+        ladder_levels = load_ladder(ladder_path, ladder_bytes)
+        # Pin all eight levels, including choices not selected by the current manifest.
+        ladder_config["sha256"] = digest(ladder_bytes)
     manifest = fields(load_json(manifest_path), ["schema_version", "request_id", "jobs"],
                       ["concurrency", "retry_override"])
     version(manifest["schema_version"])
@@ -293,7 +318,8 @@ def prepare(manifest_path, policy_path):
     for job in manifest["jobs"]:
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
-               ["override", "repository_worktree", "worker_result", "task_class"], "job")
+               ["override", "repository_worktree", "worker_result", "task_class",
+                "model_level", "model_fallback"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -311,8 +337,37 @@ def prepare(manifest_path, policy_path):
         if override is not None:
             fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
+        explicit = override is not None and any(key in override for key in ("runtime", "model", "provider", "effort"))
+        selection = None
+        if "model_level" in job:
+            integer(job["model_level"], "model_level", 1, 8)
+        if "model_fallback" in job and "model_level" not in job:
+            invalid("model_fallback requires an explicit model_level")
+        if ("model_level" in job or "model_fallback" in job) and route["mode"] != "agent":
+            invalid("model ladder applies only to ordinary agents; preserve the jail route")
+        if "model_fallback" in job and explicit:
+            invalid("explicit model/harness/provider/effort requests are pinned; fallback requires a new authorized request")
+        if "model_level" in job and ladder_config is None:
+            invalid("model_level requires a model_ladder policy")
+        if route["mode"] == "agent" and ladder_config is not None:
+            use_ladder = not explicit and (route["runtime"] is None or "model_level" in job)
+            if use_ladder:
+                selection = select(ladder_levels, job.get("model_level", ladder_config["default_level"]),
+                                   job.get("model_fallback"))
+                selection["ladder_sha256"] = digest(ladder_bytes)
+                route["runtime"] = selection["runtime"]
+                model = selection["model"]
+                override = {"instruction": (override or {}).get("instruction", "Configured model ladder selection"),
+                            "effort": selection["effort"]}
+            elif explicit and route["runtime"] is None and "runtime" not in override:
+                # Explicit pins use their requested fields and the default harness only.
+                route["runtime"] = select(ladder_levels, job.get("model_level", ladder_config["default_level"]))["runtime"]
+        if override is not None:
+            fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
+            text(override["instruction"], "override instruction", 10000)
             if "runtime" in override:
-                named = identifier(override["runtime"], "override runtime")
+                requested_runtime = identifier(override["runtime"], "override runtime")
+                named = HARNESS_ALIASES.get(requested_runtime, requested_runtime)
                 if route["mode"] == "jail" and named != route["runtime"]:
                     raise JobError("decision_needed",
                                    f"{job_id}: override runtime {named} would leave the {job['task_kind']} jail route; "
@@ -323,13 +378,17 @@ def prepare(manifest_path, policy_path):
             if "effort" in override:
                 effort = text(override["effort"], "effort", 32)
             if "provider" in override:
-                provider = text(override["provider"], "provider", 100)
+                provider = billing_pool(text(override["provider"], "provider", 100))
                 if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", provider) is None:
                     invalid("provider must be a simple provider identifier")
             else:
                 provider = None
         else:
             provider = None
+        if selection is not None:
+            provider = selection["provider"]
+        if route["mode"] == "jail" and provider is not None:
+            invalid("provider overrides are unsupported on the jail route; preserve the research boundary")
         runtime = route["runtime"]
         if runtime is None:
             raise JobError("decision_needed", f"{job_id}: choose an ordinary-job runtime in policy or a current-request override")
@@ -341,6 +400,8 @@ def prepare(manifest_path, policy_path):
             validate_effort(runtime, effort)
         if runtime == "pi" and provider is not None and model is None:
             invalid(f"{job_id}: pi provider override requires a model")
+        if runtime == "claude-code" and provider not in (None, "claude"):
+            raise JobError("unavailable_capability", "Claude provider override has no verified native adapter")
         task_path = absolute(job["task_file"], manifest_path.parent)
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")
@@ -363,6 +424,9 @@ def prepare(manifest_path, policy_path):
         prepared_job = {**job, "task_file": task_path, "cwd": cwd,
                         "task": task, "route": route, "model": model,
                         "provider": provider, "kind": policy["runtime_kinds"][runtime]}
+        if selection is not None:
+            prepared_job["model_route"] = selection
+            prepared_job["override"] = override
         if route["mode"] == "jail":
             timeout_policy = policy["jail_stream_idle_timeout_ms"]
             prepared_job["jail_stream_idle_timeout_ms"] = timeout_policy["task_classes"].get(

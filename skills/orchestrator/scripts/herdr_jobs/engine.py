@@ -40,10 +40,10 @@ class Engine:
     @staticmethod
     def provider_for(spec, resolved_model):
         if spec.get("provider"):
-            return spec["provider"].casefold()
+            return normalize_provider(spec["provider"])
         if resolved_model and "/" in resolved_model:
-            return resolved_model.split("/", 1)[0].casefold()
-        return spec["route"]["runtime"].casefold()
+            return normalize_provider(resolved_model.split("/", 1)[0])
+        return normalize_provider(spec["route"]["runtime"])
 
     def admission_lease_id(self, request_id, job_id, attempt_id):
         identity = encoded({"run_dir": str(self.root), "request_id": request_id,

@@ -26,6 +26,11 @@ acceptance of worker output.
   Fast models are preferred for coordinators. No exact model is pinned here.
 - Explicit model and effort requests remain fixed; change defaults only through
   an accepted policy update backed by a task-class comparison.
+- Ordinary workers use the cost-conscious eight-level CSV ladder according to
+  [model routing](references/model-routing.md). Start at the cheapest sufficient
+  level, record bounded escalation evidence, and preserve the three independent
+  billing pools. That reference owns ordinary model defaults and same-level
+  fallback selection; explicit requests and the research/shopping jail rules win.
 - Inside Herdr, place each worker in a new pane in its own new workspace; the
   managed path's topology is set and validated in
   [launch-policy.json](launch-policy.json). Preserve the user's focus. Support different harnesses across workers.
@@ -90,9 +95,10 @@ acceptance of worker output.
   route; never reach outward to a host Herdr session.
 - "Luna agents" (or "luna workers") means the **Codex** harness running
   `gpt-6-luna` at **max** effort (`codex -m gpt-6-luna -c
-  model_reasoning_effort=max`, Herdr kind `codex`), not pi. Use pi with
-  `openai-codex/gpt-6-luna` only as a fallback when Codex itself is broken,
-  and say so. (User instruction 2026-09-28, after Codex was repaired.)
+  model_reasoning_effort=max`, Herdr kind `codex`). This named request is pinned
+  at the ladder's level 4 primary. The 2026-10-10 CSV supersedes the older Pi
+  fallback preference: the configured fallback keeps Codex and uses OpenCode Go.
+  Verify its native provider capability; never silently substitute Pi.
 - Retry tuning is run-scoped. Prefer a supported per-run override and record it
   in run state. Never edit shared pi/Codex settings for transient rate limits;
   when a runtime has no supported per-run override, record the staged change and

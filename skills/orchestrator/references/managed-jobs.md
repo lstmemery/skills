@@ -63,11 +63,20 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command route `omp-train --claude` documented in [PREFERENCES.md](../PREFERENCES.md). Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
+
+Ordinary jobs can select `model_level: 1` through `8`; omission uses the
+policy's CSV default unless a legacy ordinary runtime or explicit override is
+set. `model_fallback` requires an explicit level and exactly `reason` and
+`evidence`, as defined in [model routing](model-routing.md). These fields are
+refused on jail routes. Explicit tuple overrides win and cannot silently
+fallback. Preview includes effective provider, effort, and the pinned route;
+live preflight validates exact native model/provider/effort capabilities before
+any pane or worker is created.
 
 For a jailed Codex job, optional `task_class` selects the per-run provider
 stream idle timeout from `launch-policy.json`: `short_routine` uses 300000 ms
@@ -160,7 +169,7 @@ allocator exits unsuccessfully after `get`, reconcile `treehouse status --json`
 before another allocation attempt. The helper never retries and emits a record
 only after allocation and verification succeed.
 
-Ordinary runtime has no invented default: either set a settled default in policy or supply an explicit current-request override. The override instruction leads the worker prompt as the current user instruction. A runtime override on an `ordinary` job selects that Herdr-agent runtime. On a `deep_research` job it may only restate the policy runtime; naming a different one is refused (`decision_needed`) rather than converting the job out of its isolation route. When the user explicitly names another runtime for deep-research work, re-issue it as `task_kind: ordinary`. Exact unavailable runtimes/models produce an actionable failure, without substitution. Exact models are checked against discovery and pinned. Exact jail model selection is unsupported until its separate catalog is verified; omit the model for the jail runtime default. For admission, an explicit `provider` override wins; otherwise the provider comes from the resolved model ID prefix or the runtime ID. The model key is the resolved model ID, or `default` when no model was requested.
+Ordinary runtime/model/effort defaults come from the configured CSV ladder, as described in [model routing](model-routing.md). A legacy policy without the ladder still requires a settled ordinary runtime or explicit request override. The override instruction leads the worker prompt as the current user instruction. A runtime override on an `ordinary` job selects that Herdr-agent runtime. On a `deep_research` job it may only restate the policy runtime; naming a different one is refused (`decision_needed`) rather than converting the job out of its isolation route. When the user explicitly names another runtime for deep-research work, re-issue it as `task_kind: ordinary`. Exact unavailable runtimes/models produce an actionable failure, without substitution. Exact models are checked against discovery and pinned. Exact jail model selection is unsupported until its separate catalog is verified; omit the model for the jail runtime default. For admission, an explicit `provider` override wins; otherwise the provider comes from the resolved model ID prefix or the runtime ID. The model key is the resolved model ID, or `default` when no model was requested.
 
 ## State and recovery
 

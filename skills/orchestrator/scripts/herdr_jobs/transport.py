@@ -10,12 +10,16 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
+import urllib.error
+import urllib.request
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
                       effort_arguments, validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
+from .model_ladder import billing_pool, provider_arguments
 
 
 class BudgetExpired(Exception):
@@ -38,6 +42,38 @@ ACTIVE_TURN_STATUS = re.compile(
     r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
     re.IGNORECASE,
 )
+
+
+def catalog_models(catalog, runtime):
+    if not isinstance(catalog, dict):
+        raise JobError("unavailable_capability", "model discovery returned no catalog object")
+    if "runtimes" in catalog:
+        runtimes = catalog["runtimes"]
+        if not isinstance(runtimes, list):
+            raise JobError("unavailable_capability", "model discovery returned invalid runtimes")
+        matching = [item for item in runtimes if isinstance(item, dict) and item.get("id") == runtime]
+        if len(matching) != 1 or matching[0].get("status") != "available":
+            raise JobError("unavailable_capability", f"{runtime} model discovery incomplete; verify an exact catalog "
+                           "adapter before launch, or use the configured fallback with unavailable evidence")
+        catalog = matching[0]
+    if not isinstance(catalog.get("models"), list):
+        raise JobError("unavailable_capability", "model discovery returned no models list")
+    return catalog["models"]
+
+
+def pi_catalog(output):
+    lines = output.splitlines()
+    if not lines or lines[0].split()[:2] != ["provider", "model"]:
+        raise JobError("unavailable_capability", "Pi native model table contract changed")
+    models = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) != 6:
+            raise JobError("unavailable_capability", "Pi native model table contains a malformed row")
+        models.append({"id": f"{parts[0]}/{parts[1]}"})
+    return {"models": models}
 
 
 class Deadline:
@@ -191,19 +227,107 @@ class NativeTransport:
                     raise JobError("unavailable_capability", "omp-train is unavailable")
                 if job["model"] is not None:
                     raise JobError("unavailable_capability", "exact jail model discovery is not verified; omit the model or verify a new adapter")
-            elif runtime not in available:
+            elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
+            provider_catalog = None
+            if job["route"]["mode"] == "agent" and runtime == "codex" and job.get("provider") not in (None, "codex"):
+                provider_catalog = self.codex_provider_catalog(job["provider"])
             if job["model"] is not None and job["job_id"] not in models:
-                catalog = self.read([self.orchestrator, "models", runtime, "--json", "--compact"])
-                if not isinstance(catalog, dict) or not isinstance(catalog.get("models"), list):
-                    raise JobError("unavailable_capability", "model discovery returned no models list")
-                matches = [item["id"] for item in catalog["models"] if isinstance(item, dict)
+                if provider_catalog is not None:
+                    catalog = provider_catalog
+                elif runtime == "pi":
+                    catalog = pi_catalog(self.read_terminal(["pi", "--offline", "--list-models"]))
+                else:
+                    catalog = self.read([self.orchestrator, "models", runtime, "--json", "--compact"])
+                items = catalog_models(catalog, runtime)
+                requested = job["model"]
+                provider = job.get("provider")
+                matches = [item["id"] for item in items if isinstance(item, dict)
                            and isinstance(item.get("id"), str)
-                           and job["model"] in (item["id"], item.get("displayName"))]
+                           and requested in (item["id"], item.get("displayName"),
+                                             item["id"].split("/", 1)[-1] if runtime == "pi" else None)
+                           and (runtime != "pi" or provider is None
+                                or billing_pool(item["id"].split("/", 1)[0]) == billing_pool(provider))]
                 if len(set(matches)) != 1:
-                    raise JobError("unavailable_capability", f"exact model unavailable or ambiguous: {job['model']}")
+                    raise JobError("unavailable_capability", f"exact model unavailable or ambiguous: {requested}; "
+                                   "restore exact model discovery or request the configured same-level fallback "
+                                   "with this evidence; aliases are not proof of an exact version")
                 models[job["job_id"]] = matches[0]
+            if runtime == "pi" and job.get("model_route") is not None:
+                provider, model = models[job["job_id"]].split("/", 1)
+                efforts = self.pi_model_efforts(provider, model)
+                effort = job["model_route"]["effort"]
+                if effort not in efforts:
+                    raise JobError("unavailable_capability", f"Pi/{provider}/{model} cannot preserve effort {effort}; "
+                                   "native Pi would clamp it. Restore exact effort support or select the same-level "
+                                   "configured fallback with unavailable evidence; no silent downgrade")
         return {"session_id": host_endpoint, "models": models, "binding": self.binding}
+
+    def pi_model_efforts(self, provider, model):
+        executable = shutil.which("pi")
+        if not executable or not shutil.which("node"):
+            raise JobError("unavailable_capability", "Pi native model effort discovery requires installed Pi and Node")
+        agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent")))
+        config_path = agent_dir / "models.json"
+        candidates = [parent / "node_modules" / package / "dist/compat.js"
+                      for parent in Path(executable).resolve().parents
+                      for package in ("@earendil-works/pi-ai", "@mariozechner/pi-ai")]
+        module = next((path for path in candidates if path.is_file()), None)
+        if module is None:
+            raise JobError("unavailable_capability", "Pi installed model capability module is unavailable; verify an adapter")
+        package_root = next((parent for parent in Path(executable).resolve().parents
+                             if (parent / "dist/core/model-config.js").is_file()
+                             and (parent / "dist/core/provider-composer.js").is_file()), None)
+        if config_path.exists() and package_root is None:
+            raise JobError("unavailable_capability", "Pi configured model metadata needs a verified native composition adapter")
+        script = Path(__file__).resolve().parents[1] / "pi-model-capabilities.mjs"
+        argv = ["node", str(script), module.as_uri(), provider, model]
+        if package_root is not None:
+            argv += [package_root.as_uri() + "/", str(config_path)]
+        result = self.read(argv)
+        if (not isinstance(result, dict) or result.get("provider") != provider or result.get("model") != model
+                or not isinstance(result.get("efforts"), list)
+                or not all(isinstance(value, str) for value in result["efforts"])):
+            raise JobError("unavailable_capability", "Pi model effort discovery returned invalid metadata")
+        return result["efforts"]
+
+    def codex_provider_catalog(self, provider):
+        """Validate a pre-existing Responses provider without changing settings or auth."""
+        config_dir = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        try:
+            config = tomllib.loads((config_dir / "config.toml").read_text())
+        except (OSError, ValueError) as error:
+            raise JobError("unavailable_capability", "Codex custom provider config unavailable; restore its reviewed configuration") from error
+        entry = config.get("model_providers", {}).get(provider)
+        if not isinstance(entry, dict) or entry.get("wire_api") != "responses":
+            raise JobError("unavailable_capability", f"Codex/{provider} needs a configured Responses adapter; no Pi substitution")
+        if provider != "opencode-go" or entry.get("base_url", "").rstrip("/") != "https://opencode.ai/zen/go/v1":
+            raise JobError("unavailable_capability", f"Codex/{provider} model discovery adapter is unverified")
+        env_key = entry.get("env_key")
+        credential = os.environ.get(env_key) if isinstance(env_key, str) else None
+        if not credential:
+            raise JobError("unavailable_capability", "Codex/opencode-go requires its configured credential environment; "
+                           "restore that environment in the authorized launcher and rerun preflight; no Pi substitution")
+        request = urllib.request.Request(entry["base_url"].rstrip("/") + "/models",
+                                         headers={"Authorization": "Bearer " + credential})
+        self.deadline.check()
+        try:
+            with urllib.request.urlopen(request, timeout=min(15, self.deadline.remaining())) as response:
+                data = response.read(1048577)
+        except urllib.error.HTTPError as error:
+            metadata = {key: error.headers.get(key) for key in ("Retry-After", "X-RateLimit-Reset")}
+            error.close()
+            raise JobError("unavailable_capability", f"OpenCode Go model catalog HTTP {error.code}; "
+                           f"backoff metadata={json.dumps(metadata)}; record any supplied reset/backoff "
+                           "before retrying or selecting the configured fallback") from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise JobError("unavailable_capability", "OpenCode Go model catalog unavailable; retain provider backoff/reset evidence") from error
+        if len(data) > 1048576:
+            raise JobError("unavailable_capability", "OpenCode Go model catalog exceeds the discovery bound")
+        payload = parse_json(data)
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise JobError("unavailable_capability", "OpenCode Go model catalog has no data list")
+        return {"models": payload["data"]}
 
     def check_export(self):
         export = self.binding["jail_export"]
@@ -236,6 +360,7 @@ class NativeTransport:
             if codex_prompt_start:
                 argv += ["--timeout", "5000", "--", "-C", spec["cwd"], "-c",
                          f"projects.{json.dumps(spec['cwd'])}.trust_level=\"trusted\""]
+                argv += provider_arguments("codex", spec.get("provider"))
                 if job["resolved_model"] is not None:
                     argv += ["-m", job["resolved_model"]]
                 effort = (spec.get("override") or {}).get("effort")
@@ -245,8 +370,7 @@ class NativeTransport:
                 argv.append(prompt)
             elif spec["route"]["runtime"] == "pi":
                 runtime_args = []
-                if spec.get("provider") is not None:
-                    runtime_args += ["--provider", spec["provider"]]
+                runtime_args += provider_arguments("pi", spec.get("provider"))
                 if job["resolved_model"] is not None:
                     runtime_args += ["--model", job["resolved_model"]]
                 effort = (spec.get("override") or {}).get("effort")

@@ -110,7 +110,9 @@ def main(argv=None, transport_factory=NativeTransport):
             result = {"schema_version": 1, "batch_state": "preview", "request_id": request["request_id"],
                       "concurrency": request["concurrency"], "capabilities": "unverified",
                       "run_dir": str(root), "jobs": [{"job_id": job["job_id"], "route": job["route"],
-                        "kind": job["kind"], "model": job["model"], "cwd": job["cwd"],
+                        "kind": job["kind"], "model": job["model"], "provider": job["provider"],
+                        "effort": (job.get("override") or {}).get("effort"),
+                        "model_route": job.get("model_route"), "cwd": job["cwd"],
                         "effects": ["create workspace/pane", "start worker", "submit task", "collect artifacts"]}
                         for job in request["jobs"]]}
             print(encoded(result).decode())

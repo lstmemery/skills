@@ -28,6 +28,12 @@ linked artifacts.
 
 ## Select the branch
 
+For ordinary work, read [model routing](references/model-routing.md) before
+assignment. Choose the cheapest sufficient level from the executable CSV ladder;
+pin explicit requests, escalate only on demonstrated difficulty, and use only
+the same-level configured fallback with concrete availability/quota evidence.
+Keep research and shopping jail defaults outside the ladder.
+
 For independent ordinary-agent and omp-train jobs in an authorized Herdr host
 session, use **Managed Herdr Jobs** below. Use the existing runtime operations
 path for background work, exact shell commands, or tasks outside that helper's
