@@ -13,13 +13,17 @@ PROVIDER_ALIASES = {"opencode go": "opencode-go", "openai-codex": "codex",
 TUPLE_FIELDS = ("model", "effort", "harness", "provider")
 CSV_FIELDS = ["level", *[f"{choice}_{key}" for choice in ("primary", "fallback")
                          for key in TUPLE_FIELDS]]
-SUPPORTED_PAIRS = {("codex", "codex"), ("codex", "opencode-go"),
-                   ("pi", "opencode-go"), ("pi", "codex"),
+SUPPORTED_PAIRS = {("codex", "codex"), ("pi", "opencode-go"), ("pi", "codex"),
                    ("claude-code", "claude")}
 
 
 def billing_pool(provider):
     return PROVIDER_ALIASES.get(provider.strip().casefold(), provider.strip().casefold())
+
+
+def validate_provider_harness(runtime, provider):
+    if provider is not None and billing_pool(provider) == "opencode-go" and runtime != "pi":
+        raise JobError("unavailable_capability", "OpenCode Go requires the Pi harness")
 
 
 def load_ladder(path, data=None):
@@ -44,6 +48,7 @@ def load_ladder(path, data=None):
                 if any(value != value.strip() for value in requested.values()):
                     invalid("model ladder values must not have surrounding whitespace")
                 runtime = HARNESS_ALIASES.get(requested["harness"], requested["harness"])
+                validate_provider_harness(runtime, requested["provider"])
                 validate_effort(runtime, requested["effort"])
                 choices[choice] = requested
             levels[str(level)] = choices
@@ -66,6 +71,7 @@ def select(levels, level, fallback=None):
     requested = levels[str(level)][choice]
     runtime = HARNESS_ALIASES.get(requested["harness"], requested["harness"])
     provider = billing_pool(requested["provider"])
+    validate_provider_harness(runtime, provider)
     if (runtime, provider) not in SUPPORTED_PAIRS:
         raise JobError("unavailable_capability",
                        f"unsupported {runtime}/{provider} tuple; retain the CSV, restore the exact "
@@ -76,6 +82,7 @@ def select(levels, level, fallback=None):
 
 
 def provider_arguments(runtime, provider):
+    validate_provider_harness(runtime, provider)
     if runtime == "codex" and provider is not None:
         native = "openai" if billing_pool(provider) == "codex" else billing_pool(provider)
         return ["-c", f'model_provider="{native}"']

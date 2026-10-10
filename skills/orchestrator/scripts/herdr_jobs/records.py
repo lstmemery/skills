@@ -290,8 +290,9 @@ def ensure_task_admitted(task_kind, job_id):
 
 
 def prepare(manifest_path, policy_path):
-    # The routing module uses these record validators; load it after module initialization.
-    from .model_ladder import HARNESS_ALIASES, billing_pool, load_ladder, select
+    # Defer this import to break the records/model_ladder import cycle.
+    from .model_ladder import (HARNESS_ALIASES, billing_pool, load_ladder, select,
+                               validate_provider_harness)
 
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
@@ -390,6 +391,7 @@ def prepare(manifest_path, policy_path):
         if route["mode"] == "jail" and provider is not None:
             invalid("provider overrides are unsupported on the jail route; preserve the research boundary")
         runtime = route["runtime"]
+        validate_provider_harness(runtime, provider)
         if runtime is None:
             raise JobError("decision_needed", f"{job_id}: choose an ordinary-job runtime in policy or a current-request override")
         if runtime not in policy["runtime_kinds"]:

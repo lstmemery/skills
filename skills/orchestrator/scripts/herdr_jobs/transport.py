@@ -10,16 +10,13 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
-import urllib.error
-import urllib.request
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
                       effort_arguments, validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
-from .model_ladder import billing_pool, provider_arguments
+from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
 
 
 class BudgetExpired(Exception):
@@ -169,6 +166,12 @@ class NativeTransport:
         for job in request["jobs"]:
             label = job.get("job_id", "job") if isinstance(job, dict) else "job"
             validate_writer_intent(job, label)
+            validate_provider_harness(job["route"]["runtime"], job.get("provider"))
+            if (job["route"]["mode"] == "agent" and job["route"]["runtime"] == "codex"
+                    and job.get("provider") is not None
+                    and billing_pool(job["provider"]) != "codex"):
+                raise JobError("unavailable_capability",
+                               "Codex custom provider model discovery is not verified; no substitution")
         help_bytes = self.raw([self.herdr, "--help"])
         agent_help = self.raw([self.herdr, "agent", "--help"])
         pane_help = self.raw([self.herdr, "pane", "--help"])
@@ -229,13 +232,8 @@ class NativeTransport:
                     raise JobError("unavailable_capability", "exact jail model discovery is not verified; omit the model or verify a new adapter")
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
-            provider_catalog = None
-            if job["route"]["mode"] == "agent" and runtime == "codex" and job.get("provider") not in (None, "codex"):
-                provider_catalog = self.codex_provider_catalog(job["provider"])
             if job["model"] is not None and job["job_id"] not in models:
-                if provider_catalog is not None:
-                    catalog = provider_catalog
-                elif runtime == "pi":
+                if runtime == "pi":
                     catalog = pi_catalog(self.read_terminal(["pi", "--offline", "--list-models"]))
                 else:
                     catalog = self.read([self.orchestrator, "models", runtime, "--json", "--compact"])
@@ -291,44 +289,6 @@ class NativeTransport:
             raise JobError("unavailable_capability", "Pi model effort discovery returned invalid metadata")
         return result["efforts"]
 
-    def codex_provider_catalog(self, provider):
-        """Validate a pre-existing Responses provider without changing settings or auth."""
-        config_dir = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-        try:
-            config = tomllib.loads((config_dir / "config.toml").read_text())
-        except (OSError, ValueError) as error:
-            raise JobError("unavailable_capability", "Codex custom provider config unavailable; restore its reviewed configuration") from error
-        entry = config.get("model_providers", {}).get(provider)
-        if not isinstance(entry, dict) or entry.get("wire_api") != "responses":
-            raise JobError("unavailable_capability", f"Codex/{provider} needs a configured Responses adapter; no Pi substitution")
-        if provider != "opencode-go" or entry.get("base_url", "").rstrip("/") != "https://opencode.ai/zen/go/v1":
-            raise JobError("unavailable_capability", f"Codex/{provider} model discovery adapter is unverified")
-        env_key = entry.get("env_key")
-        credential = os.environ.get(env_key) if isinstance(env_key, str) else None
-        if not credential:
-            raise JobError("unavailable_capability", "Codex/opencode-go requires its configured credential environment; "
-                           "restore that environment in the authorized launcher and rerun preflight; no Pi substitution")
-        request = urllib.request.Request(entry["base_url"].rstrip("/") + "/models",
-                                         headers={"Authorization": "Bearer " + credential})
-        self.deadline.check()
-        try:
-            with urllib.request.urlopen(request, timeout=min(15, self.deadline.remaining())) as response:
-                data = response.read(1048577)
-        except urllib.error.HTTPError as error:
-            metadata = {key: error.headers.get(key) for key in ("Retry-After", "X-RateLimit-Reset")}
-            error.close()
-            raise JobError("unavailable_capability", f"OpenCode Go model catalog HTTP {error.code}; "
-                           f"backoff metadata={json.dumps(metadata)}; record any supplied reset/backoff "
-                           "before retrying or selecting the configured fallback") from error
-        except (urllib.error.URLError, TimeoutError) as error:
-            raise JobError("unavailable_capability", "OpenCode Go model catalog unavailable; retain provider backoff/reset evidence") from error
-        if len(data) > 1048576:
-            raise JobError("unavailable_capability", "OpenCode Go model catalog exceeds the discovery bound")
-        payload = parse_json(data)
-        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise JobError("unavailable_capability", "OpenCode Go model catalog has no data list")
-        return {"models": payload["data"]}
-
     def check_export(self):
         export = self.binding["jail_export"]
         if export is None:
@@ -345,6 +305,7 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        validate_provider_harness(spec["route"]["runtime"], spec.get("provider"))
         if action == "retry_setup":
             profile = fields(job.get("retry_profile"), ["agent_dir", "session_dir", "settings_sha256"],
                              label="run-scoped pi retry profile")
