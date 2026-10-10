@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "purpose": "Synthetic behavior invariants derived from the supplied validation. These are expectations, not results for the finalized skill or live tickets.",
+  "evaluation": {
+    "raw_inputs": "fixtures.json",
+    "skill": "../SKILL.md",
+    "procedure": [
+      "Give the evaluator the finalized skill and raw fixture case only. Keep this expectations file and prior conclusions hidden until the response is captured.",
+      "Use only supplied synthetic observations. Do not access fixture URLs or perform repository, tracker, deployment, or other external actions.",
+      "For readiness requests, record criterion fulfillment, material premises and blockers, relationship certainty, next action with owner, coverage, and validity. For other requests, identify the appropriate route without adding a readiness review.",
+      "Compare the captured response with each expected behavior and its required supporting sources. Check decisions and evidence rather than wording, headings, or a numeric readiness score.",
+      "Record case-level results and any unsafe start recommendation separately. Synthetic success does not establish live access, installed discovery, source freshness, or host compatibility."
+    ]
+  },
+  "cases": [
+    {
+      "id": "S01",
+      "coverage": "Stale text / already-complete work",
+      "expected_behavior": [
+        "Recognize already satisfied staging behavior using matching code, targeted verification and deployment evidence.",
+        "Do not treat age, the open tracker state, or the merge alone as completion evidence.",
+        "Recommend recognition of completion without implementation or automatic closure."
+      ],
+      "required_evidence": [
+        "S01-code",
+        "S01-test",
+        "S01-deploy"
+      ]
+    },
+    {
+      "id": "S02",
+      "coverage": "Missing migration prerequisite / falsified assumption",
+      "expected_behavior": [
+        "Mark the deployed-M42 premise contradicted rather than merely unverified.",
+        "Identify an evidenced prerequisite from SYN-202 to SYN-201 and its rollout/backfill completion condition.",
+        "Recommend sequencing and correction of the stale premise; do not begin dependent implementation or apply the migration."
+      ],
+      "required_evidence": [
+        "S02-repo",
+        "S02-ledger",
+        "S02-migration-ticket"
+      ]
+    },
+    {
+      "id": "S03",
+      "coverage": "Hidden downstream schema effect / duplicate pending work / suspected keyword hit",
+      "expected_behavior": [
+        "Find the evidenced producer/consumer consequence for SYN-302 even without an explicit ticket link.",
+        "Identify SYN-303 and PR 31 as overlapping pending work, not completed implementation.",
+        "Separate the SYN-330 keyword hit from the evidenced relationships; do not invent a dependency.",
+        "Treat compatibility/coordination as a material owner choice and withhold a start recommendation until resolved."
+      ],
+      "required_evidence": [
+        "S03-producer",
+        "S03-consumer",
+        "S03-downstream-ticket",
+        "S03-pending-pr",
+        "S03-competing-ticket",
+        "S03-keyword-hit"
+      ]
+    },
+    {
+      "id": "S04",
+      "coverage": "No related tickets / age-only false positive",
+      "expected_behavior": [
+        "Recommend implementation can start for the specified local CLI scope on current confirmed evidence.",
+        "Retain the negative search boundary, including other projects not searched.",
+        "Do not invent related tickets, declare global independence, widen the backlog scan, or mark the ticket obsolete because of age."
+      ],
+      "required_evidence": [
+        "S04-repo",
+        "S04-owner",
+        "S04-search"
+      ]
+    },
+    {
+      "id": "S05",
+      "coverage": "Inaccessible evidence / incomplete related-work coverage",
+      "expected_behavior": [
+        "Keep the production-version premise unverified; the undated note is insufficient.",
+        "Report the disabled flag as observed, while preserving unknown applicability and production completion.",
+        "Recommend obtaining the authorized current production-version observation before implementation; do not route around denied access.",
+        "Retain inaccessible upgrade-ticket coverage and do not conclude no dependencies exist."
+      ],
+      "required_evidence": [
+        "S05-repo",
+        "S05-version",
+        "S05-old-note"
+      ]
+    },
+    {
+      "id": "S06",
+      "coverage": "Partly complete / pending review and deployment",
+      "expected_behavior": [
+        "Identify staging expiry as satisfied and single use as unsatisfied.",
+        "Do not equate passing tests on the open PR with deployed completion.",
+        "Sequence security review/merge/deployment of the existing work instead of restarting completed work or producing a duplicate implementation."
+      ],
+      "required_evidence": [
+        "S06-staging",
+        "S06-pr"
+      ]
+    },
+    {
+      "id": "S07",
+      "coverage": "Fresh but owner-held",
+      "expected_behavior": [
+        "Distinguish version availability from explicit production-adoption approval.",
+        "Preserve the current owner hold and identify the approval decision as blocking.",
+        "Do not label the work obsolete, satisfied, or ready merely because version 4 shipped."
+      ],
+      "required_evidence": [
+        "S07-state",
+        "S07-decision"
+      ]
+    },
+    {
+      "id": "S08",
+      "coverage": "Negative trigger: review existing changes",
+      "expected_behavior": [
+        "Route the supplied PR/spec/standards review to code-review.",
+        "Do not add a ticket-readiness workflow to a request whose target is an existing change."
+      ],
+      "required_evidence": [
+        "S08-change"
+      ]
+    },
+    {
+      "id": "S09",
+      "coverage": "Ticket and source drift / current verdict validity",
+      "expected_behavior": [
+        "Invalidate any start recommendation based on ticket r2 and the initial repository head after both change.",
+        "Preserve a captured historical observation but do not claim it reviews the current r3/head.",
+        "Recommend re-reading the revised ticket and new head; unknown current evidence prevents starting."
+      ],
+      "required_evidence": [
+        "S09-capture",
+        "S09-final-check"
+      ]
+    },
+    {
+      "id": "S10",
+      "coverage": "Authoritative supersession / scope preservation",
+      "expected_behavior": [
+        "Recognize the custom-forwarder request as superseded by the accepted owner decision, not merely by different code.",
+        "Link the evidenced replacement SYN-1002 and retain its unfinished status.",
+        "Do not rebuild the retired component, close the ticket, or silently implement the replacement under the readiness-review request."
+      ],
+      "required_evidence": [
+        "S10-decision",
+        "S10-replacement",
+        "S10-repo"
+      ]
+    },
+    {
+      "id": "S11",
+      "coverage": "Uncommitted work / active assignment / same-head diff drift",
+      "expected_behavior": [
+        "Keep the requested JSON main-branch behavior unsatisfied; uncommitted passing checks do not establish landed completion, while the existing CSV baseline may be recorded as a satisfied portion.",
+        "Identify SYN-1102 as evidenced overlapping active work even though no PR exists; reconcile the assignment before another implementation.",
+        "Treat changed worktree digest as invalidating the prior candidate check even with unchanged HEAD.",
+        "Keep the revised candidate content and default-CSV behavior unverified; obtain the current diff/checks and owner disposition before recommending a new start."
+      ],
+      "required_evidence": [
+        "S11-main",
+        "S11-worktree",
+        "S11-active-task",
+        "S11-final-state"
+      ]
+    }
+  ]
+}
