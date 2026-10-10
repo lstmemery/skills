@@ -145,8 +145,10 @@ class LadderTest(unittest.TestCase):
 
     def test_unverified_codex_custom_provider_is_rejected_before_host_discovery(self):
         fixture = self.fixture()
+        # P2: exercise custom-provider discovery with a complete explicit route.
         spec = self.prepared(override={"instruction": "Pinned provider", "runtime": "codex",
-                                       "model": "gpt-6-luna", "provider": "custom-provider"})
+                                       "model": "gpt-6-luna", "provider": "custom-provider",
+                                       "effort": "low"})
         with self.assertRaisesRegex(JobError, "Codex custom provider model discovery is not verified"):
             fixture.adapter.preflight({"jobs": [spec]})
         self.assertEqual(fixture.calls, [])
@@ -228,8 +230,9 @@ class LadderTest(unittest.TestCase):
                     self.prepared()
         self.csv.write_text(original.replace("mimo-v2.6-pro,max,pi,opencode go",
                                              "mimo-v2.6-pro,max,pi,unsupported", 1))
+        # P8: this level selection now records the required escalation evidence.
         with self.assertRaises(JobError) as error:
-            self.prepared(model_level=5)
+            self.prepared(model_level=5, escalation=self.escalation(5))
         self.assertEqual(error.exception.kind, "unavailable_capability")
         for level in (0, 9, True, "1", None):
             self.csv.write_text(original)

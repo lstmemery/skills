@@ -40,7 +40,7 @@ class JobsTest(unittest.TestCase):
         self.write_jobs(1)
         self.configure()
 
-    def write_jobs(self, count, kinds=None, runtime="codex", concurrency=None, provider=None, model=None):
+    def write_jobs(self, count, kinds=None, runtime="codex", concurrency=None, provider=None, model=None, effort=None):
         jobs = []
         for index in range(count):
             kind = kinds[index] if kinds else "ordinary"
@@ -53,6 +53,8 @@ class JobsTest(unittest.TestCase):
                     override["provider"] = provider
                 if model is not None:
                     override["model"] = model
+                if effort is not None:
+                    override["effort"] = effort
                 job["override"] = override
             jobs.append(job)
         manifest = {"schema_version": 1, "request_id": "test-request", "jobs": jobs}
@@ -454,7 +456,8 @@ class JobsTest(unittest.TestCase):
         self.assertIn("visible Working marker", result["jobs"][0]["issue"])
 
     def test_non_codex_startup_dialog_is_detected_before_sending_the_task_prompt(self):
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
+        # P2: keep this custom Pi fixture a complete explicit tuple.
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
         self.configure(jobs={"job0": "blocked"})
 
         code, result = self.call()
@@ -468,8 +471,9 @@ class JobsTest(unittest.TestCase):
 
         code, result = self.call(real=True, preview=True)
 
-        self.assertEqual((code, result["error"]), (2, "invalid_input"))
-        self.assertIn("provider override requires a model", result["message"])
+        # P2: an unresolved partial custom route is unavailable, and remains fail-closed.
+        self.assertEqual((code, result["error"]), (4, "unavailable_capability"))
+        self.assertIn("partial explicit route has no compatible validated model ladder tuple", result["message"])
         self.assertFalse(self.run.exists())
 
     def test_runtime_without_effort_support_is_rejected_before_launch(self):
@@ -579,7 +583,8 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(json.loads(direct_acquire.stdout)["admitted"])
 
     def test_rate_limited_assignment_retries_after_backoff_without_losing_lease_or_artifacts(self):
-        self.write_jobs(2, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
+        # P2: retry scenarios use a complete explicit custom Pi tuple.
+        self.write_jobs(2, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
         manifest = json.loads(self.manifest.read_text())
         manifest["jobs"][0]["cwd"] = str(self.root)
         manifest["jobs"][0]["writes_repository"] = True
@@ -612,7 +617,7 @@ class JobsTest(unittest.TestCase):
         self.assertGreaterEqual(second_job_splits[0]["at"], retry["retry_at"])
 
     def test_explicit_start_rate_limit_retries_even_without_a_registered_worker(self):
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
         self.configure(jobs={"job0": "rate_limited_start_once"})
 
         code, result = self.call(wait_seconds=1.2)
@@ -629,7 +634,7 @@ class JobsTest(unittest.TestCase):
         self.assertNotEqual(retry["attempt_id"], job["attempt_id"])
 
     def test_managed_rate_limit_uses_bounded_default_when_metadata_is_absent(self):
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
         self.configure(jobs={"job0": "rate_limited_without_metadata_once"})
 
         before = time.time()

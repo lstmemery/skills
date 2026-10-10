@@ -340,6 +340,17 @@ def prepare(manifest_path, policy_path):
             fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
         explicit = override is not None and any(key in override for key in ("runtime", "model", "provider", "effort"))
+        if override is not None and "effort" in override:
+            if route["mode"] != "agent":
+                invalid(f"{job_id}: effort overrides are not supported for {route['mode']} routes")
+            effort = text(override["effort"], "effort", 32)
+            effort_runtime = route["runtime"]
+            if "runtime" in override:
+                effort_runtime = identifier(override["runtime"], "override runtime")
+                effort_runtime = HARNESS_ALIASES.get(effort_runtime, effort_runtime)
+            # P2 completion must not mask malformed or unsupported effort input.
+            if effort_runtime is not None:
+                validate_effort(effort_runtime, effort)
         selection = None
         if "model_level" in job:
             integer(job["model_level"], "model_level", 1, 8)
