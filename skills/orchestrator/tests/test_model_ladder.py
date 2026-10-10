@@ -1,30 +1,27 @@
 import json
-import io
-import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 import shutil
-import urllib.error
 from unittest.mock import patch
 
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.admission import AdmissionStore
-from herdr_jobs.model_ladder import load_ladder, native_arguments, select
+from herdr_jobs.model_ladder import load_ladder, native_arguments, provider_arguments, select
 from herdr_jobs.records import JobError, policy_record, prepare
 from herdr_jobs.transport import catalog_models, pi_catalog
 import test_transport
 
 
 EXPECTED = [
-    (("gpt-6-luna", "low", "codex", "codex"), ("gpt-6-luna", "low", "codex", "opencode go")),
-    (("gpt-6-luna", "medium", "codex", "codex"), ("gpt-6-luna", "medium", "codex", "opencode go")),
-    (("gpt-6-luna", "xhigh", "codex", "codex"), ("gpt-6-luna", "xhigh", "codex", "opencode go")),
-    (("gpt-6-luna", "max", "codex", "codex"), ("gpt-6-luna", "max", "codex", "opencode go")),
+    (("gpt-6-luna", "low", "codex", "codex"), ("gpt-6-luna", "low", "pi", "opencode go")),
+    (("gpt-6-luna", "medium", "codex", "codex"), ("gpt-6-luna", "medium", "pi", "opencode go")),
+    (("gpt-6-luna", "xhigh", "codex", "codex"), ("gpt-6-luna", "xhigh", "pi", "opencode go")),
+    (("gpt-6-luna", "max", "codex", "codex"), ("gpt-6-luna", "max", "pi", "opencode go")),
     (("mimo-v2.6-pro", "max", "pi", "opencode go"), ("gpt-6.1-sol", "low", "codex", "codex")),
     (("gpt-6.1-sol", "high", "codex", "codex"), ("claude-sonnet-5-5", "medium", "claude", "claude")),
     (("gpt-6.1-sol", "max", "codex", "codex"), ("claude-sonnet-5-5", "high", "claude", "claude")),
@@ -52,6 +49,21 @@ class LadderTest(unittest.TestCase):
                                             "jobs": [{**self.job, **values}]}))
         return prepare(self.manifest, self.policy)["jobs"][0]
 
+    @staticmethod
+    def fallback_evidence(reason):
+        if reason == "exhausted":
+            return {"source": "quota-api", "observed_at": "2026-10-10T16:00:00Z",
+                    "quota": {"remaining": 0}}
+        return {"source": "provider", "observed_at": "2026-10-10T16:00:00Z",
+                "error": {"kind": reason, "message": "observed provider response", "code": "fixture"}}
+
+    @staticmethod
+    def escalation(level):
+        return {"previous_level": level - 1,
+                "failure": {"kind": "failure", "source": "fixture-run",
+                             "observed_at": "2026-10-10T15:59:00Z", "summary": "lower level failed"},
+                "expected_improvement": "complete the assigned task"}
+
     def fixture(self):
         fixture = test_transport.TransportTest()
         fixture.setUp()
@@ -66,7 +78,7 @@ class LadderTest(unittest.TestCase):
         for level, pair in enumerate(EXPECTED, 1):
             for index, expected in enumerate(pair):
                 with self.subTest(level=level, choice=index):
-                    fallback = {"reason": "unavailable", "evidence": "Pinned primary catalog lacks exact model"} if index else None
+                    fallback = {"reason": "unavailable", "evidence": self.fallback_evidence("unavailable")} if index else None
                     selection = select(levels, level, fallback)
                     self.assertEqual(tuple(selection["requested"].values()), expected)
                     model, effort, harness, provider = expected
@@ -74,6 +86,8 @@ class LadderTest(unittest.TestCase):
                     native_provider = "opencode-go" if provider == "opencode go" else provider
                     self.assertEqual((selection["runtime"], selection["provider"]), (runtime, native_provider))
                     arguments = {"model_level": level}
+                    if level > 1:
+                        arguments["escalation"] = self.escalation(level)
                     if fallback:
                         arguments["model_fallback"] = fallback
                     spec = self.prepared(**arguments)
@@ -88,9 +102,10 @@ class LadderTest(unittest.TestCase):
                     required = native_arguments(selection)
                     for offset in range(0, len(required), 2):
                         self.assertIn(required[offset:offset + 2], [actual[i:i + 2] for i in range(len(actual) - 1)])
-                    if provider == "opencode go" and harness == "codex":
-                        self.assertEqual(spec["kind"], "codex")
-                        self.assertIn('model_provider="opencode-go"', actual)
+                    if provider == "opencode go":
+                        self.assertEqual(spec["kind"], "pi")
+                        self.assertIn(["--provider", "opencode-go"],
+                                      [actual[i:i + 2] for i in range(len(actual) - 1)])
 
     def test_default_is_cheapest_and_explicit_requests_win_over_level(self):
         default = self.prepared()
@@ -101,21 +116,59 @@ class LadderTest(unittest.TestCase):
         self.assertNotIn("model_route", explicit)
         self.assertEqual((explicit["route"]["runtime"], explicit["model"], explicit["override"]["effort"]),
                          ("codex", "gpt-6.1-sol", "high"))
-        named = self.prepared(override={"instruction": "Named harness", "runtime": "omp"})
-        self.assertEqual(named["route"]["runtime"], "omp")
-        self.assertIsNone(named["model"])
+        with self.assertRaises(JobError):
+            self.prepared(override={"instruction": "Named harness", "runtime": "omp"})
         effort_only = self.prepared(override={"instruction": "Pinned effort", "effort": "max"})
-        self.assertEqual(effort_only["override"]["effort"], "max")
-        self.assertIsNone(effort_only["model"])
+        self.assertEqual((effort_only["model"], effort_only["provider"], effort_only["override"]["effort"]),
+                         ("gpt-6-luna", "codex", "max"))
         instruction = self.prepared(override={"instruction": "Preserve the user's scope"})
         self.assertEqual(instruction["override"]["instruction"], "Preserve the user's scope")
         with self.assertRaises(JobError):
             self.prepared(override={"instruction": ""})
 
+    def test_explicit_opencode_go_route_requires_pi_before_preflight(self):
+        with self.assertRaisesRegex(JobError, "OpenCode Go requires the Pi harness"):
+            self.prepared(override={"instruction": "Pinned route", "runtime": "codex",
+                                   "model": "gpt-6-luna", "provider": "opencode go"})
+        with self.assertRaisesRegex(JobError, "OpenCode Go requires the Pi harness"):
+            provider_arguments("codex", "opencode-go")
+
+    def test_preflight_rejects_opencode_go_codex_spec_before_host_discovery(self):
+        fixture = self.fixture()
+        spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit",
+                          "evidence": self.fallback_evidence("rate_limit")})
+        spec["route"]["runtime"] = "codex"
+        spec["kind"] = "codex"
+        with self.assertRaisesRegex(JobError, "OpenCode Go requires the Pi harness"):
+            fixture.adapter.preflight({"jobs": [spec]})
+        self.assertEqual(fixture.calls, [])
+
+    def test_unverified_codex_custom_provider_is_rejected_before_host_discovery(self):
+        fixture = self.fixture()
+        # P2: exercise custom-provider discovery with a complete explicit route.
+        spec = self.prepared(override={"instruction": "Pinned provider", "runtime": "codex",
+                                       "model": "gpt-6-luna", "provider": "custom-provider",
+                                       "effort": "low"})
+        with self.assertRaisesRegex(JobError, "Codex custom provider model discovery is not verified"):
+            fixture.adapter.preflight({"jobs": [spec]})
+        self.assertEqual(fixture.calls, [])
+
+    def test_effect_refuses_opencode_go_codex_route_before_any_action(self):
+        fixture = self.fixture()
+        spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit",
+                          "evidence": self.fallback_evidence("rate_limit")})
+        spec["route"]["runtime"] = "codex"
+        job = {"spec": spec, "pane_id": "old:1", "agent_name": "route-test", "resolved_model": None}
+        fake = test_transport.FakeHerdr()
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaisesRegex(JobError, "OpenCode Go requires the Pi harness"):
+                fixture.adapter.effect("split", job, "")
+        self.assertEqual(fake.calls, [])
+
     def test_same_level_fallback_requires_concrete_reason_and_retains_evidence(self):
         for reason in ("unavailable", "rate_limit", "exhausted"):
-            fallback = {"reason": reason, "evidence": "Recorded provider error at 2026-10-10T16:00Z"}
-            job = self.prepared(model_level=7, model_fallback=fallback)
+            fallback = {"reason": reason, "evidence": self.fallback_evidence(reason)}
+            job = self.prepared(model_level=7, escalation=self.escalation(7), model_fallback=fallback)
             self.assertEqual((job["model_route"]["level"], job["model"], job["override"]["effort"]),
                              (7, "claude-sonnet-5-5", "high"))
             self.assertEqual(job["model_route"]["fallback"], fallback)
@@ -124,11 +177,14 @@ class LadderTest(unittest.TestCase):
                          {"reason": "slow", "evidence": "A difficult task"},
                          {"reason": "rate_limit", "evidence": "429", "level": 8}):
             with self.subTest(fallback=fallback), self.assertRaises(JobError):
-                self.prepared(model_level=7, model_fallback=fallback)
+                self.prepared(model_level=7, escalation=self.escalation(7), model_fallback=fallback)
         with self.assertRaises(JobError):
             self.prepared(model_fallback={"reason": "unavailable", "evidence": "Missing model"})
         with self.assertRaises(JobError):
-            self.prepared(model_level=7, model_fallback={"reason": "rate_limit", "evidence": "429"},
+            self.prepared(model_level=7, escalation=self.escalation(7),
+                          model_fallback={"reason": "rate_limit", "evidence": {"source": "fixture",
+                              "observed_at": "2026-10-10T16:00:00Z",
+                              "error": {"kind": "rate_limit", "message": "429"}}},
                           override={"instruction": "Pinned effort", "effort": "max"})
 
     def test_jail_and_shopping_boundaries_are_preserved(self):
@@ -165,15 +221,18 @@ class LadderTest(unittest.TestCase):
                      original + rows[1] + "\n", original.replace("1,gpt", "9,gpt", 1),
                      original.replace("low,codex", "ultra,codex", 1),
                      original.replace("gpt-6-luna", "", 1), rows[0] + "\n" + rows[1] + ",extra\n",
-                     original.replace("gpt-6-luna", " gpt-6-luna", 1)]
+                     original.replace("gpt-6-luna", " gpt-6-luna", 1),
+                     original.replace("low,pi,opencode go", "low,codex,opencode go", 1)]
         for contents in malformed:
             with self.subTest(contents=contents[:70]):
                 self.csv.write_text(contents)
                 with self.assertRaises(JobError):
                     self.prepared()
-        self.csv.write_text(original.replace("pi,opencode go", "pi,unsupported", 1))
+        self.csv.write_text(original.replace("mimo-v2.6-pro,max,pi,opencode go",
+                                             "mimo-v2.6-pro,max,pi,unsupported", 1))
+        # P8: this level selection now records the required escalation evidence.
         with self.assertRaises(JobError) as error:
-            self.prepared(model_level=5)
+            self.prepared(model_level=5, escalation=self.escalation(5))
         self.assertEqual(error.exception.kind, "unavailable_capability")
         for level in (0, 9, True, "1", None):
             self.csv.write_text(original)
@@ -183,14 +242,14 @@ class LadderTest(unittest.TestCase):
     def test_installed_catalog_shapes_and_provider_disambiguation(self):
         self.assertEqual(catalog_models({"models": [{"id": "old"}]}, "codex"), [{"id": "old"}])
         fixture = self.fixture()
-        spec = self.prepared(model_level=6)
+        spec = self.prepared(model_level=6, escalation=self.escalation(6))
         fixture.catalog = {"runtimes": [{"id": "codex", "status": "available", "models": [{"id": "gpt-6.1-sol"}]}]}
         result = fixture.adapter.preflight({"jobs": [spec]})
         self.assertEqual(result["models"], {spec["job_id"]: "gpt-6.1-sol"})
         table = "provider model context max-out thinking images\nopencode-go mimo-v2.6-pro 1M 128K yes yes\nopenrouter mimo-v2.6-pro 1M 128K yes yes\n"
         fixture.adapter.read_terminal = lambda argv: table
         fixture.adapter.pi_model_efforts = lambda provider, model: ["low", "high", "max"]
-        spec = self.prepared(model_level=5)
+        spec = self.prepared(model_level=5, escalation=self.escalation(5))
         result = fixture.adapter.preflight({"jobs": [spec]})
         self.assertEqual(result["models"], {spec["job_id"]: "opencode-go/mimo-v2.6-pro"})
         with self.assertRaises(JobError):
@@ -201,49 +260,31 @@ class LadderTest(unittest.TestCase):
         fixture.adapter.read_terminal = lambda argv: "provider model context max-out thinking images\nopencode-go mimo-v2.6-pro 1M 128K yes yes\n"
         fixture.adapter.pi_model_efforts = lambda provider, model: ["off", "minimal", "low", "medium", "high"]
         with self.assertRaisesRegex(JobError, "native Pi would clamp"):
-            fixture.adapter.preflight({"jobs": [self.prepared(model_level=5)]})
+            fixture.adapter.preflight({"jobs": [self.prepared(model_level=5, escalation=self.escalation(5))]})
         self.assertFalse(any(call[1:3] in (["pane", "split"], ["agent", "start"]) for call in fixture.calls))
 
-    def test_partial_missing_models_and_provider_gaps_precede_effects(self):
+    def test_partial_catalogs_and_exact_model_gaps_precede_effects(self):
         fixture = self.fixture()
         for catalog in ({"runtimes": [{"id": "claude-code", "status": "partial", "models": [{"id": "opus"}]}]},
                         {"models": [{"id": "opus"}]}):
             fixture.catalog = catalog
             with self.assertRaises(JobError):
-                fixture.adapter.preflight({"jobs": [self.prepared(model_level=8)]})
-        fixture.calls.clear()
-        os_config = self.root / "codex"
-        os_config.mkdir()
-        (os_config / "config.toml").write_text('[model_providers.opencode-go]\nwire_api="responses"\nbase_url="https://opencode.ai/zen/go/v1"\nenv_key="ROUTING_TEST_ABSENT"\n')
-        with patch.dict(os.environ, {"CODEX_HOME": str(os_config)}, clear=True):
-            with self.assertRaises(JobError) as error:
-                fixture.adapter.preflight({"jobs": [self.prepared(model_level=1,
-                    model_fallback={"reason": "rate_limit", "evidence": "Codex usage limit banner"})]})
-        self.assertIn("no Pi substitution", str(error.exception))
+                        fixture.adapter.preflight({"jobs": [self.prepared(model_level=8, escalation=self.escalation(8))]})
         self.assertFalse(any(call[1:3] in (["pane", "split"], ["agent", "start"]) for call in fixture.calls))
 
-    def test_supported_codex_go_uses_authenticated_provider_catalog(self):
+    def test_opencode_go_fallback_uses_pi_offline_catalog_and_effort_metadata(self):
         fixture = self.fixture()
-        config_dir = self.root / "codex"
-        config_dir.mkdir()
-        config = config_dir / "config.toml"
-        configured = '[model_providers.opencode-go]\nwire_api="responses"\nbase_url="https://opencode.ai/zen/go/v1"\nenv_key="ROUTING_TEST_CREDENTIAL"\n'
-        config.write_text(configured)
-        spec = self.prepared(model_level=2, model_fallback={"reason": "rate_limit", "evidence": "Pinned 429"})
-        with patch.dict(os.environ, {"CODEX_HOME": str(config_dir), "ROUTING_TEST_CREDENTIAL": "placeholder"}):
-            with patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"data":[{"id":"gpt-6-luna"}]}')) as request:
-                result = fixture.adapter.preflight({"jobs": [spec]})
-            self.assertEqual(result["models"][spec["job_id"]], "gpt-6-luna")
-            self.assertEqual(request.call_args.args[0].full_url, "https://opencode.ai/zen/go/v1/models")
-            self.assertEqual(request.call_args.args[0].get_header("Authorization"), "Bearer placeholder")
-            limited = urllib.error.HTTPError("https://opencode.ai/zen/go/v1/models", 429, "Limited",
-                                             {"Retry-After": "30"}, None)
-            with patch("urllib.request.urlopen", side_effect=limited):
-                with self.assertRaisesRegex(JobError, 'HTTP 429.*Retry-After.*30'):
-                    fixture.adapter.preflight({"jobs": [spec]})
-            config.write_text(configured.replace('"responses"', '"chat"'))
-            with self.assertRaisesRegex(JobError, "Responses adapter"):
-                fixture.adapter.preflight({"jobs": [spec]})
+        table = ("provider model context max-out thinking images\n"
+                 "opencode-go gpt-6-luna 1M 128K yes yes\n"
+                 "openrouter gpt-6-luna 1M 128K yes yes\n")
+        discovered = []
+        fixture.adapter.read_terminal = lambda argv: discovered.append(argv) or table
+        fixture.adapter.pi_model_efforts = lambda provider, model: ["off", "low", "medium", "high", "xhigh", "max"]
+        spec = self.prepared(model_level=4, escalation=self.escalation(4),
+                             model_fallback={"reason": "rate_limit", "evidence": self.fallback_evidence("rate_limit")})
+        result = fixture.adapter.preflight({"jobs": [spec]})
+        self.assertEqual(result["models"][spec["job_id"]], "opencode-go/gpt-6-luna")
+        self.assertEqual(discovered, [["pi", "--offline", "--list-models"]])
         self.assertFalse(any(call[1:3] in (["pane", "split"], ["agent", "start"]) for call in fixture.calls))
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for the native Pi metadata probe")

@@ -290,8 +290,10 @@ def ensure_task_admitted(task_kind, job_id):
 
 
 def prepare(manifest_path, policy_path):
-    # The routing module uses these record validators; load it after module initialization.
-    from .model_ladder import HARNESS_ALIASES, billing_pool, load_ladder, select
+    # Defer this import to break the records/model_ladder import cycle.
+    from .model_ladder import (HARNESS_ALIASES, billing_pool, complete_tuple,
+                               load_ladder, select, validate_escalation,
+                               validate_provider_harness)
 
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
@@ -318,8 +320,8 @@ def prepare(manifest_path, policy_path):
     for job in manifest["jobs"]:
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
-               ["override", "repository_worktree", "worker_result", "task_class",
-                "model_level", "model_fallback"], "job")
+                ["override", "repository_worktree", "worker_result", "task_class",
+                "model_level", "model_fallback", "escalation"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -338,9 +340,24 @@ def prepare(manifest_path, policy_path):
             fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
         explicit = override is not None and any(key in override for key in ("runtime", "model", "provider", "effort"))
+        if override is not None and "effort" in override:
+            if route["mode"] != "agent":
+                invalid(f"{job_id}: effort overrides are not supported for {route['mode']} routes")
+            effort = text(override["effort"], "effort", 32)
+            effort_runtime = route["runtime"]
+            if "runtime" in override:
+                effort_runtime = identifier(override["runtime"], "override runtime")
+                effort_runtime = HARNESS_ALIASES.get(effort_runtime, effort_runtime)
+            # P2 completion must not mask malformed or unsupported effort input.
+            if effort_runtime is not None:
+                validate_effort(effort_runtime, effort)
         selection = None
         if "model_level" in job:
             integer(job["model_level"], "model_level", 1, 8)
+        if "escalation" in job:
+            if "model_level" not in job:
+                invalid("escalation requires an explicit model_level")
+            validate_escalation(job["escalation"], job["model_level"])
         if "model_fallback" in job and "model_level" not in job:
             invalid("model_fallback requires an explicit model_level")
         if ("model_level" in job or "model_fallback" in job) and route["mode"] != "agent":
@@ -349,6 +366,12 @@ def prepare(manifest_path, policy_path):
             invalid("explicit model/harness/provider/effort requests are pinned; fallback requires a new authorized request")
         if "model_level" in job and ladder_config is None:
             invalid("model_level requires a model_ladder policy")
+        if ("model_level" in job and job["model_level"] > 1
+                and "escalation" not in job):
+            pinned_fields = set((override or ())).intersection(
+                {"runtime", "model", "provider", "effort"})
+            if len(pinned_fields) < 4:
+                invalid("levels above 1 require structured escalation evidence or a complete explicit tuple")
         if route["mode"] == "agent" and ladder_config is not None:
             use_ladder = not explicit and (route["runtime"] is None or "model_level" in job)
             if use_ladder:
@@ -359,9 +382,29 @@ def prepare(manifest_path, policy_path):
                 model = selection["model"]
                 override = {"instruction": (override or {}).get("instruction", "Configured model ladder selection"),
                             "effort": selection["effort"]}
-            elif explicit and route["runtime"] is None and "runtime" not in override:
-                # Explicit pins use their requested fields and the default harness only.
-                route["runtime"] = select(ladder_levels, job.get("model_level", ladder_config["default_level"]))["runtime"]
+            elif explicit:
+                # Complete partial pins from one validated ladder tuple.  A
+                # custom provider or an unlisted runtime remains an explicit
+                # full-route capability check; partial versions fail closed.
+                pin_fields = {key: override[key] for key in
+                              ("runtime", "model", "provider", "effort") if key in override}
+                # Every partial pin must become one complete, pool-accounted
+                # tuple.  A named runtime with no compatible CSV tuple fails
+                # closed instead of launching ambient native defaults.
+                if len(pin_fields) < 4:
+                    completed = complete_tuple(
+                        ladder_levels,
+                        job.get("model_level"),
+                        pin_fields,
+                        policy_runtime=route["runtime"],
+                    )
+                    route["runtime"] = completed["runtime"]
+                    model = completed["model"]
+                    provider = completed["provider"]
+                    override = {**override, "runtime": completed["runtime"],
+                                "model": completed["model"],
+                                "provider": completed["provider"],
+                                "effort": completed["effort"]}
         if override is not None:
             fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
@@ -390,6 +433,7 @@ def prepare(manifest_path, policy_path):
         if route["mode"] == "jail" and provider is not None:
             invalid("provider overrides are unsupported on the jail route; preserve the research boundary")
         runtime = route["runtime"]
+        validate_provider_harness(runtime, provider)
         if runtime is None:
             raise JobError("decision_needed", f"{job_id}: choose an ordinary-job runtime in policy or a current-request override")
         if runtime not in policy["runtime_kinds"]:
@@ -424,6 +468,10 @@ def prepare(manifest_path, policy_path):
         prepared_job = {**job, "task_file": task_path, "cwd": cwd,
                         "task": task, "route": route, "model": model,
                         "provider": provider, "kind": policy["runtime_kinds"][runtime]}
+        if override is not None:
+            # Keep the completed tuple (including an effort filled from the
+            # ladder) in the durable request consumed by preflight/effects.
+            prepared_job["override"] = override
         if selection is not None:
             prepared_job["model_route"] = selection
             prepared_job["override"] = override

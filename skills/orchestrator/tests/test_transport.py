@@ -79,7 +79,9 @@ class TransportTest(unittest.TestCase):
                                           "agent_pane_id": ["result", "agent", "pane_id"],
                                           "agent_kind": ["result", "agent", "agent"],
                                           "agent_name": ["result", "agent", "name"]},
-                                "jail_export": None}
+                                "jail_export": None,
+                                "jail_default": {"verified": True, "harness": "codex",
+                                                 "model": "gpt-6-astra", "effort": "max"}}
         self.calls = []
         self.available = ["codex", "omp"]
         self.agent = dict(load_json(HERDR_FIXTURES / "agent-get.json")["result"]["agent"])

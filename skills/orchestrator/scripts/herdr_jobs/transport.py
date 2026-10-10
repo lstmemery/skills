@@ -11,15 +11,13 @@ import subprocess
 import sys
 import time
 import tomllib
-import urllib.error
-import urllib.request
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
                       effort_arguments, validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
-from .model_ladder import billing_pool, provider_arguments
+from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
 
 
 class BudgetExpired(Exception):
@@ -74,6 +72,47 @@ def pi_catalog(output):
             raise JobError("unavailable_capability", "Pi native model table contains a malformed row")
         models.append({"id": f"{parts[0]}/{parts[1]}"})
     return {"models": models}
+
+
+def _codex_config():
+    """Read the optional Codex config with a strict shape at the boundary."""
+    config_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    path = config_home / "config.toml"
+    if not path.exists():
+        return {}
+    try:
+        value = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise JobError("unavailable_capability", f"Codex provider configuration is malformed: {error}") from error
+    if not isinstance(value, dict):
+        raise JobError("unavailable_capability", "Codex provider configuration must be an object")
+    if "model_provider" in value and not isinstance(value["model_provider"], str):
+        raise JobError("unavailable_capability", "Codex model_provider must be a string")
+    providers = value.get("model_providers", {})
+    if not isinstance(providers, dict):
+        raise JobError("unavailable_capability", "Codex model_providers must be an object")
+    for provider, settings in providers.items():
+        if not isinstance(provider, str) or not isinstance(settings, dict):
+            raise JobError("unavailable_capability", "Codex provider entries must be objects")
+        if "base_url" in settings and not isinstance(settings["base_url"], str):
+            raise JobError("unavailable_capability", f"Codex provider {provider} base_url must be a string")
+    return value
+
+
+def _native_model(runtime, resolved_model, provider=None):
+    if runtime == "pi" and isinstance(resolved_model, str) and "/" in resolved_model:
+        prefix, model = resolved_model.split("/", 1)
+        if provider is None or billing_pool(prefix) == billing_pool(provider):
+            return model
+    return resolved_model
+
+
+def _effort_for(job):
+    override = job.get("spec", {}).get("override") or {}
+    if "effort" in override:
+        return override["effort"]
+    route = job.get("spec", {}).get("model_route")
+    return route.get("effort") if isinstance(route, dict) else None
 
 
 class Deadline:
@@ -142,7 +181,7 @@ class NativeTransport:
         self.deadline = deadline
         self.binding = fields(load_json(binding_path), ["schema_version", "verified", "herdr_help_sha256",
                               "herdr_agent_help_sha256", "herdr_pane_help_sha256", "supported_kinds", "orchestrator_help_sha256",
-                              "server_version", "paths", "jail_export"])
+                              "server_version", "paths", "jail_export"], ["jail_default"])
         version(self.binding["schema_version"])
         if self.binding["verified"] is not True:
             raise JobError("unavailable_capability", "host contract is not verified")
@@ -169,6 +208,12 @@ class NativeTransport:
         for job in request["jobs"]:
             label = job.get("job_id", "job") if isinstance(job, dict) else "job"
             validate_writer_intent(job, label)
+            validate_provider_harness(job["route"]["runtime"], job.get("provider"))
+            if (job["route"]["mode"] == "agent" and job["route"]["runtime"] == "codex"
+                    and job.get("provider") is not None
+                    and billing_pool(job["provider"]) != "codex"):
+                raise JobError("unavailable_capability",
+                               "Codex custom provider model discovery is not verified; no substitution")
         help_bytes = self.raw([self.herdr, "--help"])
         agent_help = self.raw([self.herdr, "agent", "--help"])
         pane_help = self.raw([self.herdr, "pane", "--help"])
@@ -189,6 +234,7 @@ class NativeTransport:
         previous = {job["spec"]["job_id"]: job for job in existing["jobs"]} if existing else {}
         planned = [job for job in request["jobs"] if not status_only and
                    (job["job_id"] not in previous or previous[job["job_id"]]["phase"] in ("pending", "split", "moved"))]
+        planned_ids = {job["job_id"] for job in planned}
         writer_checks = []
         if not status_only:
             for job in request["jobs"]:
@@ -209,54 +255,99 @@ class NativeTransport:
             available = at(doctor, ["runtimeSummary", "availableIds"])
         if not isinstance(available, list) or not all(isinstance(item, str) for item in available):
             raise JobError("unavailable_capability", "doctor returned an invalid availableIds list")
-        models = {key: job["resolved_model"] for key, job in previous.items() if job["resolved_model"] is not None}
+        # A pinned model is retained for finished jobs, but every new start,
+        # including a resumed pending job, must rediscover and revalidate it.
+        models = {key: job["resolved_model"] for key, job in previous.items()
+                  if job["resolved_model"] is not None and key not in planned_ids}
         retry_override = request.get("retry_override", {})
+        codex_config = None
         for job in planned:
+            prior = previous.get(job["job_id"])
+            requested_model = job.get("model")
+            if requested_model is None and prior is not None:
+                requested_model = prior.get("resolved_model")
             if job["kind"] not in kinds:
                 raise JobError("unavailable_capability", f"Herdr kind is not verified as installed: {job['kind']}")
             if not Path(job["cwd"]).is_dir():
                 raise JobError("unavailable_capability", f"{job['job_id']}: working directory is unavailable")
             runtime = job["route"]["runtime"]
+            if runtime == "codex":
+                codex_config = _codex_config()
+            requested_effort = _effort_for({"spec": job})
+            if (runtime in ("pi", "claude-code") and requested_effort is not None
+                    and requested_model is None):
+                raise JobError("unavailable_capability",
+                               f"{runtime} effort {requested_effort} cannot be verified without an exact model")
             if runtime == "pi" and "pi" in retry_override:
                 validate_pi_project_settings(job["cwd"], retry_override["pi"])
             if runtime == "codex" and "codex" in retry_override:
-                validate_codex_retry_provider(retry_override["codex"])
+                retry = retry_override["codex"]
+                selected = job.get("provider")
+                configured = codex_config.get("model_provider", "openai")
+                native_provider = (configured if selected is None else
+                                   ("openai" if billing_pool(selected) == "codex"
+                                    else billing_pool(selected)))
+                if retry["provider_id"] != native_provider:
+                    raise JobError("unavailable_capability",
+                                   "Codex retry provider does not match the selected native provider")
+                if native_provider in ("openai", "codex"):
+                    raise JobError("unavailable_capability",
+                                   "Codex retry override cannot target a built-in provider")
+                provider_settings = codex_config.get("model_providers", {}).get(native_provider)
+                if not isinstance(provider_settings, dict):
+                    raise JobError("unavailable_capability",
+                                   "Codex retry provider is not configured as a provider object")
             if job["route"]["mode"] == "jail":
                 self.check_export()
                 if not shutil.which("omp-train"):
                     raise JobError("unavailable_capability", "omp-train is unavailable")
                 if job["model"] is not None:
                     raise JobError("unavailable_capability", "exact jail model discovery is not verified; omit the model or verify a new adapter")
+                attestation = self.binding.get("jail_default")
+                if not isinstance(attestation, dict):
+                    raise JobError("unavailable_capability", "jail default model/effort attestation is missing")
+                fields(attestation, ["verified", "harness", "model", "effort"], label="jail_default")
+                if (attestation["verified"] is not True or attestation["harness"] != "codex"
+                        or attestation["model"] != "gpt-6-astra" or attestation["effort"] != "max"):
+                    raise JobError("unavailable_capability",
+                                   "jail default is not verified as gpt-6-astra at max effort")
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
-            provider_catalog = None
-            if job["route"]["mode"] == "agent" and runtime == "codex" and job.get("provider") not in (None, "codex"):
-                provider_catalog = self.codex_provider_catalog(job["provider"])
-            if job["model"] is not None and job["job_id"] not in models:
-                if provider_catalog is not None:
-                    catalog = provider_catalog
-                elif runtime == "pi":
+            if requested_model is not None and job["job_id"] not in models:
+                if runtime == "pi":
                     catalog = pi_catalog(self.read_terminal(["pi", "--offline", "--list-models"]))
                 else:
                     catalog = self.read([self.orchestrator, "models", runtime, "--json", "--compact"])
                 items = catalog_models(catalog, runtime)
-                requested = job["model"]
+                requested = requested_model
                 provider = job.get("provider")
-                matches = [item["id"] for item in items if isinstance(item, dict)
-                           and isinstance(item.get("id"), str)
-                           and requested in (item["id"], item.get("displayName"),
-                                             item["id"].split("/", 1)[-1] if runtime == "pi" else None)
-                           and (runtime != "pi" or provider is None
-                                or billing_pool(item["id"].split("/", 1)[0]) == billing_pool(provider))]
+                matched_items = [item for item in items if isinstance(item, dict)
+                                 and isinstance(item.get("id"), str)
+                                 and (requested == item["id"] if runtime == "claude-code" else
+                                      requested in (item["id"], item.get("displayName"),
+                                                    item["id"].split("/", 1)[-1] if runtime == "pi" else None))
+                                 and (runtime != "pi" or provider is None
+                                      or billing_pool(item["id"].split("/", 1)[0]) == billing_pool(provider))]
+                matches = [item["id"] for item in matched_items]
                 if len(set(matches)) != 1:
                     raise JobError("unavailable_capability", f"exact model unavailable or ambiguous: {requested}; "
                                    "restore exact model discovery or request the configured same-level fallback "
                                    "with this evidence; aliases are not proof of an exact version")
+                selected_item = matched_items[0]
+                if runtime == "claude-code":
+                    efforts = selected_item.get("efforts")
+                    if not isinstance(efforts, list) or not all(isinstance(value, str) for value in efforts):
+                        raise JobError("unavailable_capability",
+                                       "Claude exact model effort metadata is unavailable; no launch is authorized")
+                    effort = _effort_for({"spec": job})
+                    if effort is not None and effort not in efforts:
+                        raise JobError("unavailable_capability",
+                                       f"Claude model {requested} cannot preserve effort {effort}")
                 models[job["job_id"]] = matches[0]
-            if runtime == "pi" and job.get("model_route") is not None:
+            if runtime == "pi" and requested_model is not None and requested_effort is not None:
                 provider, model = models[job["job_id"]].split("/", 1)
                 efforts = self.pi_model_efforts(provider, model)
-                effort = job["model_route"]["effort"]
+                effort = requested_effort
                 if effort not in efforts:
                     raise JobError("unavailable_capability", f"Pi/{provider}/{model} cannot preserve effort {effort}; "
                                    "native Pi would clamp it. Restore exact effort support or select the same-level "
@@ -291,44 +382,6 @@ class NativeTransport:
             raise JobError("unavailable_capability", "Pi model effort discovery returned invalid metadata")
         return result["efforts"]
 
-    def codex_provider_catalog(self, provider):
-        """Validate a pre-existing Responses provider without changing settings or auth."""
-        config_dir = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-        try:
-            config = tomllib.loads((config_dir / "config.toml").read_text())
-        except (OSError, ValueError) as error:
-            raise JobError("unavailable_capability", "Codex custom provider config unavailable; restore its reviewed configuration") from error
-        entry = config.get("model_providers", {}).get(provider)
-        if not isinstance(entry, dict) or entry.get("wire_api") != "responses":
-            raise JobError("unavailable_capability", f"Codex/{provider} needs a configured Responses adapter; no Pi substitution")
-        if provider != "opencode-go" or entry.get("base_url", "").rstrip("/") != "https://opencode.ai/zen/go/v1":
-            raise JobError("unavailable_capability", f"Codex/{provider} model discovery adapter is unverified")
-        env_key = entry.get("env_key")
-        credential = os.environ.get(env_key) if isinstance(env_key, str) else None
-        if not credential:
-            raise JobError("unavailable_capability", "Codex/opencode-go requires its configured credential environment; "
-                           "restore that environment in the authorized launcher and rerun preflight; no Pi substitution")
-        request = urllib.request.Request(entry["base_url"].rstrip("/") + "/models",
-                                         headers={"Authorization": "Bearer " + credential})
-        self.deadline.check()
-        try:
-            with urllib.request.urlopen(request, timeout=min(15, self.deadline.remaining())) as response:
-                data = response.read(1048577)
-        except urllib.error.HTTPError as error:
-            metadata = {key: error.headers.get(key) for key in ("Retry-After", "X-RateLimit-Reset")}
-            error.close()
-            raise JobError("unavailable_capability", f"OpenCode Go model catalog HTTP {error.code}; "
-                           f"backoff metadata={json.dumps(metadata)}; record any supplied reset/backoff "
-                           "before retrying or selecting the configured fallback") from error
-        except (urllib.error.URLError, TimeoutError) as error:
-            raise JobError("unavailable_capability", "OpenCode Go model catalog unavailable; retain provider backoff/reset evidence") from error
-        if len(data) > 1048576:
-            raise JobError("unavailable_capability", "OpenCode Go model catalog exceeds the discovery bound")
-        payload = parse_json(data)
-        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise JobError("unavailable_capability", "OpenCode Go model catalog has no data list")
-        return {"models": payload["data"]}
-
     def check_export(self):
         export = self.binding["jail_export"]
         if export is None:
@@ -345,6 +398,7 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        validate_provider_harness(spec["route"]["runtime"], spec.get("provider"))
         if action == "retry_setup":
             profile = fields(job.get("retry_profile"), ["agent_dir", "session_dir", "settings_sha256"],
                              label="run-scoped pi retry profile")
@@ -372,7 +426,7 @@ class NativeTransport:
                 runtime_args = []
                 runtime_args += provider_arguments("pi", spec.get("provider"))
                 if job["resolved_model"] is not None:
-                    runtime_args += ["--model", job["resolved_model"]]
+                    runtime_args += ["--model", _native_model("pi", job["resolved_model"], spec.get("provider"))]
                 effort = (spec.get("override") or {}).get("effort")
                 runtime_args += effort_arguments("pi", effort)
                 if runtime_args:

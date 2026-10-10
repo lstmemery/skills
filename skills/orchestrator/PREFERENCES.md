@@ -96,9 +96,10 @@ acceptance of worker output.
 - "Luna agents" (or "luna workers") means the **Codex** harness running
   `gpt-6-luna` at **max** effort (`codex -m gpt-6-luna -c
   model_reasoning_effort=max`, Herdr kind `codex`). This named request is pinned
-  at the ladder's level 4 primary. The 2026-10-10 CSV supersedes the older Pi
-  fallback preference: the configured fallback keeps Codex and uses OpenCode Go.
-  Verify its native provider capability; never silently substitute Pi.
+  at the ladder's level 4 primary. Every OpenCode Go route uses the Pi harness;
+  the level 4 fallback keeps `gpt-6-luna` at max effort through Pi's native
+  `opencode-go` provider. Pi's configured offline catalog includes that exact
+  model, and preflight verifies its exact model and effort before launch.
 - Retry tuning is run-scoped. Prefer a supported per-run override and record it
   in run state. Never edit shared pi/Codex settings for transient rate limits;
   when a runtime has no supported per-run override, record the staged change and

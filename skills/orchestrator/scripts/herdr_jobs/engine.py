@@ -12,6 +12,7 @@ from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fie
                       text, version)
 from .retry import prepare_pi_run_profile
 from .transport import BudgetExpired, EffectUnknown, RateLimited
+from .model_ladder import billing_pool
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
 
@@ -35,7 +36,19 @@ class Engine:
 
     def provider_cap(self, provider):
         config = self.admission_config()
-        return config["provider_caps"].get(provider.casefold(), config["default_provider_cap"])
+        if not isinstance(config, dict) or not isinstance(config.get("provider_caps", {}), dict):
+            raise JobError("conflict", "stored provider admission caps are malformed")
+        target = billing_pool(provider)
+        caps = {}
+        for name, cap in config.get("provider_caps", {}).items():
+            if not isinstance(name, str) or type(cap) is not int or not 1 <= cap <= 64:
+                raise JobError("conflict", "stored provider admission caps are malformed")
+            canonical = billing_pool(name)
+            caps[canonical] = min(caps.get(canonical, cap), cap)
+        default = config.get("default_provider_cap", 4)
+        if type(default) is not int or not 1 <= default <= 64:
+            raise JobError("conflict", "stored default provider admission cap is malformed")
+        return caps.get(target, default)
 
     @staticmethod
     def provider_for(spec, resolved_model):

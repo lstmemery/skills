@@ -82,7 +82,8 @@ python3 scripts/herdr-admission.py rate-limit --provider codex --model '*' \
 
 `codex` and `openai-codex` share the Codex pool; `claude` and `claude-code`
 share the Claude pool; `opencode go` and `opencode-go` share the OpenCode Go
-pool across Codex and Pi. Admission counts and resets are shared across aliases.
+pool. OpenCode Go routes always use Pi. Admission counts and resets are shared
+across provider aliases.
 Older alias-keyed leases migrate on read; colliding alias backoffs retain the
 later reset. Older policies with different caps for aliases use the stricter
 cap. Pool exhaustion blocks every model in that pool; model-specific rate limits
@@ -91,20 +92,22 @@ continue to block only that model. Never treat switching harnesses as new quota.
 ## Native contracts and capability gaps
 
 `claude` is the CSV harness alias for runtime `claude-code`, Herdr kind `claude`.
-`opencode go` maps to native provider `opencode-go`. Models and efforts are not
-renamed: Codex uses `-m` and `-c model_reasoning_effort=...`; Pi uses `--model`
-and `--thinking`; Claude uses `--model` and `--effort`.
+`opencode go` maps to native provider `opencode-go`, and every OpenCode Go tuple
+must use Pi. Pi passes `--provider opencode-go`; it passes models unchanged with
+`--model` and efforts with `--thinking`. Codex/OpenCode Go combinations are
+rejected while loading the ladder and preparing an explicit request. Preflight
+rejects them before host discovery. The transport also rejects them before any
+Herdr action, and native argument construction fails closed on such a mapping.
+Explicit Codex routes through other custom providers remain blocked until a
+provider-specific exact-model discovery adapter is verified.
 
-Codex's subscription uses native `model_provider="openai"`; its OpenCode Go
-fallback uses `model_provider="opencode-go"`. This combination is supported:
-[OpenCode's native contract](https://opencode.ai/docs/go/#endpoints) advertises
-the Responses endpoint for `gpt-6-luna` and lists Codex as a validated client.
-Preflight requires an already configured `opencode-go` Responses provider at
-`https://opencode.ai/zen/go/v1`, its configured credential environment variable,
-and an authenticated `/models` catalog containing the exact model. No shared
-config or auth is changed. If any requirement is absent, retain the tuple and
-restore the configured environment/adapter through the authorized launcher,
-then rerun preflight. Never silently turn levels 1–4's Codex fallback into Pi.
+Pi's read-only `pi --offline --list-models` output includes
+`opencode-go/gpt-6-luna`. The installed Pi model metadata reports `low`,
+`medium`, `xhigh`, and `max` support for that exact model, so levels 1–4 retain
+their configured `gpt-6-luna` fallbacks at the requested efforts. Managed-job
+preflight still checks the exact model and effort against the installed Pi
+catalog before launch; it does not replace a missing model or effort with a
+different choice.
 
 Pi discovery uses its native offline model table, disambiguated by provider.
 The ladder additionally checks installed SDK model effort metadata composed
