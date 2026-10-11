@@ -408,6 +408,11 @@ class Engine:
             "task_id": spec["job_id"],
             "assignment_revision": spec.get("assignment_revision", 1),
         }
+        result_schema = (
+            "Copy scripts/worker-records.py schema --format md verbatim; result task_id/revision must match."
+            if worker_result else
+            "Write result.md and receipt.json using the managed-job output contract; no result.json worker record is enabled."
+        )
         mode = spec.get("worker_mode", spec.get("mode", "literal"))
         protected_paths = protected_paths_record(
             spec.get("protected_paths"), spec.get("acceptance_tests", ())
@@ -438,6 +443,7 @@ class Engine:
             "recovery: a tool-schema or argument error is recoverable; inspect the current schema, fix the arguments, and retry at most 2 times, then report the last error\n"
             "stop_rules: never retry permission denials, protected-path requests, specification conflicts, missing required inputs, or an exhausted retry budget; ask when the answer changes authorization, acceptance, public behavior, or a material inference\n"
             "outcomes: success maps to result outcome ready; ask and blocked map to blocked; partial maps to partial when supported (otherwise failed with unresolved); failed maps to failed\n"
+            f"result_schema: {encoded(result_schema).decode()}\n"
             "mode_rules: literal preserves spelling, casing, paths, identifiers, and named checks exactly and reports ambiguity; inferential labels observations versus hypotheses, lists alternatives and falsifiers, and stays inside the same authority boundary\n"
         )
         context = spec.get("required_context")

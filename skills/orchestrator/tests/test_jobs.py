@@ -682,6 +682,9 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(sum(event["action"] == "start" for event in events), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in events), 0)
         self.assertTrue((self.root / "prompt-job0.txt").is_file())
+        prompt = (self.root / "prompt-job0.txt").read_text()
+        self.assertIn('result_schema: "Write result.md and receipt.json', prompt)
+        self.assertNotIn("Copy scripts/worker-records.py schema", prompt)
         self.assertLess(next(i for i, event in enumerate(events) if event["action"] == "prompt_verified"),
                         next(i for i, event in enumerate(events) if event["action"] == "observe"))
 
@@ -703,6 +706,7 @@ class JobsTest(unittest.TestCase):
         self.assertIn("worker_mode: inferential", prompt)
         self.assertIn('"task_id": "brief-task"', prompt)
         self.assertIn('"assignment_revision": 3', prompt)
+        self.assertIn('result_schema: "Copy scripts/worker-records.py schema', prompt)
         self.assertIn("delegation-authorized.toml", prompt)
         self.assertIn("token-allowlist.txt", prompt)
         self.assertIn(str(self.context_test), prompt)
