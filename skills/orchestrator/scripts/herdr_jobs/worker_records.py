@@ -34,9 +34,14 @@ DISPOSITION_FIELDS = {
     "evidence",
 }
 TERMINAL_DISPOSITIONS = {"completed", "blocked", "failed", "cancelled"}
-RESULT_OUTCOMES = {"ready", "blocked", "failed"}
+RESULT_OUTCOMES = {"ready", "partial", "blocked", "failed"}
 CHECK_STATUSES = {"passed", "failed", "not_run"}
-OUTCOME_NORMALIZATIONS = {"complete": "ready", "completed": "ready"}
+OUTCOME_NORMALIZATIONS = {
+    "complete": "ready",
+    "completed": "ready",
+    "success": "ready",
+    "ask": "blocked",
+}
 WORKER_MARKERS = {"brief.md", "result.json", "disposition.json"}
 REPOSITORY_COPY_MARKER = ".git"
 CAPTURE_MANIFEST_NAME = "manifest.json"
@@ -135,6 +140,8 @@ def result_schema_markdown():
         f"Optional top-level fields: {optional}; omit `candidate` for non-repository tasks.",
         f"`outcome` must be one of {outcomes}; `assignment_revision` must be an "
         f"integer from 1 to {MAX_REVISION}.",
+        "Brief outcomes map to this field as follows: `success` -> `ready`, `ask` or "
+        "`blocked` -> `blocked`, `partial` -> `partial`, and `failed` -> `failed`.",
         "`task_id` and `assignment_revision` must match the identity supplied to `validate-result`.",
         "Text values must be non-empty strings with no NUL and at most 100,000 characters.",
         f"`artifacts` is an array of objects with exactly {artifact_fields}; it may be "
@@ -142,7 +149,7 @@ def result_schema_markdown():
         f"`checks` is an array of objects with exactly {check_fields}; `status` must "
         f"be one of {statuses}.",
         "`checks[].evidence` must be a non-empty string, such as a path or concise check result.",
-        "`unresolved` is an array of non-empty strings; `blocked` and `failed` "
+        "`unresolved` is an array of non-empty strings; `partial`, `blocked`, and `failed` "
         "require at least one explanatory item.",
         "For repository changes, validate with `--repository-changes` and include "
         f"`candidate` with exactly {candidate_fields}.",
@@ -209,8 +216,8 @@ def _validate_result_record(record, identity, repository_changes=False):
         records.invalid("unresolved must be an array")
     for index, item in enumerate(unresolved):
         records.text(item, f"unresolved[{index}]")
-    if record["outcome"] in {"blocked", "failed"} and not unresolved:
-        records.invalid("blocked and failed results require an explanatory unresolved item")
+    if record["outcome"] in {"partial", "blocked", "failed"} and not unresolved:
+        records.invalid("partial, blocked, and failed results require an explanatory unresolved item")
 
     if "candidate" in record:
         _validate_candidate(record["candidate"])
@@ -240,7 +247,7 @@ def normalize_result(source, output, identity, repository_changes=False):
             record["outcome"] = OUTCOME_NORMALIZATIONS[outcome]
             changes.append({
                 "path": "outcome",
-                "action": "mapped complete/completed to ready",
+                "action": f"mapped {outcome} to {record['outcome']}",
             })
 
         artifacts = record.get("artifacts")

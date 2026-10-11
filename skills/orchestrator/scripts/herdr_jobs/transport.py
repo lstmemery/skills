@@ -13,7 +13,8 @@ import time
 import tomllib
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
-                      effort_arguments, validate_writer_intent, version)
+                      effort_arguments, validate_protected_paths, validate_required_context,
+                      validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
@@ -25,7 +26,9 @@ class BudgetExpired(Exception):
 
 
 class EffectUnknown(Exception):
-    pass
+    def __init__(self, message, start_diagnostic=None):
+        super().__init__(message)
+        self.start_diagnostic = start_diagnostic
 
 
 class RateLimited(Exception):
@@ -35,11 +38,57 @@ class RateLimited(Exception):
 
 
 ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)(?P<prefix>[\"']?[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization)"
+    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)")
+AUTH_SCHEME_TOKEN = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+KNOWN_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]+|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|glpat-[A-Za-z0-9_-]{12,}|tk_[A-Za-z0-9_-]{12,})\b")
+URL_PASSWORD = re.compile(r"(?i)(https?://[^\s/:@]+:)([^\s/@]+)(@)")
 ACTIVE_TURN_STATUS = re.compile(
     r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
     r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
     re.IGNORECASE,
 )
+
+
+def _cli_command_name(argv):
+    parts = [Path(argv[0]).name, *argv[1:3]]
+    return " ".join(parts)
+
+
+def _safe_cli_text(value, maximum=2048):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    value = ANSI_ESCAPE.sub("", str(value))
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value)
+    value = AUTH_SCHEME_TOKEN.sub(r"\1 <redacted>", value)
+    value = URL_PASSWORD.sub(r"\1<redacted>\3", value)
+    value = SENSITIVE_ASSIGNMENT.sub(_redacted_assignment, value)
+    value = KNOWN_TOKEN.sub("<redacted>", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    if len(value) > maximum:
+        return value[:maximum - 3] + "..."
+    return value
+
+
+def _redacted_assignment(match):
+    value = match.group("value")
+    quote = value[0] if value[0] in ("\"", "'") and value.endswith(value[0]) else ""
+    return match.group("prefix") + quote + "<redacted>" + quote
+
+
+def cli_diagnostic(argv, exit_code, stdout, stderr):
+    """Return a bounded Herdr command record with common credentials removed."""
+    return {"command": _cli_command_name(argv), "exit_code": exit_code,
+            "stdout": _safe_cli_text(stdout), "stderr": _safe_cli_text(stderr)}
+
+
+def cli_diagnostic_message(diagnostic):
+    return (f"{diagnostic['command']} exited {diagnostic['exit_code']}; stderr: "
+            f"{diagnostic['stderr'] or '<empty>'}; response: "
+            f"{diagnostic['stdout'] or '<empty>'}")
 
 
 def catalog_models(catalog, runtime):
@@ -193,9 +242,10 @@ class NativeTransport:
             raise JobError("unavailable_capability", "herdr and orchestrator must already be installed")
 
     def raw(self, argv):
-        code, output, _ = command(argv, self.deadline)
+        code, output, error_output = command(argv, self.deadline)
         if code:
-            raise JobError("unavailable_capability", f"{Path(argv[0]).name} {argv[1]} exited {code}; inspect the host CLI")
+            diagnostic = cli_diagnostic(argv, code, output, error_output)
+            raise JobError("unavailable_capability", cli_diagnostic_message(diagnostic))
         return output
 
     def read(self, argv):
@@ -208,6 +258,8 @@ class NativeTransport:
         for job in request["jobs"]:
             label = job.get("job_id", "job") if isinstance(job, dict) else "job"
             validate_writer_intent(job, label)
+            validate_protected_paths(job.get("protected_paths"), job.get("editable_paths", ()),
+                                     base=job.get("cwd"))
             validate_provider_harness(job["route"]["runtime"], job.get("provider"))
             if (job["route"]["mode"] == "agent" and job["route"]["runtime"] == "codex"
                     and job.get("provider") is not None
@@ -311,6 +363,8 @@ class NativeTransport:
                         or attestation["model"] != "gpt-6-astra" or attestation["effort"] != "max"):
                     raise JobError("unavailable_capability",
                                    "jail default is not verified as gpt-6-astra at max effort")
+                validate_required_context(job.get("required_context"), base=job["cwd"],
+                                          require_test_fixture=True, jail_visible=True)
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
             if requested_model is not None and job["job_id"] not in models:
@@ -447,7 +501,10 @@ class NativeTransport:
                       f"model_providers.train-openai.stream_idle_timeout_ms={timeout_ms}", prompt]
             launch_request = Path(job["exit_record"]).with_name("launch.json")
             save(launch_request, {"schema_version": 1, "job_id": spec["job_id"], "attempt_id": job["attempt_id"],
-                                  "argv": launch, "exit_path": job["exit_record"]})
+                                  "argv": launch, "exit_path": job["exit_record"],
+                                  "required_context": spec["required_context"],
+                                  "protected_paths": spec["protected_paths"],
+                                  "editable_paths": spec["editable_paths"]})
             runner = Path(__file__).resolve().parents[1] / "jail-runner.py"
             argv = [self.herdr, "pane", "run", pane,
                     shlex.join([sys.executable, str(runner), "--request", str(launch_request)])]
@@ -458,6 +515,8 @@ class NativeTransport:
             # expected. Trust only a verified worker identity and live Working
             # state from the pane before reporting the effect as delivered.
             code, output, error_output = command(argv, self.deadline)
+            start_diagnostic = cli_diagnostic(argv, code, output, error_output)
+            job["start_diagnostic"] = start_diagnostic
             rate_limit = rate_limit_from_output(
                 (error_output + b"\n" + output).decode("utf-8", "replace"),
                 source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
@@ -466,14 +525,16 @@ class NativeTransport:
             try:
                 observation = self.observe(job)
             except (JobError, UnicodeError, BudgetExpired) as error:
-                raise EffectUnknown("Codex startup could not be verified; inspect the owned pane before retrying") from error
+                raise EffectUnknown("Codex startup could not be verified; inspect the owned pane before retrying",
+                                    start_diagnostic=start_diagnostic) from error
             if observation["state"] == "blocked":
                 return {"launch_blocked": True,
                         "issue": observation.get("launch_issue", "Codex startup is blocked"),
-                        "observation": observation}
+                        "observation": observation, "start_diagnostic": start_diagnostic}
             if observation.get("prompt_verified"):
-                return {"prompt_submitted": True}
-            raise EffectUnknown("Codex prompt delivery is unverified; inspect the owned pane before retrying")
+                return {"prompt_submitted": True, "start_diagnostic": start_diagnostic}
+            raise EffectUnknown("Codex prompt delivery is unverified; inspect the owned pane before retrying",
+                                start_diagnostic=start_diagnostic)
         try:
             if action in ("start", "prompt"):
                 code, output, error_output = command(argv, self.deadline)

@@ -34,6 +34,10 @@ class LadderTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        jail_exports_patch = patch("herdr_jobs.records.JAIL_CONTEXT_EXPORTS",
+                                   ((self.root, "/work"),))
+        jail_exports_patch.start()
+        self.addCleanup(jail_exports_patch.stop)
         self.csv = self.root / "model-ladder.csv"
         self.csv.write_bytes((PACKAGE / "model-ladder.csv").read_bytes())
         self.policy = self.root / "policy.json"
@@ -189,6 +193,12 @@ class LadderTest(unittest.TestCase):
 
     def test_jail_and_shopping_boundaries_are_preserved(self):
         self.job["task_kind"] = "deep_research"
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        self.job["required_context"] = [
+            {"path": "acceptance_test.md", "kind": "test", "purpose": "Acceptance test."},
+            {"path": "fixture-input.json", "kind": "fixture", "purpose": "Input fixture."},
+        ]
         job = self.prepared()
         self.assertEqual(job["route"], {"mode": "jail", "runtime": "codex"})
         self.assertIsNone(job["model"])
@@ -199,6 +209,22 @@ class LadderTest(unittest.TestCase):
         with self.assertRaises(JobError) as error:
             self.prepared(model_level=5)
         self.assertEqual(error.exception.kind, "decision_needed")
+
+    def test_jail_manifest_rejects_context_outside_launcher_exports(self):
+        self.job["task_kind"] = "deep_research"
+        test_file = self.root / "acceptance_test.py"
+        fixture_file = self.root / "fixture-input.json"
+        test_file.write_text("assert True\n")
+        fixture_file.write_text('{"fixture": true}\n')
+        self.job["required_context"] = [
+            {"path": str(test_file), "kind": "test"},
+            {"path": str(fixture_file), "kind": "fixture"},
+        ]
+
+        with patch("herdr_jobs.records.JAIL_CONTEXT_EXPORTS",
+                   ((self.root / "exported", "/ctx"),)):
+            with self.assertRaisesRegex(JobError, "outside.*jail-visible export"):
+                self.prepared()
 
     def test_legacy_policy_without_ladder_keeps_its_contract(self):
         policy = json.loads(self.policy.read_text())

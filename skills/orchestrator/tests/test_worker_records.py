@@ -48,7 +48,7 @@ class WorkerRecordsTest(unittest.TestCase):
         self.assertIn('"path": "artifact-path"', process.stdout)
         self.assertIn('"kind": "report"', process.stdout)
         self.assertIn("`checks[].evidence` must be a non-empty string", process.stdout)
-        for value in ("`ready`", "`blocked`", "`failed`", "`passed`", "`not_run`"):
+        for value in ("`ready`", "`partial`", "`blocked`", "`failed`", "`passed`", "`not_run`"):
             self.assertIn(value, process.stdout)
         self.assertIn("candidate", process.stdout)
         self.assertIn("--repository-changes", process.stdout)
@@ -318,6 +318,37 @@ class WorkerRecordsTest(unittest.TestCase):
 
         self.assertEqual(process.returncode, 2)
         self.assertIn("unresolved", process.stderr)
+
+    def test_partial_result_is_valid_and_maps_to_failed_disposition(self):
+        result_path = self.root / "result.json"
+        result_path.write_text(json.dumps(self.make_result(
+            outcome="partial", unresolved=["The non-critical integration check was unavailable."]
+        )))
+
+        process = self.call(
+            "validate-result", result_path,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+
+    def test_normalize_maps_brief_success_and_ask_outcomes(self):
+        for source_outcome, expected in (("success", "ready"), ("ask", "blocked")):
+            with self.subTest(source_outcome=source_outcome):
+                source = self.root / f"{source_outcome}.json"
+                output = self.root / f"{source_outcome}.normalized.json"
+                record = self.make_result(outcome=source_outcome)
+                if expected == "blocked":
+                    record["unresolved"] = ["Coordinator input is required."]
+                source.write_text(json.dumps(record))
+
+                process = self.call(
+                    "normalize-result", source, "--output", output,
+                    "--task-id", "worker-a", "--revision", "1",
+                )
+
+                self.assertEqual(process.returncode, 0, process.stderr)
+                self.assertEqual(json.loads(output.read_text())["outcome"], expected)
 
     def test_repository_change_requires_candidate_record(self):
         result_path = self.root / "result.json"

@@ -5,7 +5,8 @@ from pathlib import Path
 import time
 
 from herdr_jobs.records import JobError, load_json, save
-from herdr_jobs.transport import EffectUnknown, RateLimited
+from herdr_jobs.transport import (EffectUnknown, RateLimited, cli_diagnostic,
+                                  cli_diagnostic_message)
 
 
 class FakeHost:
@@ -62,8 +63,8 @@ class FakeHost:
                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
                    "outcome": "complete", "artifacts": artifact_paths, "unresolved": []}
         if worker:
-            receipt["outcome"] = {"ready": "complete", "blocked": "blocked",
-                                  "failed": "failed"}[worker_outcome]
+            receipt["outcome"] = {"ready": "complete", "partial": "partial",
+                                  "blocked": "blocked", "failed": "failed"}[worker_outcome]
             receipt["unresolved"] = worker_fixture.get("unresolved", [])
         if not worker and self.fixture.get("legacy_receipt_fixture"):
             receipt = load_json(self.fixture["legacy_receipt_fixture"])
@@ -93,6 +94,7 @@ class FakeHost:
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
         codex_start = (action == "start" and job["spec"]["route"]["mode"] == "agent"
                        and job["spec"]["route"]["runtime"] == "codex")
+        failed_codex_start = codex_start and mode == "failed_start_diagnostic"
         if action == "start" and mode == "rate_limited_start_once" and job["spec"]["job_id"] not in self.rate_limited_jobs:
             self.rate_limited_jobs.add(job["spec"]["job_id"])
             self.rate_limited_attempts.add(job["attempt_id"])
@@ -102,7 +104,9 @@ class FakeHost:
             raise RateLimited({"retry_after_seconds": 0.2, "source": "retry-after"})
         pi_retry_start = (action == "start" and job["spec"]["route"]["runtime"] == "pi"
                           and job.get("retry_profile") is not None)
-        if action in ("prompt", "jail") or codex_start or pi_retry_start:
+        if (action in ("prompt", "jail")
+                or (codex_start and mode not in ("failed_start_diagnostic", "blocked"))
+                or pi_retry_start):
             (self.path.parent / f"prompt-{job['spec']['job_id']}.txt").write_text(prompt)
             rate_limited_first_attempt = (mode in ("rate_limited_once", "rate_limited_without_metadata_once")
                                           and job["spec"]["job_id"] not in self.rate_limited_jobs)
@@ -122,6 +126,14 @@ class FakeHost:
             time.sleep(0.5)
         if mode == "split_unknown" and action == "split":
             raise EffectUnknown("split response lost")
+        if failed_codex_start:
+            diagnostic = cli_diagnostic(
+                ["herdr", "agent", "start", job["agent_name"]], 7,
+                b'{"error":{"message":"registration rejected","api_key":"fixture-start-response-secret",'
+                b'"client_secret":"fixture credential phrase"}',
+                b"agent_not_ready: token=fixture-start-stderr-secret")
+            raise EffectUnknown("Codex startup could not be verified; inspect the owned pane before retrying",
+                                start_diagnostic=diagnostic)
         if mode == "blocked" and codex_start:
             return {"launch_blocked": True, "issue": "Codex is showing a trust or resume dialog"}
         if mode in ("prompt_timeout", "ambiguous") and (action in ("prompt", "jail") or codex_start):
@@ -139,6 +151,12 @@ class FakeHost:
     def observe(self, job):
         self.event("observe", job)
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
+        if mode == "failed_start_diagnostic" and job.get("pending_effect", {}).get("action") == "start":
+            diagnostic = cli_diagnostic(
+                ["herdr", "agent", "get", job["pane_id"]], 1,
+                b'{"error":{"message":"agent not found","token":"fixture-get-response-secret"}}',
+                b"agent lookup failed: Authorization: Bearer fixture-get-stderr-secret")
+            raise JobError("unavailable_capability", cli_diagnostic_message(diagnostic))
         if mode == "rate_limited_start_once" and job["attempt_id"] in self.rate_limited_attempts:
             raise JobError("unavailable_capability", "worker was not registered after provider rejection")
         if mode in ("rate_limited_once", "rate_limited_without_metadata_once") and job["attempt_id"] in self.rate_limited_attempts:

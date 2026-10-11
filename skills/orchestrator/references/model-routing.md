@@ -56,6 +56,33 @@ The user's approximate 2× cost increase per level is an ordering heuristic.
 Do not derive dollar prices, token budgets, or quota sizes from it. There are
 three separate subscription pools; preserve their observed remaining capacity.
 
+## Calibration by model and harness
+
+These are local routing hypotheses for the installed fleet, not capability
+claims inferred from a model name. Keep the same brief core, protected paths,
+required context, result schema, and external checks while measuring each
+configuration. Record model/version, harness/version, effort, prompt and tool
+registry, context packet, retries, checks, latency, and cost.
+
+| Worker or orchestrator | Starting contract | Calibration and promotion signal |
+|---|---|---|
+| Claude Code + Opus 5.5 orchestrator | Complete handoffs, hooks/permission rules, high effort for synthesis | Compare high with max on a fixed regression set; treat max-turn output as partial until checked. |
+| Codex + gpt-6.1-sol orchestrator | Outcome-first brief, transport-bound IDs, deterministic trace checks | Use high for ordinary orchestration; promote to max only for measured high-risk synthesis or debugging. |
+| Codex CLI + gpt-6-luna low | Literal mode, short context packet, exact fields, one or two named checks | Retain low only after exact-ID, schema-recovery, and forbidden-edit cases pass; raise on ambiguity or cross-file effects. |
+| Codex CLI + gpt-6-luna medium through max | Same authority boundary with a bounded tool loop | Sweep effort on identical cases and keep the lowest setting that preserves recovery and verification. |
+| Codex CLI + gpt-6.1-sol high/max | Multi-file implementation with explicit protected paths and acceptance tests | Use high as baseline; reserve max for difficult diagnosis or targeted review after a cheaper pass exposes real uncertainty. |
+| pi + OpenCode Go gpt-6-luna | Narrow default tool surface and structured result record | Use low/minimal for literal work; test provider effort support before medium/high tool loops. |
+| pi + OpenCode Go mimo-v2.6-pro | Verify provider metadata and native tool-call compatibility | Sweep available thinking levels and route only measured gains that justify Go quota/cost; do not infer support from the name. |
+| Claude Code + Sonnet 5.5 | Complete subagent prompt, allowlist, max-turn bound, and acceptance checks | Start medium/high for routine implementation or exploration; promote to Opus for unresolved ambiguity or long-horizon synthesis. |
+| Claude Code + Opus 5.5 worker | Hard diagnosis or independent review with deterministic oracle | Start high; use max only when the unresolved case has enough decision value. |
+| Jailed Codex + gpt-6-astra max | Required-context manifest with exact quotes, source roles, and an external evaluator | Max is suitable for deep evidence chains; use a cheaper extractor before synthesis when that reduces cost without weakening evidence. |
+| omp / oh-my-pi | Validate installed task-agent metadata, effort mapping, structured output, and isolation policy | Use cheap roles for literal slices and slower roles for inference only after the configured ceiling and retry behavior are verified. |
+
+Worker mode stays explicit in every brief and never selects a ladder level.
+Promote only on a concrete trigger such as ambiguity, cross-file impact,
+conflicting evidence, a failed external check, or a schema-recovery failure;
+confidence or extra tokens alone are not promotion evidence.
+
 ## Fallback and quota evidence
 
 Use only the CSV's fallback at the selected level when the primary is concretely

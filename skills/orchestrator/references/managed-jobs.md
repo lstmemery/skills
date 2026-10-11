@@ -22,8 +22,8 @@ python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR --wait-seconds 30
 ```
 
 `finish` maps worker outcomes to coordinator dispositions using the worker
-contract: `ready` → `completed`, `blocked` → `blocked`, and `failed` →
-`failed`. It validates result records, confirms each receipt lists `result.json`
+contract: `ready` → `completed`, `blocked` → `blocked`, `partial` → `failed`,
+and `failed` → `failed`. It validates result records, confirms each receipt lists `result.json`
 and every declared artifact file, records dispositions, releases leases, and
 closes settled workspaces. A successful cleanup returns `next_action.kind`
 `review`; it does not accept the work, and `acceptance` remains pending.
@@ -63,7 +63,7 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
@@ -86,6 +86,15 @@ the 300000 ms default, so long-form research must be marked explicitly; the
 `-c model_providers.train-openai.stream_idle_timeout_ms=<value>` to that
 Codex invocation. This limits an idle stream interval, not total job time, and
 does not modify shared Codex configuration.
+
+Every prepared job carries `worker_mode` (`literal` or `inferential`) and the
+default protected-path list. The mode changes how ambiguity is handled in the
+brief; it never changes the CSV ladder or routing. `acceptance_tests` are added
+to the protected list automatically, and a declared `editable_paths` entry
+that overlaps any protected path is rejected before launch. Jailed jobs must
+also provide `required_context` entries with at least one test and one fixture;
+the helper resolves and checks each entry before the jail launcher runs, and
+the launcher repeats that check from its launch request.
 
 `worker_result` opts a job into the shared worker-record contract. The helper
 then asks for a `result.json` bound to that task ID and assignment revision,

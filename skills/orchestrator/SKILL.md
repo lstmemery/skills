@@ -108,7 +108,9 @@ missing or uncertain receipts and artifacts remain incomplete.
    observable acceptance criteria. Delegate investigation, planning, implementation,
    substantive review, and recovery analysis. Split independent work when it has
    separate ownership; sequence dependent work. Use the
-   [worker contract](references/workers.md) for the brief and return record.
+   [worker contract](references/workers.md) for the brief, its required
+   brief-core fields, and the 15-point pre-dispatch checklist. The worker mode
+   is declared in every brief and is independent of model routing.
    Before launch, check any mutable host, service, path, protection, version, or
    decision premise that materially determines whether a state-dependent
    assignment still applies. The coordinator performs this as a current,

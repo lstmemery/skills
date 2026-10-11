@@ -5,11 +5,34 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import stat
 import tempfile
 from datetime import datetime, timezone
+
+
+WORKER_MODES = frozenset(("literal", "inferential"))
+CONTEXT_KINDS = frozenset(("test", "fixture", "source", "schema", "dependency", "document"))
+
+# run-jail.sh mounts these host sources into the worker at the corresponding
+# container roots. PII_JAIL_S0_TEST_ROOT mirrors jail-session.sh's test-only
+# root override; production launches use its fixed /var/lib/pii-jail root.
+_jail_root_value = os.environ.get("PII_JAIL_S0_TEST_ROOT", "/var/lib/pii-jail")
+JAIL_CONTEXT_EXPORTS = (
+    (Path(_jail_root_value) / "build/ctx", PurePosixPath("/ctx")),
+    (Path(_jail_root_value) / "work", PurePosixPath("/work")),
+) if _jail_root_value else ()
+
+# These controls are protected even when a caller omits an explicit path list.
+# The list is prompt data as well as a declaration checked at the launch boundary.
+DEFAULT_PROTECTED_PATHS = (
+    "~/.config/vikunja-mcp/delegation-authorized.toml",
+    "tools/pii-jail/",
+    "tools/pii-jail/token-allowlist.txt",
+    "scripts/pii-jail/",
+    "keys/",
+)
 
 
 RUNTIME_EFFORT_CAPABILITIES = {
@@ -182,6 +205,161 @@ def worker_result_record(value):
     return value
 
 
+def worker_mode(value, label="worker_mode"):
+    value = text(value, label, 32).strip().casefold()
+    if value not in WORKER_MODES:
+        invalid(f"{label} must be literal or inferential")
+    return value
+
+
+def path_list(value, label, maximum=64):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > maximum:
+        invalid(f"{label} must be an array of at most {maximum} paths")
+    result = []
+    for index, item in enumerate(value):
+        result.append(text(item, f"{label}[{index}]", 4096))
+    if len(set(result)) != len(result):
+        invalid(f"{label} must not contain duplicate paths")
+    return result
+
+
+def protected_paths_record(value=None, acceptance_tests=()):
+    """Return the immutable defaults plus task-specific protected paths."""
+    explicit = path_list(value, "protected_paths")
+    tests = path_list(list(acceptance_tests), "acceptance_tests")
+    result = list(DEFAULT_PROTECTED_PATHS)
+    for item in (*explicit, *tests):
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _path_key(value, base=None):
+    value = str(value).strip()
+    if value.startswith("~/"):
+        value = str(Path.home() / value[2:])
+    path = Path(value)
+    if base is not None and not path.is_absolute():
+        path = Path(base) / path
+    try:
+        return path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return path.absolute()
+
+
+def paths_overlap(candidate, protected, base=None):
+    """Whether a declared editable path contains or is inside a protected path."""
+    candidate_path = _path_key(candidate, base)
+    protected_path = _path_key(protected, base)
+    try:
+        candidate_path.relative_to(protected_path)
+        return True
+    except ValueError:
+        try:
+            protected_path.relative_to(candidate_path)
+            return True
+        except ValueError:
+            return False
+
+
+def validate_protected_paths(protected_paths, editable_paths=(), base=None):
+    protected_paths = protected_paths_record(protected_paths)
+    editable_paths = path_list(list(editable_paths), "editable_paths")
+    for editable in editable_paths:
+        if any(paths_overlap(editable, protected, base=base) for protected in protected_paths):
+            invalid(f"editable path is protected: {editable}")
+    return protected_paths
+
+
+def _context_kind(path, explicit=None):
+    if explicit is not None:
+        explicit = text(explicit, "required_context.kind", 32).strip().casefold()
+        if explicit not in CONTEXT_KINDS:
+            invalid("required_context.kind is not a supported context kind")
+        return explicit
+    lowered = str(path).casefold()
+    if re.search(r"(^|[/_.-])fixtures?([/_.-]|$)", lowered):
+        return "fixture"
+    if re.search(r"(^|[/_.-])tests?([/_.-]|$)", lowered):
+        return "test"
+    return "source"
+
+
+def _context_entries(value):
+    """Normalize list and grouped context-manifest forms to entry objects."""
+    if isinstance(value, dict):
+        fields(value, ["tests", "fixtures"], ["files"], label="required_context")
+        grouped = []
+        for kind in ("test", "fixture"):
+            paths = path_list(value[kind + "s"], f"required_context.{kind}s")
+            grouped.extend({"path": path, "kind": kind, "purpose": f"Required {kind}."}
+                            for path in paths)
+        grouped.extend(value.get("files", []))
+        value = grouped
+    if not isinstance(value, list) or not value:
+        invalid("required_context must contain at least one entry")
+    if len(value) > 128:
+        invalid("required_context may contain at most 128 entries")
+    entries = []
+    for index, item in enumerate(value):
+        label = f"required_context[{index}]"
+        if isinstance(item, str):
+            item = {"path": item, "purpose": "Required worker context."}
+        item = fields(item, ["path"], ["purpose", "kind"], label=label)
+        entry = {"path": text(item["path"], f"{label}.path", 4096),
+                 "purpose": text(item.get("purpose", "Required worker context."),
+                                   f"{label}.purpose", 1000),
+                 "kind": _context_kind(item["path"], item.get("kind"))}
+        entries.append(entry)
+    return entries
+
+
+def jail_context_path(path, exports=None):
+    """Map an exported host path to the path visible inside the jail."""
+    host_path = _path_key(path)
+    mapped_exports = JAIL_CONTEXT_EXPORTS if exports is None else exports
+    for host_root, jail_root in mapped_exports:
+        host_root = _path_key(host_root)
+        try:
+            relative = host_path.relative_to(host_root)
+        except ValueError:
+            continue
+        return str(PurePosixPath(jail_root) / PurePosixPath(relative.as_posix()))
+    invalid(f"required_context path is outside jail-visible export roots: {path}")
+
+
+def validate_required_context(value, base=None, require_test_fixture=False, check_exists=True,
+                              jail_visible=False, jail_exports=None):
+    """Validate context paths and optionally require visibility through jail mounts."""
+    entries = _context_entries(value)
+    resolved = []
+    seen = set()
+    for index, entry in enumerate(entries):
+        original = entry["path"]
+        path = _path_key(original, base)
+        key = str(path)
+        if key in seen:
+            invalid(f"required_context contains duplicate path: {original}")
+        seen.add(key)
+        if jail_visible:
+            jail_context_path(path, jail_exports)
+        if check_exists:
+            if path.is_symlink() or not path.is_file():
+                invalid(f"required_context path is unavailable: {original}")
+            try:
+                read_regular(path)
+            except (OSError, JobError) as error:
+                invalid(f"required_context path cannot be read: {original}: {error}")
+        resolved.append({**entry, "path": str(path)})
+    if require_test_fixture:
+        kinds = {entry["kind"] for entry in resolved}
+        if "test" not in kinds or "fixture" not in kinds:
+            invalid("jailed work required_context must list at least one test and one fixture")
+    return resolved
+
+
 def retry_override_record(value):
     fields(value, [], ["pi", "codex"], "retry_override")
     if not value:
@@ -321,7 +499,9 @@ def prepare(manifest_path, policy_path):
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
                 ["override", "repository_worktree", "worker_result", "task_class",
-                "model_level", "model_fallback", "escalation"], "job")
+                "model_level", "model_fallback", "escalation", "worker_mode", "mode",
+                "protected_paths", "editable_paths", "acceptance_tests", "required_context",
+                "tracker_writes"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -329,6 +509,15 @@ def prepare(manifest_path, policy_path):
         seen.add(job_id)
         text(job["name"], "name", 200)
         text(job["output_expectation"], "output_expectation", 10000)
+        if "worker_mode" in job and "mode" in job and job["worker_mode"] != job["mode"]:
+            invalid(f"{job_id}: worker_mode and mode disagree")
+        selected_worker_mode = worker_mode(job.get("worker_mode", job.get("mode", "literal")))
+        acceptance_tests = path_list(job.get("acceptance_tests"), f"{job_id}.acceptance_tests")
+        editable_paths = path_list(job.get("editable_paths"), f"{job_id}.editable_paths")
+        protected_paths = validate_protected_paths(
+            protected_paths_record(job.get("protected_paths"), acceptance_tests), editable_paths,
+            base=manifest_path.parent,
+        )
         if not isinstance(job["task_kind"], str) or job["task_kind"] not in policy["routes"]:
             invalid("task_kind must be ordinary, deep_research, or shopping")
         task_class = identifier(job["task_class"], "task_class") if "task_class" in job else None
@@ -465,9 +654,24 @@ def prepare(manifest_path, policy_path):
             if identity in worker_results:
                 invalid(f"duplicate worker_result identity: {identity[0]} revision {identity[1]}")
             worker_results.add(identity)
+        required_context = None
+        if "required_context" in job:
+            required_context = validate_required_context(
+                job["required_context"], base=manifest_path.parent,
+                require_test_fixture=route["mode"] == "jail",
+                jail_visible=route["mode"] == "jail",
+            )
+        elif route["mode"] == "jail":
+            invalid(f"{job_id}: jailed work requires a required_context manifest with tests and fixtures")
         prepared_job = {**job, "task_file": task_path, "cwd": cwd,
                         "task": task, "route": route, "model": model,
-                        "provider": provider, "kind": policy["runtime_kinds"][runtime]}
+                        "provider": provider, "kind": policy["runtime_kinds"][runtime],
+                        "worker_mode": selected_worker_mode,
+                        "acceptance_tests": acceptance_tests,
+                        "editable_paths": editable_paths,
+                        "protected_paths": protected_paths}
+        if required_context is not None:
+            prepared_job["required_context"] = required_context
         if override is not None:
             # Keep the completed tuple (including an effort filled from the
             # ladder) in the durable request consumed by preflight/effects.
