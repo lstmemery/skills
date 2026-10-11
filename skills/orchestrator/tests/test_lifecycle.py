@@ -1,12 +1,15 @@
+import json
 import tempfile
 from pathlib import Path
 import traceback
 import unittest
 
 from herdr_jobs.lifecycle import EffectUnknown, JobLifecycle
+from herdr_jobs.admission import AdmissionStore
 from herdr_jobs.admission_service import AdmissionService
 from herdr_jobs.adapters import (DeterministicObservationAdapter, InMemoryEffectAdapter,
                                  NativeHerdrAdapter)
+from herdr_jobs.engine import Engine
 from herdr_jobs.runner import CompatibilityRunner, run
 from herdr_jobs.store import StateStore
 from herdr_jobs.transport import RateLimited
@@ -165,6 +168,186 @@ class BrokenObservationPort(ImmediatePort):
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_native_runner_delivers_engine_prompt_and_runtime_job(self):
+        class CapturingTransport(FakeNativeTransport):
+            def __init__(self):
+                super().__init__()
+                self.start_payload = None
+                self.preflight_existing = None
+
+            def preflight(self, _request, existing=None):
+                self.preflight_existing = existing
+                return {"models": {"adapter-job": "codex/engine-model"},
+                        "binding": {"jail_export": None}}
+
+            def effect(self, action, current_job, prompt):
+                if action == "start":
+                    self.start_payload = (current_job, prompt)
+                return super().effect(action, current_job, prompt)
+
+        with tempfile.TemporaryDirectory() as directory:
+            transport = CapturingTransport()
+            request = {"request_id": "adapter-request", "jobs": [{
+                "job_id": "adapter-job", "task_kind": "ordinary",
+                "route": {"mode": "agent", "runtime": "codex"},
+                "task": "This task text should reach the worker.",
+                "cwd": directory, "kind": "codex",
+            }]}
+            run(request, store=StateStore(Path(directory) / "state.json"),
+                effect_port=NativeHerdrAdapter(transport=transport), max_steps=20)
+
+        current_job, prompt = transport.start_payload
+        self.assertIn("This task text should reach the worker.", prompt)
+        self.assertRegex(current_job["agent_name"], r"^c9-[0-9a-f]{24}$")
+        self.assertEqual(current_job["resolved_model"], "codex/engine-model")
+        self.assertIn("host_output", current_job)
+        self.assertIn("exit_record", current_job)
+        self.assertIsNone(transport.preflight_existing["jobs"][0]["resolved_model"])
+
+    def test_pending_effect_checkpoint_remains_loadable_by_engine(self):
+        fixture = Path(__file__).parent / "fixtures/lifecycle/engine-launch-state.json"
+        state = json.loads(fixture.read_text(encoding="utf-8"))
+        state["jobs"][0].update(phase="pending", pane_id=None, pending_effect=None,
+                                settled=False, observed=None)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            admission = FakeAdmissionStore()
+            Engine(directory, object(), object(), admission_store=admission).load()
+            run(store=StateStore(state_path), effect_port=UnknownPort())
+
+            reopened = Engine(directory, object(), object(), admission_store=admission)
+            reopened.load()
+
+        self.assertEqual(reopened.state["jobs"][0]["pending_effect"]["action"], "split")
+        self.assertEqual(set(reopened.state["jobs"][0]["pending_effect"]), {"action", "started_at"})
+
+    def test_native_rate_limit_blocks_a_following_run_through_shared_admission(self):
+        class RateLimitedTransport(FakeNativeTransport):
+            def __init__(self):
+                super().__init__()
+                self.started = []
+
+            def effect(self, action, current_job, prompt):
+                if action == "start":
+                    job_id = current_job["spec"]["job_id"]
+                    self.started.append(job_id)
+                    if len(self.started) == 1:
+                        raise RateLimited({"retry_after_seconds": 60, "source": "retry-after"})
+                return super().effect(action, current_job, prompt)
+
+        with tempfile.TemporaryDirectory() as directory:
+            now = [1000.0]
+            admission = AdmissionStore(state_dir=Path(directory) / "admission", clock=lambda: now[0])
+            service = AdmissionService(admission)
+            transport = RateLimitedTransport()
+            policy = {"provider_admission": {"default_provider_cap": 4,
+                                               "provider_caps": {"codex": 4},
+                                               "default_backoff_seconds": 60}}
+            first_request = {"request_id": "first-run", "policy": policy, "jobs": [
+                {"job_id": job_id, "task_kind": "ordinary",
+                 "route": {"mode": "agent", "runtime": "codex"},
+                 "task": "Do the assigned task.", "output_expectation": "Complete it.",
+                 "cwd": directory, "kind": "codex"}
+                for job_id in ("job-1", "job-2")
+            ]}
+            run(first_request, store=StateStore(Path(directory) / "first/state.json"),
+                effect_port=NativeHerdrAdapter(transport=transport, admission_service=service),
+                clock=lambda: now[0], max_steps=40)
+            backoffs = admission.status("codex")["backoffs"]
+            second_request = {"request_id": "second-run", "policy": policy, "jobs": [
+                {"job_id": "job-3", "task_kind": "ordinary",
+                 "route": {"mode": "agent", "runtime": "codex"},
+                 "task": "Do the assigned task.", "output_expectation": "Complete it.",
+                 "cwd": directory, "kind": "codex"}
+            ]}
+            second = run(second_request, store=StateStore(Path(directory) / "second/state.json"),
+                         effect_port=NativeHerdrAdapter(transport=transport, admission_service=service),
+                         clock=lambda: now[0], max_steps=20)
+
+        self.assertEqual([item["until"] for item in backoffs], [1060.0])
+        self.assertEqual(transport.started, ["job-1"])
+        self.assertEqual(second.state["jobs"][0]["admission_wait"]["reason"], "backoff")
+
+    def test_retry_id_cannot_reuse_an_id_in_legacy_history(self):
+        old_attempt = "a" * 32
+        current_attempt = "b" * 32
+        request_job = job()
+        request_job["attempt_id"] = current_attempt
+        request_job["history"] = [{"action": "rate_limit_retry", "attempt_id": old_attempt}]
+        with tempfile.TemporaryDirectory() as directory:
+            now = [1000.0]
+            store = StateStore(Path(directory) / "state.json")
+            port = RateLimitedOncePort()
+            run({"request_id": "legacy-attempt-history", "jobs": [request_job]},
+                store=store, effect_port=port, clock=lambda: now[0])
+            now[0] = 1060.0
+            with self.assertRaisesRegex(ValueError, "fresh attempt ID"):
+                run(store=store, effect_port=port, clock=lambda: now[0],
+                    attempt_id_factory=lambda: old_attempt)
+
+    def test_blocked_startup_returns_without_reobserving_or_claiming_unknown_effect(self):
+        class BlockedPort:
+            def __init__(self):
+                self.observations = 0
+
+            def execute(self, effect):
+                if effect.action == "split":
+                    return {"pane_id": "pane-1"}
+                if effect.action == "move":
+                    return {"pane_id": "pane-2", "workspace_id": "workspace-1"}
+                if effect.action == "start":
+                    return {"launch_blocked": True, "issue": "startup blocked",
+                            "observation": {"state": "blocked", "identity_verified": True}}
+                return {}
+
+            def observe(self, _job):
+                self.observations += 1
+                return {"state": "blocked", "identity_verified": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            port = BlockedPort()
+            result = run({"request_id": "blocked", "jobs": [job()]},
+                         store=StateStore(Path(directory) / "state.json"),
+                         effect_port=port, max_steps=12)
+
+        self.assertEqual(port.observations, 0)
+        self.assertFalse(result.unresolved_effect)
+        self.assertIsNone(result.state["jobs"][0]["pending_effect"])
+        self.assertEqual(result.state["jobs"][0]["issue"], "startup blocked")
+
+    def test_unsafe_startup_observation_returns_once_without_pending_effect(self):
+        class ObservationPort:
+            def __init__(self, observation):
+                self.observation = observation
+                self.observations = 0
+
+            def execute(self, _effect):
+                raise AssertionError("an unsafe startup must not launch a prompt")
+
+            def observe(self, _job):
+                self.observations += 1
+                return self.observation
+
+        cases = (
+            ({"state": "idle", "identity_verified": False},
+             "worker startup identity is unverified; the task prompt was not sent"),
+            ({"state": "working", "identity_verified": True},
+             "worker was not idle after startup; the task prompt was not sent"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (observation, expected_issue) in enumerate(cases):
+                request_job = job()
+                request_job["phase"] = "ready"
+                port = ObservationPort(observation)
+                result = run({"request_id": f"unsafe-startup-{index}", "jobs": [request_job]},
+                             store=StateStore(Path(directory) / f"state-{index}.json"),
+                             effect_port=port, max_steps=12)
+                self.assertEqual(port.observations, 1)
+                self.assertFalse(result.unresolved_effect)
+                self.assertIsNone(result.state["jobs"][0]["pending_effect"])
+                self.assertEqual(result.state["jobs"][0]["issue"], expected_issue)
+
     def test_compatibility_runner_requires_a_current_engine_reference(self):
         with self.assertRaisesRegex(TypeError, "legacy_runner is required"):
             CompatibilityRunner()
@@ -235,7 +418,7 @@ class LifecycleTest(unittest.TestCase):
             result = run(request, store=store, effect_port=adapter,
                          clock=lambda: 100.0, max_steps=30)
 
-        self.assertEqual([call[0] for call in admission_store.calls], ["acquire", "release"])
+        self.assertEqual([call[0] for call in admission_store.calls], ["acquire", "acquire", "release"])
         self.assertEqual(admission_store.calls[0], ("acquire", "lease-1", "codex", "default", 2, "request-1"))
         self.assertEqual(transport.actions, ["split", "move", "start"])
         self.assertFalse(result.state["jobs"][0]["admission_acquired"])

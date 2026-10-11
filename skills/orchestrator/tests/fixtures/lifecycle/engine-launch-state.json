@@ -47,6 +47,7 @@
       "retry_override": null,
       "retry_profile": null,
       "settled": false,
+      "start_diagnostic": null,
       "spec": {
         "job_id": "compatibility-job",
         "output_expectation": "A fixture report.",

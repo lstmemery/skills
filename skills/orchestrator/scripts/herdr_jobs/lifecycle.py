@@ -288,6 +288,16 @@ class JobLifecycle:
             return Transition(state, reason="effect outcome is unknown", unknown=True)
 
         pending = _pending_action(state)
+        admission_wait = observation.get("admission_wait")
+        if pending is not None and observation.get("effect_receipt") is True \
+                and isinstance(admission_wait, Mapping):
+            state["pending_effect"] = None
+            if observation.get("lease_released") is True:
+                state["admission_acquired"] = False
+            state["admission_wait"] = deepcopy(dict(admission_wait))
+            _set_issue(state, "waiting for provider admission")
+            _with_history(state, {"action": "provider_admission_wait", **dict(admission_wait)})
+            return Transition(state, reason="provider admission is waiting")
         if pending == "admission_acquire" and observation.get("effect_receipt") is True:
             admitted = observation.get("admitted") is True
             state["admission_acquired"] = observation.get("lease_held", admitted) is True

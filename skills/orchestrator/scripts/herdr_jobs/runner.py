@@ -175,6 +175,28 @@ def _normalize_receipt(effect: Effect, value: Any) -> EffectReceipt | EffectUnkn
     raise TypeError("effect port returned neither a receipt nor an unknown outcome")
 
 
+def _observe(effect_port: Any, job: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    observe = getattr(effect_port, "observe", None)
+    if not callable(observe):
+        return None
+    runtime_job = getattr(effect_port, "runtime_job", None)
+    return observe(runtime_job(job) if callable(runtime_job) else job)
+
+
+def _startup_issue(observation: Any) -> str | None:
+    if observation is None:
+        return None
+    if not isinstance(observation, Mapping) or observation.get("identity_verified") is not True:
+        if isinstance(observation, Mapping) and observation.get("launch_issue"):
+            return str(observation["launch_issue"])
+        return "worker startup identity is unverified; the task prompt was not sent"
+    if observation.get("state") != "idle":
+        if observation.get("launch_issue"):
+            return str(observation["launch_issue"])
+        return "worker was not idle after startup; the task prompt was not sent"
+    return None
+
+
 def _execute(port: Any, effect: Effect, clock: Callable[[], float], default_backoff: float) -> EffectReceipt | EffectUnknown:
     try:
         value = port.execute(effect)
@@ -235,6 +257,10 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
         if not _json_equal(stored_request, request):
             raise ValueError("request differs from the pinned lifecycle request")
 
+    prepare_run = getattr(effect_port, "prepare_run", None)
+    if callable(prepare_run):
+        prepare_run(state.get("request", {}), state, store)
+
     lifecycle = JobLifecycle()
     current_time = clock or time.time
     next_attempt_id = attempt_id_factory or (lambda: uuid.uuid4().hex)
@@ -242,6 +268,7 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
     default_backoff = admission_policy.get("default_backoff_seconds", 60) if isinstance(admission_policy, Mapping) else 60
     observed: dict[int, Mapping[str, Any]] = {}
     admission_waiting: set[int] = set()
+    launch_waiting: set[int] = set()
     unresolved = False
     steps = 0
     while steps < max_steps:
@@ -256,6 +283,8 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             if job.get("settled") is True:
                 continue
             all_settled = False
+            if index in launch_waiting:
+                continue
             if index in admission_waiting:
                 continue
 
@@ -269,7 +298,12 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                     previous_attempt = job.get("attempt_id")
                     fresh_attempt = next_attempt_id()
                     prior_attempts = list(job.get("attempt_history", []))
-                    used_attempts = set(prior_attempts) | {previous_attempt}
+                    legacy_history = job.get("history", [])
+                    legacy_attempts = {
+                        entry.get("attempt_id") for entry in legacy_history
+                        if isinstance(entry, Mapping) and isinstance(entry.get("attempt_id"), str)
+                    } if isinstance(legacy_history, list) else set()
+                    used_attempts = set(prior_attempts) | legacy_attempts | {previous_attempt}
                     if not isinstance(fresh_attempt, str) or not fresh_attempt or fresh_attempt in used_attempts:
                         raise ValueError("rate-limited retry requires a fresh attempt ID")
                     prior_attempts.append(previous_attempt)
@@ -299,12 +333,22 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             # A pending effect is an ambiguous external operation.  Give an
             # adapter an opportunity to reconcile it, but never execute it.
             if job.get("pending_effect") is not None:
+                pending_action = job["pending_effect"].get("action")
                 observation = observed.get(index)
-                if observation is None and hasattr(effect_port, "observe"):
-                    observation = effect_port.observe(_job_snapshot(state, index))
+                if observation is None:
+                    observation = _observe(effect_port, _job_snapshot(state, index))
                 observation = _normalize_rate_limit(observation, current_time, default_backoff)
                 transition = lifecycle.step(job, observation)
                 _set_job(state, index, transition.next_state)
+                current_job = state["jobs"][index]
+                if (pending_action == "start" and current_job.get("phase") == "ready"
+                        and isinstance(observation, Mapping)):
+                    current_job["observed"] = {**dict(observation),
+                                               "observed_at": observation.get("observed_at", current_time())}
+                if (current_job.get("phase") == "ready"
+                        and _startup_issue(current_job.get("observed")) is not None):
+                    current_job["issue"] = current_job.get("issue") or _startup_issue(current_job.get("observed"))
+                    launch_waiting.add(index)
                 store.checkpoint(state)
                 if transition.unknown:
                     unresolved = True
@@ -321,12 +365,32 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                 if transition.reason == "provider admission is waiting":
                     admission_waiting.add(index)
                     continue
-                if state["jobs"][index].get("settled") is not True and hasattr(effect_port, "observe"):
-                    observation = effect_port.observe(_job_snapshot(state, index))
+                current_job = state["jobs"][index]
+                if (current_job.get("phase") == "ready"
+                        and _startup_issue(current_job.get("observed")) is not None):
+                    current_job["issue"] = (current_job.get("issue")
+                                             or _startup_issue(current_job.get("observed")))
+                    launch_waiting.add(index)
+                    store.checkpoint(state)
+                    continue
+                if state["jobs"][index].get("settled") is not True and callable(getattr(effect_port, "observe", None)):
+                    observation = _observe(effect_port, _job_snapshot(state, index))
                     observation = _normalize_rate_limit(observation, current_time, default_backoff)
                     if observation is not None:
+                        observation = dict(observation)
+                        observation.setdefault("observed_at", current_time())
+                        if current_job.get("phase") == "ready":
+                            transition = lifecycle.step(current_job, observation)
+                            _set_job(state, index, transition.next_state)
+                            current_job = state["jobs"][index]
+                            issue = _startup_issue(observation)
+                            if issue is not None:
+                                current_job["issue"] = (observation.get("launch_issue") or issue)
+                                launch_waiting.add(index)
+                                store.checkpoint(state)
+                                continue
                         observed[index] = observation
-                    progress = True
+                        progress = True
                 continue
 
             # One transition may describe an ordered list.  Execute only the
@@ -335,7 +399,6 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             current_job = state["jobs"][index]
             pending = dict(current_job.get("pending_effect") or {})
             pending.setdefault("action", effect.action)
-            pending.setdefault("attempt_id", effect.attempt_id)
             pending.setdefault("started_at", clock() if clock is not None else time.time())
             current_job["pending_effect"] = pending
             payload = dict(effect.payload)
@@ -344,6 +407,9 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                 payload.setdefault("request_id", state.get("request", {}).get("request_id", ""))
                 payload.setdefault("policy", state.get("request", {}).get("policy", {}))
             effect = Effect(effect.action, effect.job_id, effect.attempt_id, payload)
+            prepare_effect = getattr(effect_port, "prepare_effect", None)
+            if callable(prepare_effect):
+                effect = prepare_effect(effect, _job_snapshot(state, index))
             store.checkpoint(state)
             receipt = _execute(effect_port, effect, current_time, default_backoff)
             if isinstance(receipt, EffectUnknown):
@@ -358,6 +424,15 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                 receipt_observation.setdefault("identity_verified", True)
             transition = lifecycle.step(current_job, receipt_observation)
             _set_job(state, index, transition.next_state)
+            current_job = state["jobs"][index]
+            if effect.action == "start" and receipt_observation.get("launch_blocked") is True:
+                observation = receipt_observation.get("observation")
+                if isinstance(observation, Mapping):
+                    current_job["observed"] = {**dict(observation),
+                                               "observed_at": observation.get("observed_at", current_time())}
+                current_job["issue"] = (receipt_observation.get("issue")
+                                         or _startup_issue(observation))
+                launch_waiting.add(index)
             store.checkpoint(state)
             progress = True
             if transition.reason == "provider admission is waiting":
@@ -372,8 +447,7 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             # Observe once more on the next call.  This is a durable active
             # checkpoint, not a failed effect.
             break
-    else:
-        unresolved = True
+    unresolved = any(job.get("pending_effect") is not None for job in _jobs(state))
     return RunResult(state=deepcopy(state), result=_project(state, unresolved),
                      unresolved_effect=unresolved)
 

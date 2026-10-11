@@ -26,6 +26,7 @@
         "runtime": "codex"
       },
       "settled": false,
+      "start_diagnostic": null,
       "worker_disposition": null,
       "workspace_closed": false,
       "workspace_id": "workspace-1"
