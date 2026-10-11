@@ -269,6 +269,63 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(transport.started, ["job-1"])
         self.assertEqual(second.state["jobs"][0]["admission_wait"]["reason"], "backoff")
 
+    def test_resolved_model_rate_limit_blocks_a_following_run_through_shared_admission(self):
+        class ResolvedModelTransport(FakeNativeTransport):
+            def __init__(self):
+                super().__init__()
+                self.started = []
+
+            def preflight(self, request, existing=None):
+                return {
+                    "models": {item["job_id"]: item.get("model") or "codex/model-1"
+                               for item in request["jobs"]},
+                    "binding": {"jail_export": None},
+                }
+
+            def effect(self, action, current_job, prompt):
+                if action == "start":
+                    self.started.append((current_job["spec"]["job_id"],
+                                         current_job["admission_model"],
+                                         current_job["resolved_model"]))
+                    if len(self.started) == 1:
+                        raise RateLimited({"retry_after_seconds": 60, "source": "retry-after"})
+                return super().effect(action, current_job, prompt)
+
+        with tempfile.TemporaryDirectory() as directory:
+            now = [1000.0]
+            admission = AdmissionStore(state_dir=Path(directory) / "admission", clock=lambda: now[0])
+            service = AdmissionService(admission)
+            transport = ResolvedModelTransport()
+            policy = {"provider_admission": {"default_provider_cap": 4,
+                                               "provider_caps": {"codex": 4},
+                                               "default_backoff_seconds": 60}}
+
+            def request(request_id, job_id, model=None):
+                spec = {"job_id": job_id, "task_kind": "ordinary",
+                        "route": {"mode": "agent", "runtime": "codex"},
+                        "task": "Complete this fake-host task.",
+                        "output_expectation": "A completed result."}
+                if model is not None:
+                    spec["model"] = model
+                return {"request_id": request_id, "policy": policy, "jobs": [spec]}
+
+            def adapter():
+                return NativeHerdrAdapter(transport=transport, admission_service=service)
+
+            first = run(request("resolved-run-1", "resolved-job-1"),
+                        store=StateStore(Path(directory) / "run-1" / "state.json"),
+                        effect_port=adapter(), clock=lambda: now[0], max_steps=30)
+            backoffs = admission.status("codex")["backoffs"]
+            second = run(request("resolved-run-2", "resolved-job-2", "codex/model-1"),
+                         store=StateStore(Path(directory) / "run-2" / "state.json"),
+                         effect_port=adapter(), clock=lambda: now[0], max_steps=30)
+
+        self.assertTrue(first.state["jobs"][0]["rate_limit_seen"])
+        self.assertEqual(backoffs[0]["model"], "model-1")
+        self.assertEqual(transport.started, [("resolved-job-1", "default", "codex/model-1")])
+        self.assertEqual(second.state["jobs"][0]["admission_wait"]["reason"], "backoff")
+        self.assertFalse(second.state["jobs"][0]["settled"])
+
     def test_retry_id_cannot_reuse_an_id_in_legacy_history(self):
         old_attempt = "a" * 32
         current_attempt = "b" * 32

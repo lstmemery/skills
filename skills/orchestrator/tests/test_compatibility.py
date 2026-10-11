@@ -8,6 +8,8 @@ from unittest.mock import patch
 from herdr_jobs.admission_service import AdmissionService
 from herdr_jobs.adapters import NativeHerdrAdapter
 from herdr_jobs.engine import Engine
+from herdr_jobs.lifecycle import EffectUnknown
+from herdr_jobs.records import JobError
 from herdr_jobs.runner import CompatibilityRunner, RunResult, launch_compatibility_view
 from herdr_jobs.store import StateStore
 from test_lifecycle import FakeAdmissionStore, FakeNativeTransport
@@ -57,6 +59,50 @@ def normalized(value, root):
 
 
 class CompatibilityTest(unittest.TestCase):
+    def test_admission_provider_cap_reuses_engine_validation(self):
+        policy = {"provider_admission": {
+            "default_provider_cap": 4,
+            "provider_caps": {"codex": 0},
+        }}
+        engine = Engine("/tmp/provider-cap-validation", object(), Deadline())
+        engine.state = {"request": {"policy": policy}}
+
+        with self.assertRaisesRegex(JobError, "stored provider admission caps are malformed") as engine_error:
+            engine.provider_cap("codex")
+        with self.assertRaisesRegex(JobError, "stored provider admission caps are malformed") as service_error:
+            AdmissionService.provider_cap(policy, "codex")
+
+        self.assertEqual(str(engine_error.exception), str(service_error.exception))
+
+    def test_unknown_reducer_effect_skips_legacy_runner_for_reconciliation(self):
+        events = []
+
+        class LostAcknowledgmentPort:
+            def execute(self, effect):
+                events.append(("reducer", effect.action))
+                raise EffectUnknown("split acknowledgment lost", effect)
+
+        def legacy_runner(_request):
+            events.append(("legacy", "split"))
+            raise AssertionError("legacy runner must not run while the reducer effect is unresolved")
+
+        unresolved_request = {"request_id": "unknown-compatibility", "jobs": [{
+            "job_id": "job-1",
+            "route": {"mode": "agent", "runtime": "codex"},
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            result = CompatibilityRunner(legacy_runner).run(
+                unresolved_request,
+                store=StateStore(Path(directory) / "state.json"),
+                effect_port=LostAcknowledgmentPort(),
+                max_steps=4,
+            )
+
+        self.assertTrue(result.unresolved_effect)
+        self.assertEqual(result["batch_state"], "unresolved_effect")
+        self.assertEqual(result.state["jobs"][0]["pending_effect"]["action"], "split")
+        self.assertEqual(events, [("reducer", "split")])
+
     def test_migrated_launch_matches_current_engine_result_and_state_fixtures(self):
         self.maxDiff = None
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:

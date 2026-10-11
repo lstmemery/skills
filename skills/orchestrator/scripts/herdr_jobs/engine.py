@@ -36,8 +36,8 @@ class Engine:
         return self.state["request"]["policy"].get("provider_admission", {
             "default_provider_cap": 4, "provider_caps": {}, "default_backoff_seconds": 60})
 
-    def provider_cap(self, provider):
-        config = self.admission_config()
+    @staticmethod
+    def provider_cap_from_config(config, provider):
         if not isinstance(config, dict) or not isinstance(config.get("provider_caps", {}), dict):
             raise JobError("conflict", "stored provider admission caps are malformed")
         target = billing_pool(provider)
@@ -51,6 +51,9 @@ class Engine:
         if type(default) is not int or not 1 <= default <= 64:
             raise JobError("conflict", "stored default provider admission cap is malformed")
         return caps.get(target, default)
+
+    def provider_cap(self, provider):
+        return self.provider_cap_from_config(self.admission_config(), provider)
 
     @staticmethod
     def provider_for(spec, resolved_model):

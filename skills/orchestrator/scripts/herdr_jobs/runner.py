@@ -473,6 +473,8 @@ class CompatibilityRunner:
             attempt_id_factory: Callable[[], str] | None = None) -> RunResult:
         result = run(request, store=store, effect_port=effect_port, clock=clock, max_steps=max_steps,
                      attempt_id_factory=attempt_id_factory, _stop_at_phase=stop_at_phase)
+        if result.unresolved_effect:
+            return result
         legacy = self.legacy_runner(request)
         legacy_result = legacy.result if isinstance(legacy, RunResult) else legacy
         legacy_state = legacy.state if isinstance(legacy, RunResult) else None

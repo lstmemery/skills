@@ -72,8 +72,12 @@ class NativeHerdrAdapter(EffectPort):
         delay = result.get("retry_after_seconds")
         if (type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0):
             result["retry_after_seconds"] = None
+        rate_limit_job = dict(job)
+        resolved_model = rate_limit_job.get("resolved_model")
+        if isinstance(resolved_model, str) and resolved_model.strip():
+            rate_limit_job["admission_model"] = resolved_model
         backoff = self.admission_service.rate_limit(
-            job, result, default_seconds=self.default_backoff_seconds)
+            rate_limit_job, result, default_seconds=self.default_backoff_seconds)
         result["retry_at"] = backoff["retry_at"]
         return result
 
@@ -151,11 +155,12 @@ class NativeHerdrAdapter(EffectPort):
                              result if isinstance(result, Mapping) else {})
 
     def observe(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
-        observation = self.transport.observe(self.runtime_job(job))
+        runtime_job = self.runtime_job(job)
+        observation = self.transport.observe(runtime_job)
         if (isinstance(observation, Mapping)
                 and isinstance(observation.get("rate_limit"), Mapping)):
             observation = deepcopy(dict(observation))
-            observation["rate_limit"] = self._record_rate_limit(job, observation["rate_limit"])
+            observation["rate_limit"] = self._record_rate_limit(runtime_job, observation["rate_limit"])
         return observation
 
     def workspace_is_open(self, job: Mapping[str, Any]) -> bool:

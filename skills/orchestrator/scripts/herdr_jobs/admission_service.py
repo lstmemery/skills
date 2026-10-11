@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .admission import AdmissionStore, backoff_delay
-from .model_ladder import billing_pool
+from .engine import Engine
 
 
 class AdmissionService:
@@ -35,19 +35,7 @@ class AdmissionService:
     @staticmethod
     def provider_cap(policy: Mapping[str, Any], provider: str) -> int:
         config = policy.get("provider_admission", {})
-        if not isinstance(config, Mapping):
-            config = {}
-        caps = config.get("provider_caps", {})
-        if not isinstance(caps, Mapping):
-            caps = {}
-        target = billing_pool(provider)
-        matched = [cap for name, cap in caps.items()
-                   if isinstance(name, str) and billing_pool(name) == target
-                   and type(cap) is int and 1 <= cap <= 64]
-        default = config.get("default_provider_cap", 4)
-        if type(default) is not int or not 1 <= default <= 64:
-            default = 4
-        return min(matched) if matched else default
+        return Engine.provider_cap_from_config(config, provider)
 
     @staticmethod
     def pool(provider: str) -> str:
