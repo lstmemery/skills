@@ -127,6 +127,15 @@ def _codex_rate_limit_banner(output):
     )
 
 
+def _usage_limit_banner(output):
+    """Recognize terminal quota banners from supported interactive runtimes."""
+    return bool(re.search(
+        r"(?im)^\s*(?:⚠\s*)?(?:you(?:'ve| have) hit your (?:chatgpt )?(?:usage )?limit|"
+        r"usage limit reached|quota exceeded)(?:\b|[.!·])",
+        output,
+    ))
+
+
 def _http_429_status_line(output):
     return re.search(r"(?im)^\s*HTTP(?:/[0-9]+(?:\.[0-9]+)?)?\s+429(?:\s|$)", output) is not None
 
@@ -138,12 +147,15 @@ def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exi
         explicit_error = exit_code not in (None, 0) and (
             _http_429_status_line(output)
             or _pi_provider_error(output)
-            or (runtime == "codex" and _codex_rate_limit_banner(output))
+            or (runtime in ("codex", "claude", "claude-code") and
+                (_codex_rate_limit_banner(output) or _usage_limit_banner(output)))
         )
     elif source == "pane" and runtime == "pi":
         explicit_error = _pi_provider_error(output)
     elif source == "pane" and runtime == "codex":
-        explicit_error = _codex_rate_limit_banner(output)
+        explicit_error = _codex_rate_limit_banner(output) or _usage_limit_banner(output)
+    elif source == "pane" and runtime in ("claude", "claude-code"):
+        explicit_error = _usage_limit_banner(output)
     else:
         explicit_error = False
     if not explicit_error:
@@ -153,7 +165,7 @@ def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exi
     if retry_match is None:
         retry_match = re.search(r"(?i)[\"']retry[-_ ]after[\"']\s*:\s*[\"']?([^\"',}\s]+)", output)
     reset_match = re.search(
-        r"(?im)^\s*(?:x-)?rate[-_ ]?limit[-_ ]?reset(?:[-_ ](?:requests|tokens))?\s*[:=]\s*([^\r\n,;]+)",
+        r"(?im)^\s*(?:(?:x-)?rate[-_ ]?limit[-_ ]?reset(?:[-_ ](?:requests|tokens))?|reset[-_ ]at)\s*[:=]\s*([^\r\n,;]+)",
         output,
     )
     if reset_match is None:

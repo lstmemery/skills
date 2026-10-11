@@ -113,6 +113,11 @@ class AdmissionTest(unittest.TestCase):
         go_usage_limit = rate_limit_from_output(
             'Error: 429: {"error":{"type":"GoUsageLimitError"}}', runtime="pi", now=1000.0)
         codex_banner = rate_limit_from_output("API Error: Rate limit reached", runtime="codex", now=1000.0)
+        claude_banner = rate_limit_from_output(
+            "You've hit your usage limit · resets at 10:00 UTC\nReset-At: 1030",
+            runtime="claude-code", now=1000.0)
+        claude_status = rate_limit_from_output(
+            "Usage limit reached.\nRetry-After: 45", runtime="claude", now=1000.0)
 
         self.assertEqual(retry, {"retry_after_seconds": 15.0, "source": "retry-after"})
         self.assertEqual(dated_retry, {"retry_after_seconds": 5.0, "source": "retry-after"})
@@ -120,6 +125,8 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(expired_reset, {"retry_after_seconds": 0.0, "source": "reset"})
         self.assertEqual(go_usage_limit, {"retry_after_seconds": None, "source": None})
         self.assertEqual(codex_banner, {"retry_after_seconds": None, "source": None})
+        self.assertEqual(claude_banner, {"retry_after_seconds": 30.0, "source": "reset"})
+        self.assertEqual(claude_status, {"retry_after_seconds": 45.0, "source": "retry-after"})
         self.assertEqual(backoff_delay(default_seconds=60, now=1000.0), (60.0, "default"))
 
     def test_prompt_and_report_mentions_do_not_trigger_provider_backoff(self):
