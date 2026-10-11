@@ -33,6 +33,23 @@ class AdmissionService:
         return self.store.note_rate_limit(job["provider"], job.get("admission_model", "default"), delay, source)
 
     @staticmethod
+    def provider_cap(policy: Mapping[str, Any], provider: str) -> int:
+        config = policy.get("provider_admission", {})
+        if not isinstance(config, Mapping):
+            config = {}
+        caps = config.get("provider_caps", {})
+        if not isinstance(caps, Mapping):
+            caps = {}
+        target = billing_pool(provider)
+        matched = [cap for name, cap in caps.items()
+                   if isinstance(name, str) and billing_pool(name) == target
+                   and type(cap) is int and 1 <= cap <= 64]
+        default = config.get("default_provider_cap", 4)
+        if type(default) is not int or not 1 <= default <= 64:
+            default = 4
+        return min(matched) if matched else default
+
+    @staticmethod
     def pool(provider: str) -> str:
         return billing_pool(provider)
 

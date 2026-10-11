@@ -118,7 +118,7 @@ class Transition:
         return [effect.as_dict() for effect in self.effects]
 
 
-def _job_id(state: Mapping[str, Any]) -> str:
+def job_id_of(state: Mapping[str, Any]) -> str:
     value = state.get("job_id")
     if value is None and isinstance(state.get("spec"), Mapping):
         value = state["spec"].get("job_id")
@@ -159,7 +159,7 @@ def _set_issue(state: MutableMapping[str, Any], issue: str | None) -> None:
 
 
 def _effect(state: Mapping[str, Any], action: str, payload: Mapping[str, Any] | None = None) -> Effect:
-    return Effect(action, _job_id(state), _attempt_id(state), payload or {})
+    return Effect(action, job_id_of(state), _attempt_id(state), payload or {})
 
 
 class JobLifecycle:
@@ -189,7 +189,7 @@ class JobLifecycle:
         target = observation.get("job_id") if isinstance(observation, Mapping) else None
         for index, job in enumerate(jobs):
             if (isinstance(job, Mapping) and not job.get("settled")
-                    and (target is None or _job_id(job) == target)):
+                    and (target is None or job_id_of(job) == target)):
                 selected = index
                 break
         job_transition = self._step_job(jobs[selected], observation)
@@ -229,12 +229,22 @@ class JobLifecycle:
             self._apply_observation(state, observation)
 
         if state.get("settled") is True:
-            return Transition(state, reason="job settled")
-
-        action = self._next_action(state)
+            if state.get("admission_acquired") is True:
+                state["settled"] = False
+                action = "admission_release"
+            else:
+                return Transition(state, reason="job settled")
+        else:
+            action = self._next_action(state)
         if action is None:
+            if state.get("admission_wait") is not None and state.get("admission_acquired") is not True:
+                return Transition(state, reason="provider admission is waiting")
             self._settle(state, observation)
-            return Transition(state, reason="no effect required")
+            if state.get("settled") is True and state.get("admission_acquired") is True:
+                state["settled"] = False
+                action = "admission_release"
+            else:
+                return Transition(state, reason="no effect required")
 
         state["pending_effect"] = {"action": action}
         _set_issue(state, None)
@@ -278,6 +288,26 @@ class JobLifecycle:
             return Transition(state, reason="effect outcome is unknown", unknown=True)
 
         pending = _pending_action(state)
+        if pending == "admission_acquire" and observation.get("effect_receipt") is True:
+            admitted = observation.get("admitted") is True
+            state["admission_acquired"] = observation.get("lease_held", admitted) is True
+            state["admission_wait"] = (None if admitted else {
+                "reason": observation.get("reason") or "capacity",
+                "provider": observation.get("provider", state.get("provider")),
+                "provider_active": observation.get("provider_active", 0),
+                "cap": observation.get("cap", 1),
+                "retry_at": observation.get("retry_at"),
+            })
+            state["pending_effect"] = None
+            _set_issue(state, None if admitted else "waiting for provider admission")
+            return Transition(state, reason="provider admitted" if admitted else "provider admission is waiting")
+        if pending == "admission_release" and observation.get("effect_receipt") is True:
+            state["admission_acquired"] = False
+            state["pending_effect"] = None
+            current = state.get("observed")
+            if isinstance(current, Mapping):
+                self._settle(state, current)
+            return Transition(state, reason="provider lease released")
         receipt = observation.get("effect_receipt") is True or observation.get("receipt_valid") is True
         result = observation.get("result")
         if isinstance(result, Mapping):
@@ -376,6 +406,11 @@ class JobLifecycle:
         phase = state.get("phase", "pending")
         route = _route(state)
         mode = route.get("mode")
+        if phase == "retry_ready" and state.get("rate_limit_seen") is True \
+                and state.get("admission_acquired") is True:
+            return "admission_release"
+        if state.get("admission_lease_id") and state.get("admission_acquired") is not True:
+            return "admission_acquire"
         if phase == "pending":
             return "split" if not state.get("pane_id") else ("jail" if mode == "jail" else "start")
         if phase == "split":
@@ -411,3 +446,7 @@ class EffectPort:
 
     def execute(self, effect: Effect) -> EffectReceipt | EffectUnknown | Mapping[str, Any]:
         raise NotImplementedError
+
+
+__all__ = ["Effect", "EffectPort", "EffectReceipt", "EffectUnknown", "InvalidState",
+           "JobLifecycle", "Transition", "job_id_of"]

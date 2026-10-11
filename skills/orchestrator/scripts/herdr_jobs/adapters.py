@@ -5,7 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
-from .lifecycle import Effect, EffectPort, EffectReceipt, EffectUnknown
+from .lifecycle import Effect, EffectPort, EffectReceipt, EffectUnknown, job_id_of
+from .admission_service import AdmissionService
 from .transport import Deadline, EffectUnknown as TransportEffectUnknown, NativeTransport
 
 
@@ -18,8 +19,9 @@ class NativeHerdrAdapter(EffectPort):
     """
 
     def __init__(self, binding_path: str | None = None, deadline: Deadline | None = None,
-                 transport: Any | None = None):
+                 transport: Any | None = None, admission_service: AdmissionService | None = None):
         self.transport = transport or NativeTransport(binding_path, deadline or Deadline(30))
+        self.admission_service = admission_service
 
     def execute(self, effect: Effect) -> EffectReceipt | EffectUnknown:
         payload = dict(effect.payload)
@@ -30,8 +32,19 @@ class NativeHerdrAdapter(EffectPort):
                 result = self.transport.close_workspace(job)
             elif effect.action == "collect":
                 result = self.transport.observe(job)
-            elif effect.action in {"admission_acquire", "admission_release"}:
-                raise EffectUnknown("admission effects must be executed by AdmissionService", effect)
+            elif effect.action == "admission_acquire":
+                if self.admission_service is None:
+                    raise EffectUnknown("admission effects require an AdmissionService", effect)
+                result = self.admission_service.acquire(
+                    job,
+                    self.admission_service.provider_cap(payload.get("policy", {}), job["provider"]),
+                    payload.get("request_id", ""),
+                    bypass=payload.get("bypass_admission") is True,
+                )
+            elif effect.action == "admission_release":
+                if self.admission_service is None:
+                    raise EffectUnknown("admission effects require an AdmissionService", effect)
+                result = self.admission_service.release(job)
             else:
                 result = self.transport.effect(effect.action, job, prompt)
         except TransportEffectUnknown as error:
@@ -69,10 +82,8 @@ class InMemoryEffectAdapter(EffectPort):
         return EffectReceipt(effect.action, effect.job_id, effect.attempt_id, deepcopy(dict(value)))
 
     def observe(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
-        job_id = job.get("job_id")
-        if job_id is None and isinstance(job.get("spec"), Mapping):
-            job_id = job["spec"].get("job_id")
-        return deepcopy(self.observations.get(job_id, {"state": "unknown", "identity_verified": False}))
+        return deepcopy(self.observations.get(job_id_of(job),
+                                              {"state": "unknown", "identity_verified": False}))
 
 
 class DeterministicObservationAdapter:
@@ -82,9 +93,7 @@ class DeterministicObservationAdapter:
         self.observations = {key: deepcopy(dict(value)) for key, value in observations.items()}
 
     def observe(self, job: Mapping[str, Any]) -> Mapping[str, Any]:
-        key = job.get("job_id")
-        if key is None and isinstance(job.get("spec"), Mapping):
-            key = job["spec"].get("job_id")
+        key = job_id_of(job)
         value = self.observations.get(key)
         if value is None:
             raise RuntimeError(f"no deterministic observation for {key}")

@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
 import json
+import math
 import time
 from typing import Any, Callable
+import uuid
 
+from .admission import normalize_model, normalize_provider
 from .lifecycle import Effect, EffectPort, EffectReceipt, EffectUnknown, JobLifecycle
 from .store import StateStore
 
@@ -70,11 +74,13 @@ def compare_compatibility(legacy_result: Any, reducer_result: Any,
             raise CompatibilityMismatch("reducer persisted state differs from the legacy Engine state")
 
 
-def _new_job(spec: Mapping[str, Any], index: int) -> dict[str, Any]:
+def _new_job(spec: Mapping[str, Any], index: int, request: Mapping[str, Any],
+             attempt_id_factory: Callable[[], str] | None = None) -> dict[str, Any]:
     value = deepcopy(dict(spec))
     value.setdefault("job_id", value.get("spec", {}).get("job_id", f"job-{index}"))
     value.setdefault("spec", deepcopy(dict(spec)))
-    value.setdefault("attempt_id", "0" * 32)
+    if "attempt_id" not in value:
+        value["attempt_id"] = attempt_id_factory() if attempt_id_factory else uuid.uuid4().hex
     value.setdefault("phase", "pending")
     value.setdefault("pane_id", None)
     value.setdefault("previous_pane_ids", [])
@@ -85,17 +91,36 @@ def _new_job(spec: Mapping[str, Any], index: int) -> dict[str, Any]:
     value.setdefault("settled", False)
     value.setdefault("issue", None)
     value.setdefault("workspace_closed", False)
+    policy = request.get("policy")
+    if isinstance(policy, Mapping) and "provider_admission" in policy:
+        source = value.get("spec") if isinstance(value.get("spec"), Mapping) else value
+        override = source.get("override") if isinstance(source.get("override"), Mapping) else {}
+        route = source.get("route") if isinstance(source.get("route"), Mapping) else {}
+        resolved_model = value.get("resolved_model") or source.get("model") or override.get("model")
+        provider = (value.get("provider") or source.get("provider") or override.get("provider")
+                    or (resolved_model.split("/", 1)[0] if isinstance(resolved_model, str) and "/" in resolved_model
+                        else route.get("runtime", "default")))
+        value.setdefault("provider", normalize_provider(provider))
+        value.setdefault("admission_model", normalize_model(resolved_model or "default"))
+        value.setdefault("admission_lease_id", "managed-" + hashlib.sha256(
+            json.dumps({"request_id": request.get("request_id", ""),
+                        "job_id": value["job_id"], "attempt_id": value["attempt_id"]},
+                       sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:40])
+        value.setdefault("admission_acquired", False)
+        value.setdefault("admission_wait", None)
+        value.setdefault("rate_limit_seen", False)
+        value.setdefault("rate_limit_until", None)
     return value
 
 
-def _initial_state(request: Mapping[str, Any]) -> dict[str, Any]:
+def _initial_state(request: Mapping[str, Any], attempt_id_factory: Callable[[], str] | None = None) -> dict[str, Any]:
     if not isinstance(request, Mapping):
         raise ValueError("request must be an object")
     jobs = request.get("jobs")
     if not isinstance(jobs, list):
         raise ValueError("request jobs must be an array")
     return {"schema_version": 1, "request": deepcopy(dict(request)),
-            "jobs": [_new_job(job, index) for index, job in enumerate(jobs)]}
+            "jobs": [_new_job(job, index, request, attempt_id_factory) for index, job in enumerate(jobs)]}
 
 
 def _jobs(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -150,20 +175,44 @@ def _normalize_receipt(effect: Effect, value: Any) -> EffectReceipt | EffectUnkn
     raise TypeError("effect port returned neither a receipt nor an unknown outcome")
 
 
-def _execute(port: Any, effect: Effect) -> EffectReceipt | EffectUnknown:
+def _execute(port: Any, effect: Effect, clock: Callable[[], float], default_backoff: float) -> EffectReceipt | EffectUnknown:
     try:
         value = port.execute(effect)
     except (EffectUnknown, TransportEffectUnknown) as error:
         return EffectUnknown(str(error), effect)
     except RateLimited as error:
+        signal = dict(getattr(error, "signal", {}) or {})
+        delay = signal.get("retry_after_seconds")
+        if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+            delay = default_backoff
+            signal["retry_after_seconds"] = delay
+        signal.setdefault("retry_at", clock() + delay)
         return EffectReceipt(effect.action, effect.job_id, effect.attempt_id,
                              {"state": "done", "identity_verified": True,
-                              "rate_limit": dict(getattr(error, "signal", {}) or {})})
+                              "rate_limit": signal})
     return _normalize_receipt(effect, value)
 
 
+def _normalize_rate_limit(observation: Mapping[str, Any] | None, clock: Callable[[], float],
+                          default_backoff: float) -> Mapping[str, Any] | None:
+    if not isinstance(observation, Mapping) or not isinstance(observation.get("rate_limit"), Mapping):
+        return observation
+    result = deepcopy(dict(observation))
+    signal = dict(result["rate_limit"])
+    if signal.get("retry_at") is None:
+        delay = signal.get("retry_after_seconds")
+        if type(delay) not in (int, float) or not math.isfinite(delay) or delay < 0:
+            delay = default_backoff
+            signal["retry_after_seconds"] = delay
+        signal["retry_at"] = clock() + delay
+    result["rate_limit"] = signal
+    return result
+
+
 def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port: Any = None,
-        clock: Callable[[], float] | None = None, max_steps: int = 10000) -> RunResult:
+        clock: Callable[[], float] | None = None, max_steps: int = 10000,
+        attempt_id_factory: Callable[[], str] | None = None,
+        _stop_at_phase: str | None = None) -> RunResult:
     """Run reducer transitions until settled or an effect is unresolved.
 
     The checkpoint before execution records the exact effect and attempt.  A
@@ -179,7 +228,7 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
     if state is None:
         if request is None:
             raise ValueError("request is required for a new run")
-        state = _initial_state(request)
+        state = _initial_state(request, attempt_id_factory)
         store.checkpoint(state)
     elif request is not None:
         stored_request = state.get("request")
@@ -187,10 +236,19 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             raise ValueError("request differs from the pinned lifecycle request")
 
     lifecycle = JobLifecycle()
+    current_time = clock or time.time
+    next_attempt_id = attempt_id_factory or (lambda: uuid.uuid4().hex)
+    admission_policy = state.get("request", {}).get("policy", {}).get("provider_admission", {})
+    default_backoff = admission_policy.get("default_backoff_seconds", 60) if isinstance(admission_policy, Mapping) else 60
     observed: dict[int, Mapping[str, Any]] = {}
+    admission_waiting: set[int] = set()
     unresolved = False
     steps = 0
     while steps < max_steps:
+        if (_stop_at_phase is not None
+                and all(job.get("settled") is True or job.get("phase") == _stop_at_phase
+                        for job in _jobs(state))):
+            break
         steps += 1
         progress = False
         all_settled = True
@@ -198,16 +256,53 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             if job.get("settled") is True:
                 continue
             all_settled = False
+            if index in admission_waiting:
+                continue
+
+            if job.get("phase") == "retry_ready" and job.get("rate_limit_seen") is True:
+                retry_at = job.get("rate_limit_until")
+                if (type(retry_at) not in (int, float) or not math.isfinite(retry_at)):
+                    continue
+                if current_time() < retry_at and job.get("admission_acquired") is not True:
+                    continue
+                if current_time() >= retry_at and job.get("admission_acquired") is not True:
+                    previous_attempt = job.get("attempt_id")
+                    fresh_attempt = next_attempt_id()
+                    prior_attempts = list(job.get("attempt_history", []))
+                    used_attempts = set(prior_attempts) | {previous_attempt}
+                    if not isinstance(fresh_attempt, str) or not fresh_attempt or fresh_attempt in used_attempts:
+                        raise ValueError("rate-limited retry requires a fresh attempt ID")
+                    prior_attempts.append(previous_attempt)
+                    job["attempt_history"] = prior_attempts
+                    job["attempt_id"] = fresh_attempt
+                    job["phase"] = "pending"
+                    job["pane_id"] = None
+                    job["workspace_id"] = None
+                    job["pending_effect"] = None
+                    job["observed"] = None
+                    job["activity_seen"] = False
+                    job["settled"] = False
+                    job["rate_limit_seen"] = False
+                    job["rate_limit_until"] = None
+                    job["admission_wait"] = None
+                    job["issue"] = None
+                    if job.get("admission_lease_id"):
+                        request_id = state.get("request", {}).get("request_id", "")
+                        lease_identity = json.dumps({"request_id": request_id,
+                                                     "job_id": job.get("job_id"),
+                                                     "attempt_id": fresh_attempt},
+                                                    sort_keys=True, separators=(",", ":"))
+                        job["admission_lease_id"] = "managed-" + hashlib.sha256(
+                            lease_identity.encode()).hexdigest()[:40]
+                    store.checkpoint(state)
 
             # A pending effect is an ambiguous external operation.  Give an
             # adapter an opportunity to reconcile it, but never execute it.
             if job.get("pending_effect") is not None:
                 observation = observed.get(index)
                 if observation is None and hasattr(effect_port, "observe"):
-                    try:
-                        observation = effect_port.observe(_job_snapshot(state, index))
-                    except Exception as error:  # observation is unverified
-                        observation = {"effect_unknown": True, "reason": str(error)}
+                    observation = effect_port.observe(_job_snapshot(state, index))
+                observation = _normalize_rate_limit(observation, current_time, default_backoff)
                 transition = lifecycle.step(job, observation)
                 _set_job(state, index, transition.next_state)
                 store.checkpoint(state)
@@ -223,11 +318,14 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             if not transition.effects:
                 store.checkpoint(state)
                 progress = progress or transition.reason not in ("job settled", "no effect required")
+                if transition.reason == "provider admission is waiting":
+                    admission_waiting.add(index)
+                    continue
                 if state["jobs"][index].get("settled") is not True and hasattr(effect_port, "observe"):
-                    try:
-                        observed[index] = effect_port.observe(_job_snapshot(state, index))
-                    except Exception as error:
-                        observed[index] = {"effect_unknown": True, "reason": str(error)}
+                    observation = effect_port.observe(_job_snapshot(state, index))
+                    observation = _normalize_rate_limit(observation, current_time, default_backoff)
+                    if observation is not None:
+                        observed[index] = observation
                     progress = True
                 continue
 
@@ -242,9 +340,12 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             current_job["pending_effect"] = pending
             payload = dict(effect.payload)
             payload.setdefault("job", _job_snapshot(state, index))
+            if effect.action in {"admission_acquire", "admission_release"}:
+                payload.setdefault("request_id", state.get("request", {}).get("request_id", ""))
+                payload.setdefault("policy", state.get("request", {}).get("policy", {}))
             effect = Effect(effect.action, effect.job_id, effect.attempt_id, payload)
             store.checkpoint(state)
-            receipt = _execute(effect_port, effect)
+            receipt = _execute(effect_port, effect, current_time, default_backoff)
             if isinstance(receipt, EffectUnknown):
                 current_job["issue"] = receipt.reason
                 unresolved = True
@@ -259,6 +360,8 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
             _set_job(state, index, transition.next_state)
             store.checkpoint(state)
             progress = True
+            if transition.reason == "provider admission is waiting":
+                admission_waiting.add(index)
             if transition.unknown:
                 unresolved = True
         if unresolved:
@@ -278,8 +381,12 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
 class CompatibilityRunner:
     """Run a reducer and compare its JSON/state with a legacy callable."""
 
-    def __init__(self, legacy_runner: Callable[..., Any] | None = None):
+    def __init__(self, legacy_runner: Callable[..., Any] | None = None,
+                 projector: Callable[[Any, Any], tuple[Any, Any]] | None = None):
+        if not callable(legacy_runner):
+            raise TypeError("legacy_runner is required and must be callable")
         self.legacy_runner = legacy_runner
+        self.projector = projector
 
     @staticmethod
     def compare(legacy_result: Any, reducer_result: Any,
@@ -288,15 +395,49 @@ class CompatibilityRunner:
 
     def run(self, request: Mapping[str, Any] | None = None, *, store: Any,
             effect_port: Any, clock: Callable[[], float] | None = None,
-            max_steps: int = 10000) -> RunResult:
-        result = run(request, store=store, effect_port=effect_port, clock=clock, max_steps=max_steps)
-        if self.legacy_runner is not None:
-            legacy = self.legacy_runner(request)
-            legacy_result = legacy.result if isinstance(legacy, RunResult) else legacy
-            self.compare(legacy_result, result.result, legacy.state if isinstance(legacy, RunResult) else None,
-                         result.state)
+            max_steps: int = 10000, stop_at_phase: str | None = None,
+            attempt_id_factory: Callable[[], str] | None = None) -> RunResult:
+        result = run(request, store=store, effect_port=effect_port, clock=clock, max_steps=max_steps,
+                     attempt_id_factory=attempt_id_factory, _stop_at_phase=stop_at_phase)
+        legacy = self.legacy_runner(request)
+        legacy_result = legacy.result if isinstance(legacy, RunResult) else legacy
+        legacy_state = legacy.state if isinstance(legacy, RunResult) else None
+        reducer_result, reducer_state = result.result, result.state
+        if self.projector is not None:
+            legacy_result, legacy_state = self.projector(legacy_result, legacy_state)
+            reducer_result, reducer_state = self.projector(reducer_result, reducer_state)
+        self.compare(legacy_result, reducer_result, legacy_state, reducer_state)
         return result
 
 
+def launch_compatibility_view(result: Mapping[str, Any], state: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Normalize Engine and reducer outputs to the migrated launch-phase contract."""
+    jobs = result.get("jobs", [])
+    result_jobs = []
+    for job in jobs:
+        result_jobs.append({key: deepcopy(job.get(key)) for key in (
+            "job_id", "phase", "attempt_id", "pane_id", "pending_effect", "observed",
+            "settled", "issue", "workspace_closed")})
+    request = state.get("request") if isinstance(state.get("request"), Mapping) else {}
+    result_view = {
+        "schema_version": result.get("schema_version", 1),
+        "request_id": result.get("request_id", request.get("request_id")),
+        "batch_state": result.get("batch_state"),
+        "jobs": result_jobs,
+        "unresolved_effect": result.get("unresolved_effect",
+                                         any(job.get("pending_effect") is not None for job in jobs)),
+    }
+    state_jobs = []
+    for job in state.get("jobs", []):
+        spec = job.get("spec") if isinstance(job.get("spec"), Mapping) else job
+        state_jobs.append({
+            "job_id": job.get("job_id", spec.get("job_id")),
+            **{key: deepcopy(job.get(key)) for key in (
+                "phase", "attempt_id", "pane_id", "previous_pane_ids", "workspace_id",
+                "pending_effect", "observed", "settled", "issue", "admission_acquired")},
+        })
+    return result_view, {"request_id": request.get("request_id"), "jobs": state_jobs}
+
+
 __all__ = ["CompatibilityMismatch", "CompatibilityRunner", "RunResult", "UtcClock",
-           "compare_compatibility", "run"]
+           "compare_compatibility", "launch_compatibility_view", "run"]
