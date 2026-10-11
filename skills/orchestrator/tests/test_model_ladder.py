@@ -64,7 +64,7 @@ class LadderTest(unittest.TestCase):
     @staticmethod
     def escalation(level):
         return {"previous_level": level - 1,
-                "failure": {"kind": "failure", "source": "fixture-run",
+                "failure": {"kind": "failure", "category": "reasoning", "source": "fixture-run",
                              "observed_at": "2026-10-10T15:59:00Z", "summary": "lower level failed"},
                 "expected_improvement": "complete the assigned task"}
 
@@ -76,6 +76,71 @@ class LadderTest(unittest.TestCase):
         fixture.agent["agent_status"] = "working"
         fixture.adapter.binding["supported_kinds"] = ["codex", "pi", "claude"]
         return fixture
+
+    def local_lane(self, **extra):
+        acceptance = self.root / "acceptance-test.py"
+        acceptance.write_text("# Independent acceptance fixture.\n")
+        repository_worktree = {"schema_version": 1, "path": str(self.root),
+                               "lease_id": "lease-local", "lease_holder": "routes-local",
+                               "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
+                               "base_commit": "a" * 40}
+        values = dict(
+            local_lane=True, writes_repository=True, repository_worktree=repository_worktree,
+            acceptance_tests=[str(acceptance)],
+            independent_validator={"argv": ["python3", "validate.py", "{output_dir}"]},
+            override={"instruction": "Use the explicitly approved local route.", "runtime": "pi",
+                      "model": "qwen3.8-27b-uncensored", "provider": "llama-local", "effort": "medium"},
+        )
+        values.update(extra)
+        return self.prepared(**values)
+
+    def test_local_lane_is_explicit_fixed_tuple_outside_integer_ladder(self):
+        local = self.local_lane()
+        self.assertTrue(local["local_lane"])
+        self.assertEqual((local["route"], local["provider"], local["model"],
+                          local["model_route"]["level"], local["model_route"]["choice"]),
+                         ({"mode": "agent", "runtime": "pi"}, "llama-local",
+                          "qwen3.8-27b-uncensored", None, "explicit_opt_in"))
+        self.assertEqual(local["independent_validator"]["argv"][-1], "{output_dir}")
+
+    def test_local_tuple_requires_opt_in_worktree_and_validator(self):
+        values = {"runtime": "pi", "model": "qwen3.8-27b-uncensored",
+                  "provider": "llama-local", "effort": "medium"}
+        with self.assertRaisesRegex(JobError, "explicit local_lane opt-in"):
+            self.prepared(override={"instruction": "Explicit tuple only.", **values})
+        for extra, message in (
+            ({"writes_repository": False}, "repository_worktree requires writes_repository=true"),
+            ({"acceptance_tests": []}, "named acceptance tests"),
+            ({"independent_validator": None}, "independent_validator"),
+            ({"model_level": 1}, "outside the integer model ladder"),
+        ):
+            with self.subTest(extra=extra), self.assertRaisesRegex(JobError, message):
+                self.local_lane(**extra)
+
+    def test_quota_or_operational_failure_cannot_authorize_escalation(self):
+        for category in ("operational", "quota"):
+            with self.subTest(category=category):
+                escalation = self.escalation(2)
+                escalation["failure"]["category"] = category
+                with self.assertRaisesRegex(JobError, "do not authorize"):
+                    self.prepared(model_level=2, escalation=escalation)
+
+    def test_implementation_escalation_requires_a_reasoning_failure(self):
+        escalation = self.escalation(2)
+        escalation["failure"]["category"] = "quality"
+        with self.assertRaisesRegex(JobError, "concrete reasoning failure"):
+            self.prepared(writes_repository=True,
+                          repository_worktree={"schema_version": 1, "path": str(self.root),
+                                               "lease_id": "lease", "lease_holder": "routes",
+                                               "repo_root": str(self.root),
+                                               "git_common_dir": str(self.root / ".git"),
+                                               "base_commit": "a" * 40},
+                          model_level=2, escalation=escalation)
+
+    def test_model_ladder_default_and_csv_remain_unchanged_with_local_lane(self):
+        default = self.prepared()
+        self.assertEqual(default["model_route"]["level"], 1)
+        self.assertNotIn("0,", self.csv.read_text().splitlines())
 
     def test_all_sixteen_tuples_and_native_start_arguments(self):
         levels = load_ladder(self.csv)
@@ -229,6 +294,7 @@ class LadderTest(unittest.TestCase):
     def test_legacy_policy_without_ladder_keeps_its_contract(self):
         policy = json.loads(self.policy.read_text())
         policy.pop("model_ladder")
+        policy.pop("local_lane")
         self.policy.write_text(json.dumps(policy))
         with self.assertRaises(JobError) as error:
             self.prepared()

@@ -138,6 +138,52 @@ the runtime's active-turn status line in the owned pane. A generic occurrence of
 leave the attempt unresolved and inspect the pane before retrying when the
 status line is absent.
 
+## Opt-in local Pi route
+
+The local Qwen route is an explicit ordinary host route outside the numbered
+ladder. It requires a throwaway repository worktree, active user service
+`llama-server.service`, at least 2048 MiB free GPU memory, one shared
+`llama-local` admission lease, and an independent output validator. Check the
+service and GPU before a direct start:
+
+```sh
+python3 scripts/local-lane.py preflight
+python3 scripts/herdr-admission.py acquire --provider llama-local \
+  --model qwen3.8-27b-uncensored --lease-id TASK_ATTEMPT --run-id TASK_ID
+```
+
+Continue only when acquisition returns `"admitted":true`. In the owned
+worktree, use the verified Herdr route with `--kind pi` and Pi's native
+provider/model arguments:
+
+```sh
+herdr pane split --current --direction right --cwd <worktree> --no-focus
+herdr pane move <returned-pane-id> --new-workspace --label <task-name> --no-focus
+herdr agent start <unique-name> --kind pi --pane <moved-pane-id> -- \
+  --provider llama-local --model qwen3.8-27b-uncensored --approve
+herdr agent prompt <unique-name> <brief> --wait --timeout 30000
+```
+
+Verify the owned pane and visible active-turn status before treating the prompt
+as delivered. Keep the lease while the worker is active, then run the declared
+independent validator against its output directory and release the lease when
+the worker is terminal. This route does not enter the jail. Pi uses its normal
+`PI_CODING_AGENT_DIR` (default `~/.pi/agent`), preserving configured MCP
+servers and extensions. The local server pins `reasoning_effort=medium`; Pi's
+local model metadata does not advertise an effort list, so this route omits
+Pi's `--thinking` argument and relies on the server pin. Pi documents MCP
+server configuration in
+[MCP Servers](https://pi.dev/docs/latest/mcp), extension loading in
+[Extensions](https://pi.dev/docs/latest/extensions), and configuration
+locations in [Configuration](https://pi.dev/docs/latest/configuration). Do not
+disable these resources for the local route.
+
+The managed equivalent is an ordinary job with `local_lane: true`, the exact
+Pi/`llama-local`/Qwen/medium tuple, a repository worktree, named acceptance
+tests, and `independent_validator.argv` containing `{output_dir}`. Its
+preflight, single-slot admission, telemetry, and finish-time validation use
+the same policy as direct launches; see [managed jobs](managed-jobs.md).
+
 When a direct worker reports HTTP 429 or a rate-limit response, record its
 Retry-After or reset metadata before another start, then release the completed
 attempt's admission lease:

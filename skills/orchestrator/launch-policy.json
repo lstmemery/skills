@@ -7,7 +7,8 @@
     "provider_caps": {
       "opencode-go": 2,
       "codex": 8,
-      "claude": 4
+      "claude": 4,
+      "llama-local": 1
     },
     "default_backoff_seconds": 60
   },
@@ -44,5 +45,16 @@
   "model_ladder": {
     "csv": "model-ladder.csv",
     "default_level": 1
+  },
+  "local_lane": {
+    "model": "qwen3.8-27b-uncensored",
+    "provider": "llama-local",
+    "effort": "medium",
+    "service_unit": "llama-server.service",
+    "minimum_free_gpu_memory_mib": 2048,
+    "require_repository_worktree": true,
+    "require_independent_validator": true,
+    "mcp_configuration": "inherit_pi_agent_dir",
+    "extensions": "inherit_pi_agent_dir"
   }
 }

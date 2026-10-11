@@ -205,6 +205,18 @@ def worker_result_record(value):
     return value
 
 
+def independent_validator_record(value):
+    fields(value, ["argv"], label="independent_validator")
+    argv = value["argv"]
+    if not isinstance(argv, list) or not 1 <= len(argv) <= 64:
+        invalid("independent_validator.argv must contain 1–64 arguments")
+    normalized = [text(argument, f"independent_validator.argv[{index}]", 4096)
+                  for index, argument in enumerate(argv)]
+    if "{output_dir}" not in normalized:
+        invalid("independent_validator.argv must include the {output_dir} argument")
+    return {"argv": normalized}
+
+
 def worker_mode(value, label="worker_mode"):
     value = text(value, label, 32).strip().casefold()
     if value not in WORKER_MODES:
@@ -398,7 +410,7 @@ def policy_record(value):
     from .model_ladder import billing_pool
 
     fields(value, ["schema_version", "default_concurrency", "max_concurrency", "topology", "routes", "runtime_kinds"],
-           ["provider_admission", "jail_stream_idle_timeout_ms", "model_ladder"])
+           ["provider_admission", "jail_stream_idle_timeout_ms", "model_ladder", "local_lane"])
     version(value["schema_version"])
     if "model_ladder" in value:
         ladder = fields(value["model_ladder"], ["csv", "default_level"], label="model_ladder")
@@ -423,6 +435,27 @@ def policy_record(value):
             identifier(route["runtime"], "route runtime")
         if route["mode"] == "jail" and route["runtime"] != "codex":
             invalid("version 1 supports the documented Codex jail route only")
+    local_lane = value.get("local_lane")
+    if local_lane is not None:
+        fields(local_lane, ["model", "provider", "effort", "service_unit",
+                            "minimum_free_gpu_memory_mib", "require_repository_worktree",
+                            "require_independent_validator", "mcp_configuration", "extensions"],
+               label="local_lane")
+        if (local_lane["model"] != "qwen3.8-27b-uncensored"
+                or local_lane["provider"] != "llama-local"
+                or local_lane["effort"] != "medium"
+                or local_lane["service_unit"] != "llama-server.service"):
+            invalid("local_lane model, provider, effort, or service differs from the approved tuple")
+        integer(local_lane["minimum_free_gpu_memory_mib"],
+                "local_lane.minimum_free_gpu_memory_mib", 1, 65536)
+        validate_effort("pi", local_lane["effort"])
+        if local_lane["require_repository_worktree"] is not True:
+            invalid("local_lane requires a throwaway repository worktree")
+        if local_lane["require_independent_validator"] is not True:
+            invalid("local_lane requires an independent validator")
+        if (local_lane["mcp_configuration"] != "inherit_pi_agent_dir"
+                or local_lane["extensions"] != "inherit_pi_agent_dir"):
+            invalid("local_lane must inherit the user's configured Pi MCP and extension resources")
     if not isinstance(value["runtime_kinds"], dict) or not value["runtime_kinds"]:
         invalid("runtime_kinds must be a nonempty object")
     for runtime, kind in value["runtime_kinds"].items():
@@ -455,6 +488,8 @@ def policy_record(value):
             continue
         normalized_caps[normalized_provider] = integer(cap, f"provider cap for {provider}", 1, 64)
     admission["provider_caps"] = normalized_caps
+    if local_lane is not None and admission["provider_caps"].get("llama-local") != 1:
+        invalid("local_lane requires one shared llama-local admission slot")
     value["provider_admission"] = admission
     return value
 
@@ -501,7 +536,7 @@ def prepare(manifest_path, policy_path):
                 ["override", "repository_worktree", "worker_result", "task_class",
                 "model_level", "model_fallback", "escalation", "worker_mode", "mode",
                 "protected_paths", "editable_paths", "acceptance_tests", "required_context",
-                "tracker_writes"], "job")
+                "tracker_writes", "local_lane", "independent_validator"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -513,6 +548,11 @@ def prepare(manifest_path, policy_path):
             invalid(f"{job_id}: worker_mode and mode disagree")
         selected_worker_mode = worker_mode(job.get("worker_mode", job.get("mode", "literal")))
         acceptance_tests = path_list(job.get("acceptance_tests"), f"{job_id}.acceptance_tests")
+        local_lane_opt_in = job.get("local_lane", False)
+        if type(local_lane_opt_in) is not bool:
+            invalid(f"{job_id}.local_lane must be explicitly true or false")
+        independent_validator = (independent_validator_record(job["independent_validator"])
+                                if "independent_validator" in job else None)
         editable_paths = path_list(job.get("editable_paths"), f"{job_id}.editable_paths")
         protected_paths = validate_protected_paths(
             protected_paths_record(job.get("protected_paths"), acceptance_tests), editable_paths,
@@ -529,6 +569,44 @@ def prepare(manifest_path, policy_path):
             fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
         explicit = override is not None and any(key in override for key in ("runtime", "model", "provider", "effort"))
+        local_route_selection = None
+        local_config = policy.get("local_lane")
+        if local_lane_opt_in:
+            if job["task_kind"] != "ordinary":
+                invalid(f"{job_id}: local_lane is an ordinary host route; it cannot change a jail task")
+            if local_config is None:
+                raise JobError("unavailable_capability", f"{job_id}: local_lane is not configured")
+            if any(key in job for key in ("model_level", "model_fallback", "escalation")):
+                invalid(f"{job_id}: local_lane is outside the integer model ladder")
+            expected_tuple = {"runtime": "pi", "model": local_config["model"],
+                              "provider": local_config["provider"], "effort": local_config["effort"]}
+            actual_tuple = {key: override.get(key) if override is not None else None
+                            for key in expected_tuple}
+            actual_tuple["runtime"] = HARNESS_ALIASES.get(actual_tuple["runtime"], actual_tuple["runtime"])
+            actual_tuple["provider"] = (billing_pool(actual_tuple["provider"])
+                                         if actual_tuple["provider"] else None)
+            if actual_tuple != expected_tuple:
+                invalid(f"{job_id}: local_lane requires the complete approved Pi/Qwen tuple in override")
+            if not job["writes_repository"]:
+                invalid(f"{job_id}: local_lane requires a throwaway repository worktree")
+            if not acceptance_tests:
+                invalid(f"{job_id}: local_lane requires named acceptance tests")
+            if independent_validator is None:
+                invalid(f"{job_id}: local_lane requires an independent_validator argv")
+            route = {"mode": "agent", "runtime": "pi"}
+            local_route_selection = {
+                "lane": "local_lane", "choice": "explicit_opt_in", "level": None,
+                "model": local_config["model"], "effort": local_config["effort"],
+                "runtime": "pi", "provider": local_config["provider"],
+                "requested": {"model": local_config["model"], "effort": local_config["effort"],
+                              "harness": "pi", "provider": local_config["provider"]},
+                "fallback": None,
+            }
+        elif independent_validator is not None:
+            invalid(f"{job_id}: independent_validator is reserved for the local_lane route")
+        elif (local_config is not None and explicit
+              and override.get("provider") == local_config["provider"]):
+            invalid(f"{job_id}: llama-local requires the explicit local_lane opt-in")
         if override is not None and "effort" in override:
             if route["mode"] != "agent":
                 invalid(f"{job_id}: effort overrides are not supported for {route['mode']} routes")
@@ -540,13 +618,16 @@ def prepare(manifest_path, policy_path):
             # P2 completion must not mask malformed or unsupported effort input.
             if effort_runtime is not None:
                 validate_effort(effort_runtime, effort)
-        selection = None
+        selection = local_route_selection
         if "model_level" in job:
             integer(job["model_level"], "model_level", 1, 8)
         if "escalation" in job:
             if "model_level" not in job:
                 invalid("escalation requires an explicit model_level")
             validate_escalation(job["escalation"], job["model_level"])
+            if (job["writes_repository"]
+                    and job["escalation"]["failure"]["category"] != "reasoning"):
+                invalid(f"{job_id}: implementation escalation requires a concrete reasoning failure")
         if "model_fallback" in job and "model_level" not in job:
             invalid("model_fallback requires an explicit model_level")
         if ("model_level" in job or "model_fallback" in job) and route["mode"] != "agent":
@@ -619,6 +700,8 @@ def prepare(manifest_path, policy_path):
             provider = None
         if selection is not None:
             provider = selection["provider"]
+        if (local_config is not None and not local_lane_opt_in and provider == "llama-local"):
+            invalid(f"{job_id}: llama-local requires the explicit local_lane opt-in")
         if route["mode"] == "jail" and provider is not None:
             invalid("provider overrides are unsupported on the jail route; preserve the research boundary")
         runtime = route["runtime"]
@@ -672,6 +755,8 @@ def prepare(manifest_path, policy_path):
                         "protected_paths": protected_paths}
         if required_context is not None:
             prepared_job["required_context"] = required_context
+        if independent_validator is not None:
+            prepared_job["independent_validator"] = independent_validator
         if override is not None:
             # Keep the completed tuple (including an effort filled from the
             # ladder) in the durable request consumed by preflight/effects.
@@ -685,6 +770,9 @@ def prepare(manifest_path, policy_path):
                 task_class, timeout_policy["default"])
         jobs.append(prepared_job)
     if retry_override:
+        if ("pi" in retry_override
+                and any(job.get("local_lane") is True for job in jobs)):
+            invalid("local_lane cannot use a run-private Pi agent directory; preserve configured MCP and extensions")
         for runtime in retry_override:
             if not any(job["route"]["mode"] == "agent" and job["route"]["runtime"] == runtime
                        for job in jobs):

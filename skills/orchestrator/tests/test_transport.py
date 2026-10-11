@@ -224,6 +224,33 @@ class TransportTest(unittest.TestCase):
         self.assertIn(["herdr", "pane", "--help"], self.calls)
         self.assertIn(["herdr", "status", "--json"], self.calls)
 
+    def test_local_lane_preflight_checks_resources_and_exact_pi_model(self):
+        self.adapter.binding["supported_kinds"].append("pi")
+        self.available.append("pi")
+        spec = {"job_id": "local", "cwd": str(self.root), "kind": "pi",
+                "task_kind": "ordinary", "writes_repository": False, "local_lane": True,
+                "route": {"mode": "agent", "runtime": "pi"},
+                "provider": "llama-local", "model": "qwen3.8-27b-uncensored",
+                "override": {"effort": "medium"},
+                "model_route": {"lane": "local_lane", "effort": "medium"}}
+        config = {"service_unit": "llama-server.service", "minimum_free_gpu_memory_mib": 2048}
+        request = {"jobs": [spec], "policy": {"local_lane": config}}
+        original_raw = self.adapter.raw
+        self.adapter.raw = lambda argv: (
+            b"provider model context max-out thinking images\n"
+            b"llama-local qwen3.8-27b-uncensored 90.1K 16.4K yes no\n"
+            if argv == ["pi", "--offline", "--list-models"] else original_raw(argv)
+        )
+        preconditions = []
+
+        with patch("herdr_jobs.transport.check_local_lane_preconditions",
+                   side_effect=lambda value, run: preconditions.append((value, run))), \
+                patch.object(self.adapter, "pi_model_efforts", side_effect=AssertionError("effort adapter not used")):
+            result = self.adapter.preflight(request)
+
+        self.assertEqual(preconditions[0][0], config)
+        self.assertEqual(result["models"], {"local": "llama-local/qwen3.8-27b-uncensored"})
+
     def test_observation_reads_raw_pane_text_and_installed_agent_info_envelope(self):
         response = load_json(HERDR_FIXTURES / "agent-get.json")
         response["result"]["agent"].update(
@@ -315,10 +342,10 @@ class TransportTest(unittest.TestCase):
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
 
-    def test_pi_start_passes_configured_provider_model_and_effort_to_the_agent(self):
+    def test_local_lane_start_uses_pi_with_configured_mcp_and_extensions(self):
         fake = FakeHerdr()
         self.spec.update(kind="pi", provider="llama-local", route={"mode": "agent", "runtime": "pi"},
-                         override={"effort": "high"})
+                         local_lane=True, override={"effort": "medium"})
         self.job["resolved_model"] = "qwen3.8-27b-uncensored"
 
         with patch("herdr_jobs.transport.command", fake.command):
@@ -327,7 +354,9 @@ class TransportTest(unittest.TestCase):
         start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
         self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "pi",
                                  "--pane", "moved:1", "--", "--provider", "llama-local", "--model",
-                                 "qwen3.8-27b-uncensored", "--thinking", "high"])
+                                 "qwen3.8-27b-uncensored", "--approve"])
+        self.assertNotIn("--no-mcp", start)
+        self.assertNotIn("--no-extensions", start)
 
     def test_claude_effort_maps_without_an_explicit_model(self):
         fake = FakeHerdr()

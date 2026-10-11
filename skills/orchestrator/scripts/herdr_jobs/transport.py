@@ -19,6 +19,7 @@ from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
+from .local_lane import check_preconditions as check_local_lane_preconditions
 
 
 class BudgetExpired(Exception):
@@ -287,6 +288,13 @@ class NativeTransport:
         planned = [job for job in request["jobs"] if not status_only and
                    (job["job_id"] not in previous or previous[job["job_id"]]["phase"] in ("pending", "split", "moved"))]
         planned_ids = {job["job_id"] for job in planned}
+        for job in planned:
+            if job.get("local_lane") is True:
+                def run_local_check(argv):
+                    code, output, error = command(argv, self.deadline)
+                    return (code, output.decode("utf-8", "replace"),
+                            error.decode("utf-8", "replace"))
+                check_local_lane_preconditions(request["policy"]["local_lane"], run_local_check)
         writer_checks = []
         if not status_only:
             for job in request["jobs"]:
@@ -398,7 +406,8 @@ class NativeTransport:
                         raise JobError("unavailable_capability",
                                        f"Claude model {requested} cannot preserve effort {effort}")
                 models[job["job_id"]] = matches[0]
-            if runtime == "pi" and requested_model is not None and requested_effort is not None:
+            if (runtime == "pi" and requested_model is not None and requested_effort is not None
+                    and job.get("local_lane") is not True):
                 provider, model = models[job["job_id"]].split("/", 1)
                 efforts = self.pi_model_efforts(provider, model)
                 effort = requested_effort
@@ -435,6 +444,18 @@ class NativeTransport:
                 or not all(isinstance(value, str) for value in result["efforts"])):
             raise JobError("unavailable_capability", "Pi model effort discovery returned invalid metadata")
         return result["efforts"]
+
+    def validate_independent(self, job):
+        """Run the coordinator-declared local-lane validator without a shell."""
+        validator = job["spec"]["independent_validator"]
+        output_dir = str(Path(job["host_output"]).absolute())
+        argv = [output_dir if argument == "{output_dir}" else argument
+                for argument in validator["argv"]]
+        code, output, error_output = command(argv, self.deadline, cwd=job["spec"]["cwd"])
+        stdout = _safe_cli_text(output)
+        stderr = _safe_cli_text(error_output)
+        evidence = f"exit={code}; stdout={stdout or '<empty>'}; stderr={stderr or '<empty>'}"
+        return {"exit_code": code, "evidence": evidence[:4096]}
 
     def check_export(self):
         export = self.binding["jail_export"]
@@ -482,7 +503,12 @@ class NativeTransport:
                 if job["resolved_model"] is not None:
                     runtime_args += ["--model", _native_model("pi", job["resolved_model"], spec.get("provider"))]
                 effort = (spec.get("override") or {}).get("effort")
-                runtime_args += effort_arguments("pi", effort)
+                if spec.get("local_lane") is not True:
+                    runtime_args += effort_arguments("pi", effort)
+                else:
+                    # The local server pins medium reasoning; forwarding Pi's
+                    # CLI effort would depend on unadvertised provider metadata.
+                    runtime_args += ["--approve"]
                 if runtime_args:
                     argv += ["--", *runtime_args]
             else:

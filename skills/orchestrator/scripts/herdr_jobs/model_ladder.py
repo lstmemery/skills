@@ -102,10 +102,16 @@ def validate_escalation(value, next_level):
         invalid("multi-level escalation requires authorization=user")
     if "authorization" in value and value["authorization"] != "user":
         invalid("escalation.authorization must be user when present")
-    failure = fields(value["failure"], ["kind", "source", "observed_at", "summary"],
+    failure = fields(value["failure"], ["kind", "category", "source", "observed_at", "summary"],
                      label="escalation.failure")
     if failure["kind"] not in ("failure", "check"):
         invalid("escalation.failure.kind must be failure or check")
+    if failure["category"] not in ("reasoning", "quality", "operational", "quota"):
+        invalid("escalation.failure.category must be reasoning, quality, operational, or quota")
+    if failure["category"] in ("operational", "quota"):
+        invalid("operational and quota failures do not authorize a model-level escalation")
+    if failure["category"] == "reasoning" and failure["kind"] != "failure":
+        invalid("a reasoning escalation must record a concrete failure")
     text(failure["source"], "escalation.failure.source", 512)
     _iso_timestamp(failure["observed_at"], "escalation.failure.observed_at")
     text(failure["summary"], "escalation.failure.summary", 2000)
