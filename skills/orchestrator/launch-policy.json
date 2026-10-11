@@ -1,27 +1,48 @@
 {
   "schema_version": 1,
   "default_concurrency": 4,
-  "max_concurrency": 64,
-  "topology": "new-workspace",
-  "routes": {
-    "ordinary": {"mode": "agent", "runtime": null},
-    "deep_research": {"mode": "jail", "runtime": "codex"},
-    "shopping": {"mode": "jail", "runtime": "codex"}
-  },
-  "runtime_kinds": {
-    "codex": "codex",
-    "pi": "pi",
-    "claude-code": "claude",
-    "omp": "omp"
-  },
+  "max_concurrency": 8,
   "provider_admission": {
     "default_provider_cap": 4,
-    "provider_caps": {"codex": 4, "llama-local": 4, "claude": 4, "opencode-go": 4},
+    "provider_caps": {
+      "opencode-go": 2,
+      "codex": 8,
+      "claude": 4
+    },
     "default_backoff_seconds": 60
   },
-  "model_ladder": {"csv": "model-ladder.csv", "default_level": 1},
+  "topology": "new-workspace",
+  "routes": {
+    "ordinary": {
+      "mode": "agent",
+      "runtime": null
+    },
+    "deep_research": {
+      "mode": "jail",
+      "runtime": "codex"
+    },
+    "shopping": {
+      "mode": "jail",
+      "runtime": "codex"
+    }
+  },
   "jail_stream_idle_timeout_ms": {
     "default": 300000,
-    "task_classes": {"short_routine": 300000, "long_form_research": 600000}
+    "task_classes": {
+      "short_routine": 300000,
+      "long_form_research": 600000
+    }
+  },
+  "runtime_kinds": {
+    "claude-code": "claude",
+    "codex": "codex",
+    "pi": "pi",
+    "omp": "omp",
+    "copilot": "copilot",
+    "grok": "grok"
+  },
+  "model_ladder": {
+    "csv": "model-ladder.csv",
+    "default_level": 1
   }
 }
