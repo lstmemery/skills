@@ -61,6 +61,24 @@ class ReviewEvidenceContractTest(unittest.TestCase):
             review_dispositions.REVIEW_EVIDENCE_SCHEMA_VERSIONS,
             review_evidence.REVIEW_EVIDENCE_SCHEMA_VERSIONS,
         )
+        self.assertIs(PREFLIGHT.parse_review_response, review_evidence.parse_review_response)
+        self.assertIs(review_dispositions.review_evidence.parse_review_response, review_evidence.parse_review_response)
+
+    def test_response_parser_preserves_each_callers_malformed_line_policy(self):
+        response = (
+            "- `review/S1`: fixed — Corrected.\n"
+            "- `review/S2`: undecided — Still open.\n"
+        )
+        self.assertEqual(
+            review_evidence.parse_review_response(response),
+            {("review", "S1"): ("fixed", "Corrected.")},
+        )
+        with self.assertRaisesRegex(ValueError, "malformed review disposition at review-response.md:2"):
+            review_evidence.parse_review_response(response, reject_malformed=True)
+        with self.assertRaisesRegex(ValueError, "duplicate disposition for review/S1"):
+            review_evidence.parse_review_response(
+                "- `review/S1`: fixed — First.\n- `review/S1`: rejected — Second.\n"
+            )
 
     def test_owner_contract_shape(self):
         self.assertEqual(

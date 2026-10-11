@@ -1,10 +1,39 @@
-"""Owner of the finding-evidence contract shared by disposition sync and integration preflight.
+"""Shared review-response parsing and finding-evidence contract.
 
 review_dispositions.py (sync) and integration-preflight.py (gate) must accept or
 reject the same review-evidence.json sidecars; both import this module instead of
 keeping copies. Amend the contract only here, and update
 skills/orchestrator/references/review.md — the prose owner — in the same change.
 """
+
+import re
+
+
+FINDING_LINE = re.compile(
+    r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
+    r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
+)
+FINDING_REFERENCE_LINE = re.compile(r"^\s*-\s*`[^`]+/[^`]+`")
+
+
+def parse_review_response(text, *, reject_malformed=False):
+    """Parse response dispositions, optionally rejecting malformed references.
+
+    Preflight historically ignores malformed response lines; disposition sync
+    rejects lines that look like finding references but do not match the grammar.
+    """
+    dispositions = {}
+    for line_number, line in enumerate(text.splitlines(), 1):
+        match = FINDING_LINE.match(line)
+        if match is None:
+            if reject_malformed and FINDING_REFERENCE_LINE.match(line):
+                raise ValueError(f"malformed review disposition at review-response.md:{line_number}")
+            continue
+        key = (match.group("review"), match.group("finding"))
+        if key in dispositions:
+            raise ValueError(f"duplicate disposition for {key[0]}/{key[1]}")
+        dispositions[key] = (match.group("disposition"), match.group("detail").strip())
+    return dispositions
 
 FINDING_EVIDENCE_FIELDS = frozenset(
     {"confidence", "reproducer", "evidence", "unresolved_assumption"}

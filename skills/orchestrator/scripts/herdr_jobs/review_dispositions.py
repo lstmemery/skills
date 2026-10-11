@@ -13,11 +13,6 @@ from .review_evidence import REVIEW_EVIDENCE_SCHEMA_VERSIONS
 
 
 AXES = ("standards", "spec")
-FINDING_LINE = re.compile(
-    r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
-    r"(?P<disposition>fixed|rejected)\s+—\s+(?P<reason>\S.*)$"
-)
-FINDING_REFERENCE_LINE = re.compile(r"^\s*-\s*`[^`]+/[^`]+`")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
 EVIDENCE_NAME = "review-evidence.json"
 BACKUP_SUFFIX = ".pre-disposition-sync"
@@ -33,18 +28,10 @@ def _read_response(path):
 
 
 def _parse_response(text):
-    dispositions = {}
-    for line_number, line in enumerate(text.splitlines(), 1):
-        if not FINDING_REFERENCE_LINE.match(line):
-            continue
-        match = FINDING_LINE.match(line)
-        if match is None:
-            records.invalid(f"malformed review disposition at review-response.md:{line_number}")
-        key = (match.group("review"), match.group("finding"))
-        if key in dispositions:
-            records.invalid(f"duplicate disposition for {key[0]}/{key[1]}")
-        dispositions[key] = (match.group("disposition"), match.group("reason").strip())
-    return dispositions
+    try:
+        return review_evidence.parse_review_response(text, reject_malformed=True)
+    except ValueError as error:
+        records.invalid(str(error))
 
 
 def _review_directories(task_dir):

@@ -24,6 +24,7 @@ from herdr_jobs.review_evidence import (
     FINDING_EVIDENCE_FIELDS,
     REVIEW_EVIDENCE_SCHEMA_VERSIONS,
     finding_evidence_error,
+    parse_review_response,
 )
 
 
@@ -31,10 +32,6 @@ AXES = ("standards", "spec")
 EVIDENCE_NAME = "review-evidence.json"
 CAPTURE_VERIFIER = Path(__file__).resolve().parents[2] / "code-review" / "scripts" / "capture.py"
 CAPTURE_VERIFICATION_KEYS = frozenset({"outcome", "capture_id", "coverage", "gaps"})
-FINDING_LINE = re.compile(
-    r"^\s*-\s*`(?P<review>[^`]+)/(?P<finding>[^`]+)`\s*:\s*"
-    r"(?P<disposition>fixed|rejected)\s+—\s+(?P<detail>\S.*)$"
-)
 IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 MARKDOWN_FINDING = re.compile(r"^\s*-\s+\[(?P<finding>[A-Za-z0-9._-]+)\]\s+\S.*$")
@@ -533,15 +530,13 @@ def review_records(task_dir, task_id, workers_path):
     except OSError as error:
         raise PreflightError(f"cannot read review-response.md: {response_path}") from error
 
-    dispositions = {}
-    for line in response_text.splitlines():
-        match = FINDING_LINE.match(line)
-        if match is None:
-            continue
-        key = (match.group("review"), match.group("finding"))
-        if key in dispositions:
-            raise PreflightError(f"duplicate disposition for {key[0]}/{key[1]}")
-        dispositions[key] = match.group("disposition")
+    try:
+        parsed_response = parse_review_response(response_text)
+    except ValueError as error:
+        raise PreflightError(str(error)) from error
+    dispositions = {
+        key: disposition for key, (disposition, _detail) in parsed_response.items()
+    }
 
     worker_ids = parse_worker_identities(workers_path, task_id)
     records = []
