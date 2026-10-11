@@ -59,6 +59,36 @@ def normalized(value, root):
 
 
 class CompatibilityTest(unittest.TestCase):
+    def test_admission_service_methods_smoke(self):
+        calls = []
+
+        class Store:
+            def acquire(self, *args, **kwargs):
+                calls.append(("acquire", args, kwargs))
+                return {"acquired": True}
+
+            def release(self, *args):
+                calls.append(("release", args))
+                return {"released": True}
+
+            def note_rate_limit(self, *args):
+                calls.append(("rate_limit", args))
+                return {"noted": True}
+
+        store = Store()
+        service = AdmissionService(store)
+        job = {"provider": "codex", "admission_lease_id": "lease-1"}
+        signal = {"retry_after_seconds": 12, "source": "test"}
+
+        self.assertIs(service.store, store)
+        self.assertEqual(service.acquire(job, 3, "request-1"), {"acquired": True})
+        self.assertEqual(service.release(job), {"released": True})
+        self.assertEqual(service.rate_limit(job, signal), {"noted": True})
+        self.assertEqual(AdmissionService.provider_cap({"provider_admission": {}}, "codex"),
+                         Engine.provider_cap_from_config({}, "codex"))
+        self.assertEqual(AdmissionService.pool("openai-codex"), "codex")
+        self.assertEqual([call[0] for call in calls], ["acquire", "release", "rate_limit"])
+
     def test_admission_provider_cap_reuses_engine_validation(self):
         policy = {"provider_admission": {
             "default_provider_cap": 4,

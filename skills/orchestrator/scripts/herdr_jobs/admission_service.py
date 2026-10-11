@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from .admission import AdmissionStore, backoff_delay
 from .engine import Engine
+from .model_ladder import billing_pool
 
 
 class AdmissionService:
