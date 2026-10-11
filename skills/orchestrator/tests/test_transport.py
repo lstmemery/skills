@@ -427,6 +427,41 @@ class TransportTest(unittest.TestCase):
                                       "-c", "model_providers.vendor.stream_max_retries=10",
                                       "Assigned work"])
 
+    def test_failed_codex_start_retains_redacted_cli_output_when_identity_probe_fails(self):
+        self.job["pending_effect"] = {"action": "start"}
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+
+        def failing_command(argv, deadline, cwd=None):
+            if argv[:3] == ["herdr", "agent", "start"]:
+                return (7, b'{"error":{"message":"registration rejected",'
+                        b'"api_key":"native-start-response-secret",'
+                        b'"client_secret":"native credential phrase"}}',
+                        b"agent_not_ready: token=native-start-stderr-secret")
+            if argv[:3] == ["herdr", "pane", "read"]:
+                return 0, b"Codex session is starting", b""
+            if argv[:3] == ["herdr", "agent", "get"]:
+                return (1, b'{"error":{"message":"agent not found",'
+                        b'"token":"native-get-response-secret"}}',
+                        b"agent lookup failed: Authorization: Bearer native-get-stderr-secret")
+            self.fail(f"unexpected command: {argv[:3]}")
+
+        with patch("herdr_jobs.transport.command", failing_command):
+            with self.assertRaises(EffectUnknown) as caught:
+                self.adapter.effect("start", self.job, "Assigned work")
+
+        diagnostic = caught.exception.start_diagnostic
+        self.assertEqual(diagnostic["command"], "herdr agent start")
+        self.assertEqual(diagnostic["exit_code"], 7)
+        self.assertIn("registration rejected", diagnostic["stdout"])
+        self.assertIn("agent_not_ready", diagnostic["stderr"])
+        self.assertNotIn("native-start-response-secret", json.dumps(diagnostic))
+        self.assertNotIn("native credential phrase", json.dumps(diagnostic))
+        self.assertNotIn("native-start-stderr-secret", json.dumps(diagnostic))
+        self.assertIn("herdr agent get exited 1", str(caught.exception.__cause__))
+        self.assertNotIn("native-get-response-secret", str(caught.exception.__cause__))
+        self.assertNotIn("native-get-stderr-secret", str(caught.exception.__cause__))
+        self.assertEqual(self.job["start_diagnostic"], diagnostic)
+
     def test_pi_retry_profile_environment_is_set_on_only_the_owned_pane(self):
         self.job["retry_profile"] = {
             "agent_dir": str(self.root / "run" / "pi-agent"),

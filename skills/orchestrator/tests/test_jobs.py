@@ -734,15 +734,41 @@ class JobsTest(unittest.TestCase):
     def test_codex_dialog_is_a_launch_failure_and_is_never_retried(self):
         self.configure(jobs={"job0": "blocked"})
         code, result = self.call()
-        self.assertEqual(code, 10)
+        self.assertEqual(code, 6)
         self.assertEqual(result["jobs"][0]["observed"]["state"], "blocked")
         self.assertIn("trust or resume dialog", result["jobs"][0]["issue"])
+        self.assertEqual(self.state()["jobs"][0]["pending_effect"]["action"], "start")
         self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
         self.call("resume")
         self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
+    def test_failed_codex_start_keeps_redacted_process_and_identity_diagnostics(self):
+        self.configure(jobs={"job0": "failed_start_diagnostic"})
+
+        code, result = self.call()
+
+        self.assertEqual(code, 6)
+        reported_job = result["jobs"][0]
+        diagnostic = reported_job["start_diagnostic"]
+        self.assertEqual(diagnostic["command"], "herdr agent start")
+        self.assertEqual(diagnostic["exit_code"], 7)
+        self.assertIn("registration rejected", diagnostic["stdout"])
+        self.assertIn("agent_not_ready", diagnostic["stderr"])
+        self.assertNotIn("fixture-start-response-secret", json.dumps(diagnostic))
+        self.assertNotIn("fixture credential phrase", json.dumps(diagnostic))
+        self.assertNotIn("fixture-start-stderr-secret", json.dumps(diagnostic))
+        self.assertIn("herdr agent get exited 1", reported_job["issue"])
+        self.assertNotIn("fixture-get-response-secret", reported_job["issue"])
+        self.assertNotIn("fixture-get-stderr-secret", reported_job["issue"])
+
+        stored_job = self.state()["jobs"][0]
+        self.assertEqual(stored_job["start_diagnostic"], diagnostic)
+        self.assertEqual(stored_job["pending_effect"]["action"], "start")
+        self.call("resume")
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
 
     def test_task_content_change_conflicts(self):
         self.call()
@@ -816,7 +842,7 @@ class JobsTest(unittest.TestCase):
         self.write_jobs(5)
         self.configure(jobs={f"job{index}": "blocked" for index in range(4)})
         code, result = self.call()
-        self.assertEqual(code, 10)
+        self.assertEqual((code, result["batch_state"]), (6, "unresolved_effect"))
         self.assertEqual(result["active_jobs"], 4)
         self.assertEqual(result["jobs"][4]["phase"], "pending")
 
