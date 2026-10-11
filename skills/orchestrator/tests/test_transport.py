@@ -124,15 +124,33 @@ class TransportTest(unittest.TestCase):
 
     def prepared_jail_spec(self, task_class):
         (self.root / "task.md").write_text("A task for the jailed worker.")
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
         job = {"job_id": "j1", "name": "fixture", "task_kind": "deep_research",
                "task_file": "task.md", "cwd": ".", "output_expectation": "answer",
-               "writes_repository": False}
+               "writes_repository": False,
+               "required_context": [
+                   {"path": "acceptance_test.md", "kind": "test", "purpose": "Acceptance test."},
+                   {"path": "fixture-input.json", "kind": "fixture", "purpose": "Input fixture."},
+               ]}
         if task_class is not None:
             job["task_class"] = task_class
         manifest_path = self.root / "manifest.json"
         save(manifest_path, {"schema_version": 1, "request_id": "fixture", "jobs": [job]})
         request = prepare(manifest_path, PACKAGE / "launch-policy.json")
         return request["jobs"][0]
+
+    def test_jail_requires_visible_test_and_fixture_context(self):
+        (self.root / "task.md").write_text("A task for the jailed worker.")
+        manifest_path = self.root / "manifest.json"
+        save(manifest_path, {"schema_version": 1, "request_id": "fixture", "jobs": [{
+            "job_id": "j1", "name": "fixture", "task_kind": "deep_research",
+            "task_file": "task.md", "cwd": ".", "output_expectation": "answer",
+            "writes_repository": False,
+        }]})
+
+        with self.assertRaisesRegex(JobError, "required_context"):
+            prepare(manifest_path, PACKAGE / "launch-policy.json")
 
     def test_exact_runtime_is_not_substituted(self):
         self.spec["route"]["runtime"] = "omp"
@@ -579,6 +597,13 @@ class TransportTest(unittest.TestCase):
 
     def test_jail_launch_uses_quoted_runner_and_keeps_task_in_request_file(self):
         self.spec["route"]["mode"] = "jail"
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        self.spec["required_context"] = [
+            {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
+            {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
+        ]
+        self.spec["protected_paths"] = ["keys/"]
         prompt = "Task with $(touch never) and 'quotes'"
         self.adapter.effect("jail", self.job, prompt)
         argv = self.calls[-1]
@@ -659,9 +684,16 @@ class TransportTest(unittest.TestCase):
         module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
         runner = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(runner)
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
         request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
                    "argv": ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
-                   "exit_path": self.job["exit_record"]}
+                   "exit_path": self.job["exit_record"],
+                   "required_context": [
+                       {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
+                       {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
+                   ],
+                   "protected_paths": ["keys/"]}
         calls = []
 
         def launch(argv, check):

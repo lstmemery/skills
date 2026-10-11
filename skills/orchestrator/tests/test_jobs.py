@@ -32,6 +32,10 @@ class JobsTest(unittest.TestCase):
         self.run = self.root / "run"
         self.task = self.root / "task ' $(data).md"
         self.task.write_text("Inspect the assigned fixture. Literal `printf secret` and $(touch SHOULD_NOT_EXIST).\n")
+        self.context_test = self.root / "acceptance_test.md"
+        self.context_fixture = self.root / "fixture-input.json"
+        self.context_test.write_text("The jailed worker must read this acceptance test.\n")
+        self.context_fixture.write_text('{"fixture": true}\n')
         self.policy = self.root / "policy.json"
         self.policy.write_bytes(POLICY.read_bytes())
         (self.root / "model-ladder.csv").write_bytes((PACKAGE / "model-ladder.csv").read_bytes())
@@ -47,6 +51,11 @@ class JobsTest(unittest.TestCase):
             job = {"job_id": f"job{index}", "name": f"Fixture {index}", "task_kind": kind,
                    "task_file": str(self.task), "cwd": str(self.root), "output_expectation": "A fixture report.",
                    "writes_repository": False}
+            if kind == "deep_research":
+                job["required_context"] = [
+                    {"path": str(self.context_test), "kind": "test", "purpose": "Jail acceptance test."},
+                    {"path": str(self.context_fixture), "kind": "fixture", "purpose": "Jail input fixture."},
+                ]
             if kind == "ordinary":
                 override = {"runtime": runtime, "instruction": f"Use {runtime.capitalize()} for this fixture."}
                 if provider is not None:
@@ -368,6 +377,15 @@ class JobsTest(unittest.TestCase):
         disposition = json.loads((output / "disposition.json").read_text())
         self.assertEqual(disposition["disposition"], "failed")
 
+    def test_finish_maps_partial_worker_result_to_failed_disposition(self):
+        self.prepare_worker_outcome("partial")
+
+        code, result = self.call("finish")
+
+        self.assertEqual((code, result["finish_complete"]), (10, True))
+        self.assertEqual(result["jobs"][0]["worker_disposition"], "failed")
+        self.assertEqual(result["finish"]["jobs"]["job0"]["worker_result_outcome"], "partial")
+
     def test_finish_requires_named_reason_for_explicit_disposition_override(self):
         self.prepare_worker_outcome("blocked")
         reason = "Coordinator reviewed the result and approved completion despite the reported blocker."
@@ -666,6 +684,70 @@ class JobsTest(unittest.TestCase):
         self.assertTrue((self.root / "prompt-job0.txt").is_file())
         self.assertLess(next(i for i, event in enumerate(events) if event["action"] == "prompt_verified"),
                         next(i for i, event in enumerate(events) if event["action"] == "observe"))
+
+    def test_worker_brief_carries_mode_identity_and_default_protected_paths(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_mode"] = "inferential"
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "brief-task", "assignment_revision": 3,
+        }
+        manifest["jobs"][0]["acceptance_tests"] = [str(self.context_test)]
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, _ = self.call()
+
+        self.assertEqual(code, 0)
+        prompt = (self.root / "prompt-job0.txt").read_text()
+        self.assertIn("task_id: brief-task", prompt)
+        self.assertIn("assignment_revision: 3", prompt)
+        self.assertIn("worker_mode: inferential", prompt)
+        self.assertIn('"task_id": "brief-task"', prompt)
+        self.assertIn('"assignment_revision": 3', prompt)
+        self.assertIn("delegation-authorized.toml", prompt)
+        self.assertIn("token-allowlist.txt", prompt)
+        self.assertIn(str(self.context_test), prompt)
+        self.assertIn("retry at most 2 times", prompt)
+
+    def test_worker_result_identity_mismatch_is_rejected_at_finish(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "expected-task", "assignment_revision": 1,
+        }
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(worker_results={"job0": {
+            "outcome": "ready", "summary": "Wrong identity.", "unresolved": [],
+        }})
+        self.call()
+        output = Path(self.state()["jobs"][0]["host_output"])
+        result = json.loads((output / "result.json").read_text())
+        result["task_id"] = "wrong-task"
+        (output / "result.json").write_text(json.dumps(result))
+
+        code, finish = self.call("finish")
+
+        self.assertEqual(code, 10)
+        self.assertEqual(finish["finish_complete"], False)
+        self.assertIn("task_id mismatch", finish["jobs"][0]["issue"])
+
+    def test_declared_editable_path_overlapping_default_protection_is_rejected(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["editable_paths"] = ["keys/credentials.toml"]
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, result = self.call(real=True, preview=True)
+
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("protected", result["message"])
+
+    def test_declared_parent_editable_path_overlapping_default_protection_is_rejected(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["editable_paths"] = ["tools/"]
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, result = self.call(real=True, preview=True)
+
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("protected", result["message"])
 
     def test_pi_retry_override_is_private_to_the_run_and_recorded_in_state(self):
         global_agent = self.root / "pi-global"

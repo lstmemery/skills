@@ -62,8 +62,8 @@ class FakeHost:
                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
                    "outcome": "complete", "artifacts": artifact_paths, "unresolved": []}
         if worker:
-            receipt["outcome"] = {"ready": "complete", "blocked": "blocked",
-                                  "failed": "failed"}[worker_outcome]
+            receipt["outcome"] = {"ready": "complete", "partial": "partial",
+                                  "blocked": "blocked", "failed": "failed"}[worker_outcome]
             receipt["unresolved"] = worker_fixture.get("unresolved", [])
         if not worker and self.fixture.get("legacy_receipt_fixture"):
             receipt = load_json(self.fixture["legacy_receipt_fixture"])

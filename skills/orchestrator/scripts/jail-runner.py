@@ -6,14 +6,18 @@ import os
 from pathlib import Path
 import subprocess
 
-from herdr_jobs.records import JobError, fields, identifier, load_json, now, save, text, version
+from herdr_jobs.records import (JobError, fields, identifier, load_json, now, save, text,
+                                validate_protected_paths, validate_required_context, version)
 
 
 def execute(request, run_process=subprocess.run):
-    fields(request, ["schema_version", "job_id", "attempt_id", "argv", "exit_path"])
+    fields(request, ["schema_version", "job_id", "attempt_id", "argv", "exit_path",
+                     "required_context", "protected_paths"], label="jail launch request")
     version(request["schema_version"])
     identifier(request["job_id"], "job_id")
     identifier(request["attempt_id"], "attempt_id")
+    validate_required_context(request["required_context"], require_test_fixture=True)
+    validate_protected_paths(request["protected_paths"])
     argv = request["argv"]
     if not isinstance(argv, list) or len(argv) != 6 or argv[:5] != ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check"]:
         raise JobError("invalid_input", "launcher request must use the supported omp-train Codex command")

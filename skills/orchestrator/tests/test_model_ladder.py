@@ -189,6 +189,12 @@ class LadderTest(unittest.TestCase):
 
     def test_jail_and_shopping_boundaries_are_preserved(self):
         self.job["task_kind"] = "deep_research"
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        self.job["required_context"] = [
+            {"path": "acceptance_test.md", "kind": "test", "purpose": "Acceptance test."},
+            {"path": "fixture-input.json", "kind": "fixture", "purpose": "Input fixture."},
+        ]
         job = self.prepared()
         self.assertEqual(job["route"], {"mode": "jail", "runtime": "codex"})
         self.assertIsNone(job["model"])

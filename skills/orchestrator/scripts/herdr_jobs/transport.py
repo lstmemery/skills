@@ -13,7 +13,8 @@ import time
 import tomllib
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
-                      effort_arguments, validate_writer_intent, version)
+                      effort_arguments, validate_protected_paths, validate_required_context,
+                      validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
@@ -208,6 +209,8 @@ class NativeTransport:
         for job in request["jobs"]:
             label = job.get("job_id", "job") if isinstance(job, dict) else "job"
             validate_writer_intent(job, label)
+            validate_protected_paths(job.get("protected_paths"), job.get("editable_paths", ()),
+                                     base=job.get("cwd"))
             validate_provider_harness(job["route"]["runtime"], job.get("provider"))
             if (job["route"]["mode"] == "agent" and job["route"]["runtime"] == "codex"
                     and job.get("provider") is not None
@@ -311,6 +314,8 @@ class NativeTransport:
                         or attestation["model"] != "gpt-6-astra" or attestation["effort"] != "max"):
                     raise JobError("unavailable_capability",
                                    "jail default is not verified as gpt-6-astra at max effort")
+                validate_required_context(job.get("required_context"), base=job["cwd"],
+                                          require_test_fixture=True)
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
             if requested_model is not None and job["job_id"] not in models:
@@ -447,7 +452,9 @@ class NativeTransport:
                       f"model_providers.train-openai.stream_idle_timeout_ms={timeout_ms}", prompt]
             launch_request = Path(job["exit_record"]).with_name("launch.json")
             save(launch_request, {"schema_version": 1, "job_id": spec["job_id"], "attempt_id": job["attempt_id"],
-                                  "argv": launch, "exit_path": job["exit_record"]})
+                                  "argv": launch, "exit_path": job["exit_record"],
+                                  "required_context": spec["required_context"],
+                                  "protected_paths": spec["protected_paths"]})
             runner = Path(__file__).resolve().parents[1] / "jail-runner.py"
             argv = [self.herdr, "pane", "run", pane,
                     shlex.join([sys.executable, str(runner), "--request", str(launch_request)])]
