@@ -13,7 +13,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 HERDR_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "herdr"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.records import JobError, digest, load_json, prepare, save
+from herdr_jobs.records import JobError, digest, load_json, prepare, protected_paths_record, save
 from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport, RateLimited
 
 
@@ -603,7 +603,8 @@ class TransportTest(unittest.TestCase):
             {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
             {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
         ]
-        self.spec["protected_paths"] = ["keys/"]
+        self.spec["protected_paths"] = protected_paths_record(["keys/"])
+        self.spec["editable_paths"] = []
         prompt = "Task with $(touch never) and 'quotes'"
         self.adapter.effect("jail", self.job, prompt)
         argv = self.calls[-1]
@@ -614,6 +615,8 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000", prompt])
+        self.assertEqual(request["protected_paths"], protected_paths_record(["keys/"]))
+        self.assertEqual(request["editable_paths"], [])
         self.assertNotIn(prompt, argv[4])
 
     def test_short_routine_jail_class_uses_300000_ms_stream_timeout(self):
@@ -693,7 +696,7 @@ class TransportTest(unittest.TestCase):
                        {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
                        {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
                    ],
-                   "protected_paths": ["keys/"]}
+                   "protected_paths": protected_paths_record(["keys/"]), "editable_paths": []}
         calls = []
 
         def launch(argv, check):
@@ -703,6 +706,27 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(runner.execute(request, run_process=launch), 23)
         self.assertEqual(calls, [(request["argv"], False)])
         self.assertEqual(load_json(self.job["exit_record"])["exit_code"], 23)
+
+    def test_runner_rejects_editable_parent_of_a_protected_path_before_launch(self):
+        module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
+        runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(runner)
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
+                   "argv": ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
+                   "exit_path": self.job["exit_record"],
+                   "required_context": [
+                       {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
+                       {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
+                   ],
+                   "protected_paths": protected_paths_record(), "editable_paths": ["tools/"]}
+        calls = []
+
+        with self.assertRaisesRegex(JobError, "protected"):
+            runner.execute(request, run_process=lambda argv, check: calls.append((argv, check)))
+
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

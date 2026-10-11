@@ -454,7 +454,8 @@ class NativeTransport:
             save(launch_request, {"schema_version": 1, "job_id": spec["job_id"], "attempt_id": job["attempt_id"],
                                   "argv": launch, "exit_path": job["exit_record"],
                                   "required_context": spec["required_context"],
-                                  "protected_paths": spec["protected_paths"]})
+                                  "protected_paths": spec["protected_paths"],
+                                  "editable_paths": spec["editable_paths"]})
             runner = Path(__file__).resolve().parents[1] / "jail-runner.py"
             argv = [self.herdr, "pane", "run", pane,
                     shlex.join([sys.executable, str(runner), "--request", str(launch_request)])]
