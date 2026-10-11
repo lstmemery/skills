@@ -13,6 +13,7 @@ from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fie
 from .retry import prepare_pi_run_profile
 from .transport import BudgetExpired, EffectUnknown, RateLimited
 from .model_ladder import billing_pool
+from .lifecycle import JobLifecycle
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
 
@@ -28,6 +29,7 @@ class Engine:
         self.transport = transport
         self.deadline = deadline
         self.admission = admission_store or AdmissionStore()
+        self.lifecycle = JobLifecycle()
         self.state = None
 
     def admission_config(self):
@@ -496,21 +498,9 @@ class Engine:
         while job["phase"] != "submitted" and job["pending_effect"] is None:
             if not self.acquire_admission(job):
                 return
-            if job["phase"] == "pending":
-                if job["pane_id"] is None:
-                    action = "split"
-                else:
-                    action = "jail" if job["spec"]["route"]["mode"] == "jail" else "start"
-            elif job["phase"] == "split":
-                action = "move"
-            elif job["phase"] == "moved":
-                if job.get("retry_profile") is not None:
-                    action = "retry_setup"
-                else:
-                    action = "jail" if job["spec"]["route"]["mode"] == "jail" else "start"
-            elif job["phase"] == "retry_ready":
-                action = "start"
-            else:
+            planned = self.lifecycle.step(job)
+            action = planned.effects[0].action if planned.effects else None
+            if action is None:
                 observation = job["observed"]
                 if observation is None:
                     self.observe(job)
