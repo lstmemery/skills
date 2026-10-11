@@ -1,7 +1,6 @@
 """Run-scoped retry configuration for managed workers."""
 
 import hashlib
-import json
 import os
 from pathlib import Path
 

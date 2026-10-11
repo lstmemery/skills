@@ -67,7 +67,7 @@ class DispositionInput:
 def _read_json(path, label):
     try:
         return records.load_json(path)
-    except FileNotFoundError as error:
+    except FileNotFoundError:
         records.invalid(f"missing {label} at {path}")
     except records.JobError as error:
         records.invalid(f"{label} at {path}: {error}")
