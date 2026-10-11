@@ -142,6 +142,7 @@ class Engine:
         job["collection"] = None
         job["collection_error"] = None
         job["issue"] = None
+        job["start_diagnostic"] = None
         return True
 
     def checkpoint(self):
@@ -187,7 +188,7 @@ class Engine:
                          "collection_error", "host_output", "worker_output", "issue", "exit_record"],
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
-                    "worker_disposition", "worker_disposition_override", "admission_wait"],
+                    "worker_disposition", "worker_disposition_override", "admission_wait", "start_diagnostic"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -208,6 +209,16 @@ class Engine:
             job.setdefault("worker_disposition", None)
             job.setdefault("worker_disposition_override", None)
             job.setdefault("admission_wait", None)
+            job.setdefault("start_diagnostic", None)
+            if job["start_diagnostic"] is not None:
+                diagnostic = fields(job["start_diagnostic"], ["command", "exit_code", "stdout", "stderr"],
+                                    label="managed start diagnostic")
+                text(diagnostic["command"], "managed start diagnostic command", 256)
+                integer(diagnostic["exit_code"], "managed start diagnostic exit code", -255, 255)
+                for stream in ("stdout", "stderr"):
+                    value = diagnostic[stream]
+                    if not isinstance(value, str) or "\0" in value or len(value) > 2048:
+                        raise JobError("conflict", f"managed start diagnostic {stream} is invalid")
             if type(job["admission_acquired"]) is not bool or type(job["rate_limit_seen"]) is not bool:
                 raise JobError("conflict", "stored admission flags must be booleans")
             if type(job["workspace_closed"]) is not bool:
@@ -352,7 +363,7 @@ class Engine:
                 "pending_effect": None, "history": [], "observed": None,
                 "activity_seen": False, "settled": False, "collection": None,
                 "collection_error": None, "host_output": host_output,
-                "worker_output": worker_output, "issue": None,
+                "worker_output": worker_output, "issue": None, "start_diagnostic": None,
                 "exit_record": str(self.root / "lifecycle" / spec["job_id"] / "exit.json")}
 
     def append_jobs(self, request, capabilities):
@@ -511,9 +522,13 @@ class Engine:
             self.checkpoint()
             return False
         except EffectUnknown as error:
+            if error.start_diagnostic is not None:
+                job["start_diagnostic"] = error.start_diagnostic
             job["issue"] = str(error)
             self.checkpoint()
             return False
+        if result.get("start_diagnostic") is not None:
+            job["start_diagnostic"] = result["start_diagnostic"]
         if action == "split":
             job["pane_id"] = result["pane_id"]
             job["phase"] = "split"
@@ -538,7 +553,8 @@ class Engine:
         else:
             job["phase"] = "submitted"
         job["history"].append({"action": action, "observed_at": now(), "pane_id": job["pane_id"]})
-        job["pending_effect"] = None
+        if not (action == "start" and result.get("launch_blocked") is True):
+            job["pending_effect"] = None
         self.checkpoint()
         return True
 
@@ -844,11 +860,6 @@ class Engine:
             job["issue"] = None
             job["history"].append({"action": "prompt", "reconciled_by": "observed visible Working state",
                                    "observed_at": now()})
-        elif codex_start and lifecycle == "blocked":
-            job["phase"] = "ready"
-            job["pending_effect"] = None
-            job["issue"] = observation.get("launch_issue", "Codex startup is blocked; inspect the owned pane")
-            job["history"].append({"action": "start", "reconciled_by": "observed launch dialog", "observed_at": now()})
         elif pending and pending["action"] == "jail" and lifecycle == "exited":
             job["phase"] = "submitted"
             job["pending_effect"] = None
@@ -868,7 +879,10 @@ class Engine:
         if self.retry_rate_limited_attempt(job, lifecycle, receipt_valid):
             return
         if job["pending_effect"]:
-            job["issue"] = "effect delivery remains unproven; it will not be replayed"
+            if codex_start and lifecycle == "blocked":
+                job["issue"] = observation.get("launch_issue", "Codex startup is blocked; effect delivery remains unproven")
+            else:
+                job["issue"] = "effect delivery remains unproven; it will not be replayed"
         elif lifecycle == "blocked":
             job["issue"] = observation.get("launch_issue", "worker needs input; approval dialogs remain with the coordinator")
         elif lifecycle == "unknown":
@@ -941,6 +955,7 @@ class Engine:
                          "attempt_id": job["attempt_id"], "resolved_model": job["resolved_model"],
                          "observed": job["observed"], "settled": job["settled"],
                          "pending_effect": job["pending_effect"], "issue": job["issue"],
+                         "start_diagnostic": job.get("start_diagnostic"),
                          "workspace_id": job.get("workspace_id"),
                          "workspace_closed": job.get("workspace_closed", False),
                          "worker_disposition": job.get("worker_disposition"),
