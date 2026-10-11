@@ -1,6 +1,6 @@
 import importlib.util
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shlex
 import sys
 import tempfile
@@ -13,7 +13,8 @@ PACKAGE = Path(__file__).resolve().parents[1]
 HERDR_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "herdr"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.records import JobError, digest, load_json, prepare, protected_paths_record, save
+from herdr_jobs.records import (JobError, digest, jail_context_path, load_json, prepare,
+                                protected_paths_record, save, validate_required_context)
 from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport, RateLimited
 
 
@@ -64,6 +65,10 @@ class TransportTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.jail_exports = ((self.root, PurePosixPath("/work")),)
+        self.jail_exports_patch = patch("herdr_jobs.records.JAIL_CONTEXT_EXPORTS", self.jail_exports)
+        self.jail_exports_patch.start()
+        self.addCleanup(self.jail_exports_patch.stop)
         self.adapter = object.__new__(NativeTransport)
         self.adapter.herdr = "herdr"
         self.adapter.orchestrator = "orchestrator"
@@ -703,9 +708,33 @@ class TransportTest(unittest.TestCase):
             calls.append((argv, check))
             return SimpleNamespace(returncode=23)
 
-        self.assertEqual(runner.execute(request, run_process=launch), 23)
+        self.assertEqual(runner.execute(request, run_process=launch,
+                                        jail_exports=self.jail_exports), 23)
         self.assertEqual(calls, [(request["argv"], False)])
         self.assertEqual(load_json(self.job["exit_record"])["exit_code"], 23)
+
+    def test_runner_rejects_host_readable_context_outside_jail_exports_before_launch(self):
+        module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
+        runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(runner)
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
+                   "argv": ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
+                   "exit_path": self.job["exit_record"],
+                   "required_context": [
+                       {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
+                       {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
+                   ],
+                   "protected_paths": protected_paths_record(["keys/"]), "editable_paths": []}
+        calls = []
+
+        outside_exports = ((self.root / "exported", PurePosixPath("/ctx")),)
+        with self.assertRaisesRegex(JobError, "outside.*jail-visible export"):
+            runner.execute(request, run_process=lambda argv, check: calls.append((argv, check))
+                           or SimpleNamespace(returncode=0), jail_exports=outside_exports)
+
+        self.assertEqual(calls, [])
 
     def test_runner_rejects_editable_parent_of_a_protected_path_before_launch(self):
         module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
@@ -724,9 +753,59 @@ class TransportTest(unittest.TestCase):
         calls = []
 
         with self.assertRaisesRegex(JobError, "protected"):
-            runner.execute(request, run_process=lambda argv, check: calls.append((argv, check)))
+            runner.execute(request, run_process=lambda argv, check: calls.append((argv, check)),
+                           jail_exports=self.jail_exports)
 
         self.assertEqual(calls, [])
+
+    def test_required_context_maps_paths_inside_an_export(self):
+        context_root = self.root / "bundle"
+        context_root.mkdir()
+        required = context_root / "tests" / "acceptance_test.py"
+        required.parent.mkdir()
+        required.write_text("assert True\n")
+        exports = ((context_root, PurePosixPath("/ctx")),
+                   (self.root / "work", PurePosixPath("/work")))
+
+        validated = validate_required_context(
+            [{"path": str(required), "kind": "test"}], jail_visible=True, jail_exports=exports)
+
+        self.assertEqual(validated[0]["path"], str(required.resolve()))
+        self.assertEqual(jail_context_path(validated[0]["path"], exports), "/ctx/tests/acceptance_test.py")
+
+    def test_required_context_rejects_a_host_readable_file_outside_exports(self):
+        outside = self.root / "outside" / "required_test.py"
+        outside.parent.mkdir()
+        outside.write_text("assert True\n")
+
+        with self.assertRaisesRegex(JobError, "outside.*jail-visible export"):
+            validate_required_context([{"path": str(outside), "kind": "test"}],
+                                      jail_visible=True,
+                                      jail_exports=((self.root / "bundle", PurePosixPath("/ctx")),))
+
+    def test_required_context_rejects_a_symlink_escape(self):
+        context_root = self.root / "bundle"
+        context_root.mkdir()
+        outside = self.root / "private_test.py"
+        outside.write_text("assert True\n")
+        escaped = context_root / "tests" / "escaped_test.py"
+        escaped.parent.mkdir()
+        escaped.symlink_to(outside)
+
+        with self.assertRaisesRegex(JobError, "outside.*jail-visible export"):
+            validate_required_context([{"path": str(escaped), "kind": "test"}],
+                                      jail_visible=True,
+                                      jail_exports=((context_root, PurePosixPath("/ctx")),))
+
+    def test_required_context_rejects_a_missing_file_inside_an_export(self):
+        context_root = self.root / "bundle"
+        context_root.mkdir()
+        missing = context_root / "fixtures" / "input.json"
+
+        with self.assertRaisesRegex(JobError, "required_context path is unavailable"):
+            validate_required_context([{"path": str(missing), "kind": "fixture"}],
+                                      jail_visible=True,
+                                      jail_exports=((context_root, PurePosixPath("/ctx")),))
 
 
 if __name__ == "__main__":

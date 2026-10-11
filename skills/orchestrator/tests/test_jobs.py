@@ -27,13 +27,16 @@ class JobsTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.jail_root = self.root / "test-jail"
+        self.jail_work = self.jail_root / "work"
+        self.jail_work.mkdir(parents=True)
         self.admission_dir = self.root / "shared-admission"
         isolate_admission_state(self, self.admission_dir)
         self.run = self.root / "run"
         self.task = self.root / "task ' $(data).md"
         self.task.write_text("Inspect the assigned fixture. Literal `printf secret` and $(touch SHOULD_NOT_EXIST).\n")
-        self.context_test = self.root / "acceptance_test.md"
-        self.context_fixture = self.root / "fixture-input.json"
+        self.context_test = self.jail_work / "acceptance_test.md"
+        self.context_fixture = self.jail_work / "fixture-input.json"
         self.context_test.write_text("The jailed worker must read this acceptance test.\n")
         self.context_fixture.write_text('{"fixture": true}\n')
         self.policy = self.root / "policy.json"
@@ -118,8 +121,10 @@ class JobsTest(unittest.TestCase):
         return args
 
     def call(self, operation="run", real=False, **kwargs):
+        env = os.environ.copy()
+        env["PII_JAIL_S0_TEST_ROOT"] = str(self.jail_root)
         process = subprocess.run(self.argv(operation, real, **kwargs), capture_output=True, text=True,
-                                 cwd=self.root, timeout=10)
+                                 cwd=self.root, timeout=10, env=env)
         self.assertEqual(process.stderr, "", process.stderr)
         return process.returncode, json.loads(process.stdout)
 
@@ -712,6 +717,24 @@ class JobsTest(unittest.TestCase):
         self.assertIn(str(self.context_test), prompt)
         self.assertIn("retry at most 2 times", prompt)
 
+    def test_jail_worker_brief_uses_exported_container_paths_for_required_context(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["task_kind"] = "deep_research"
+        manifest["jobs"][0]["required_context"] = [
+            {"path": str(self.context_test), "kind": "test", "purpose": "Jail acceptance test."},
+            {"path": str(self.context_fixture), "kind": "fixture", "purpose": "Jail input fixture."},
+        ]
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, result = self.call()
+
+        self.assertEqual(code, 0, result)
+        prompt = (self.root / "prompt-job0.txt").read_text()
+        self.assertIn("- /work/acceptance_test.md: Jail acceptance test. (test)", prompt)
+        self.assertIn("- /work/fixture-input.json: Jail input fixture. (fixture)", prompt)
+        self.assertNotIn(str(self.context_test), prompt)
+        self.assertNotIn(str(self.context_fixture), prompt)
+
     def test_worker_result_identity_mismatch_is_rejected_at_finish(self):
         manifest = json.loads(self.manifest.read_text())
         manifest["jobs"][0]["worker_result"] = {
@@ -1060,7 +1083,9 @@ class JobsTest(unittest.TestCase):
                 (self.root / "events.json").unlink(missing_ok=True)
                 self.write_jobs(1, ["deep_research"] if action == "jail" else None)
                 self.configure(crash_after=action)
-                first = subprocess.run(self.argv(), capture_output=True, timeout=10)
+                env = os.environ.copy()
+                env["PII_JAIL_S0_TEST_ROOT"] = str(self.jail_root)
+                first = subprocess.run(self.argv(), capture_output=True, timeout=10, env=env)
                 self.assertEqual(first.returncode, 91)
                 self.assertEqual(self.state()["jobs"][0]["pending_effect"]["action"], action)
                 self.call("resume")

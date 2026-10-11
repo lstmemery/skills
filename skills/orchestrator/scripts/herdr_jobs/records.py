@@ -5,7 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import stat
 import tempfile
@@ -14,6 +14,15 @@ from datetime import datetime, timezone
 
 WORKER_MODES = frozenset(("literal", "inferential"))
 CONTEXT_KINDS = frozenset(("test", "fixture", "source", "schema", "dependency", "document"))
+
+# run-jail.sh mounts these host sources into the worker at the corresponding
+# container roots. PII_JAIL_S0_TEST_ROOT mirrors jail-session.sh's test-only
+# root override; production launches use its fixed /var/lib/pii-jail root.
+_jail_root_value = os.environ.get("PII_JAIL_S0_TEST_ROOT", "/var/lib/pii-jail")
+JAIL_CONTEXT_EXPORTS = (
+    (Path(_jail_root_value) / "build/ctx", PurePosixPath("/ctx")),
+    (Path(_jail_root_value) / "work", PurePosixPath("/work")),
+) if _jail_root_value else ()
 
 # These controls are protected even when a caller omits an explicit path list.
 # The list is prompt data as well as a declaration checked at the launch boundary.
@@ -307,8 +316,23 @@ def _context_entries(value):
     return entries
 
 
-def validate_required_context(value, base=None, require_test_fixture=False, check_exists=True):
-    """Validate and resolve a jailed worker's required context manifest."""
+def jail_context_path(path, exports=None):
+    """Map an exported host path to the path visible inside the jail."""
+    host_path = _path_key(path)
+    mapped_exports = JAIL_CONTEXT_EXPORTS if exports is None else exports
+    for host_root, jail_root in mapped_exports:
+        host_root = _path_key(host_root)
+        try:
+            relative = host_path.relative_to(host_root)
+        except ValueError:
+            continue
+        return str(PurePosixPath(jail_root) / PurePosixPath(relative.as_posix()))
+    invalid(f"required_context path is outside jail-visible export roots: {path}")
+
+
+def validate_required_context(value, base=None, require_test_fixture=False, check_exists=True,
+                              jail_visible=False, jail_exports=None):
+    """Validate context paths and optionally require visibility through jail mounts."""
     entries = _context_entries(value)
     resolved = []
     seen = set()
@@ -319,6 +343,8 @@ def validate_required_context(value, base=None, require_test_fixture=False, chec
         if key in seen:
             invalid(f"required_context contains duplicate path: {original}")
         seen.add(key)
+        if jail_visible:
+            jail_context_path(path, jail_exports)
         if check_exists:
             if path.is_symlink() or not path.is_file():
                 invalid(f"required_context path is unavailable: {original}")
@@ -633,6 +659,7 @@ def prepare(manifest_path, policy_path):
             required_context = validate_required_context(
                 job["required_context"], base=manifest_path.parent,
                 require_test_fixture=route["mode"] == "jail",
+                jail_visible=route["mode"] == "jail",
             )
         elif route["mode"] == "jail":
             invalid(f"{job_id}: jailed work requires a required_context manifest with tests and fixtures")

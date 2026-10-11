@@ -315,7 +315,7 @@ class NativeTransport:
                     raise JobError("unavailable_capability",
                                    "jail default is not verified as gpt-6-astra at max effort")
                 validate_required_context(job.get("required_context"), base=job["cwd"],
-                                          require_test_fixture=True)
+                                          require_test_fixture=True, jail_visible=True)
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
             if requested_model is not None and job["job_id"] not in models:

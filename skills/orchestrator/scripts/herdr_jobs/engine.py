@@ -9,7 +9,7 @@ import uuid
 from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
                       ensure_task_admitted, integer, load_json, now, parse_json, read_regular, save,
-                      protected_paths_record, text, version)
+                      jail_context_path, protected_paths_record, text, version)
 from .retry import prepare_pi_run_profile
 from .transport import BudgetExpired, EffectUnknown, RateLimited
 from .model_ladder import billing_pool
@@ -448,8 +448,10 @@ class Engine:
         )
         context = spec.get("required_context")
         if context:
+            jail_mode = spec["route"]["mode"] == "jail"
             brief += "required_context:\n" + "\n".join(
-                f"- {entry['path']}: {entry['purpose']} ({entry['kind']})" for entry in context
+                f"- {jail_context_path(entry['path']) if jail_mode else entry['path']}: "
+                f"{entry['purpose']} ({entry['kind']})" for entry in context
             ) + "\n"
         optional_blocks = []
         if spec["route"]["mode"] == "jail":
