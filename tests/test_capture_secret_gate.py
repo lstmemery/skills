@@ -33,7 +33,7 @@ SCANNER_PATTERN = r'FAKESECRET_[A-Z0-9]{12}'
 
 FAKE_SCANNER = '''\
 #!{python}
-import hashlib, json, os, re, signal, sys, time
+import hashlib, json, os, re, shutil, signal, sys, time
 from pathlib import Path
 
 MODE = {mode!r}
@@ -41,6 +41,8 @@ LOG = Path({log!r})
 RAW = {raw!r}
 EXIT = {exit_code}
 PATTERN = re.compile({pattern!r})
+MUTATE = {mutate!r}
+RESERVE = {reserve!r}
 EXPECTED = ['--report-format', 'json', '--report-path', '-', '--redact', '--exit-code', '7',
             '--no-banner', '--no-color', '-l', 'error', '--max-target-megabytes', '512']
 
@@ -62,7 +64,16 @@ staged = {{str(path.relative_to(staging)): hashlib.sha256(path.read_bytes()).hex
           for path in sorted(staging.rglob('*')) if path.is_file()}}
 with LOG.open('a') as stream:
     stream.write(json.dumps({{'argv': args, 'staged': staged,
+                              'staged_bytes': {{str(path.relative_to(staging)): path.read_bytes().hex()
+                                               for path in sorted(staging.rglob('*')) if path.is_file()}},
                               'gitleaks_env': sorted(k for k in os.environ if k.startswith('GITLEAKS_'))}}) + '\\n')
+
+if MUTATE is not None:
+    path, data = MUTATE
+    Path(path).write_bytes(data)
+if RESERVE is not None:
+    destination, winner = RESERVE
+    shutil.copytree(winner, destination)
 
 if MODE == 'timeout':
     time.sleep(60)
@@ -118,9 +129,11 @@ class SecretGateCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     # -- fixtures ---------------------------------------------------------
-    def install_scanner(self, mode='scan', raw=b'', exit_code=0, pattern=SCANNER_PATTERN):
+    def install_scanner(self, mode='scan', raw=b'', exit_code=0, pattern=SCANNER_PATTERN,
+                        mutate=None, reserve=None):
         script = FAKE_SCANNER.format(python=sys.executable, mode=mode, log=str(self.log), raw=raw,
-                                     exit_code=exit_code, pattern=pattern, leak=SCANNER_SECRET)
+                                     exit_code=exit_code, pattern=pattern, leak=SCANNER_SECRET,
+                                     mutate=mutate, reserve=reserve)
         path = self.bin / 'gitleaks'
         path.write_text(script)
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -131,9 +144,11 @@ class SecretGateCase(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
-    def payload_args(self, before=None, after=None, authority=None, diff=b'', history=b'', extra_manifest=None):
+    def payload_args(self, before=None, after=None, authority=None, diff=b'', history=b'', extra_manifest=None,
+                     extra_blobs=None):
         """Build write_capture inputs with chosen bytes in each payload type."""
-        blobs, manifest = {}, {'before': {}, 'after': {}, 'authorities': [], 'capture_id': 'fixture'}
+        blobs = dict(extra_blobs or {})
+        manifest = {'before': {}, 'after': {}, 'authorities': [], 'capture_id': 'fixture'}
         for side, name, data in (('before', 'before.txt', before), ('after', 'after.txt', after)):
             if data is not None:
                 sha = CAPTURE.digest(data)
@@ -225,6 +240,35 @@ class PayloadTypeTests(SecretGateCase):
         self.assertEqual(sorted(r['rule'] for r in result['findings']),
                          ['github-token', 'gitleaks:fake-synthetic-rule'])
         self.assertEqual(result['total_findings'], 2)
+
+    def test_unreferenced_blobs_are_scanned_and_reported_for_both_detectors(self):
+        self.install_scanner('scan')
+        for secret in (BUILTIN_SECRET, SCANNER_SECRET):
+            with self.subTest(detector='builtin' if secret == BUILTIN_SECRET else 'scanner'):
+                data = f'note {secret}\n'.encode()
+                sha = hashlib.sha256(data).hexdigest()
+                outcome, out = self.gate(extra_blobs={sha: data})
+                result = self.assert_refused(outcome, out, secret)
+                self.assertEqual([hit['file'] for hit in result['findings']], [f'blob:{sha[:16]}'])
+                self.assertEqual(self.scanner_calls()[-1]['staged_bytes'][f'blobs/{sha}'], data.hex())
+
+    def test_builtin_findings_pin_value_fingerprints_without_exposing_values(self):
+        outcome, out = self.gate(scanner_env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'},
+                                 after=f'first line\nvalue {BUILTIN_SECRET}\n'.encode())
+        result = self.assert_refused(outcome, out, BUILTIN_SECRET)
+        self.assertEqual(result['findings'], [{'file': 'after:after.txt', 'line': 2, 'rule': 'github-token',
+                                              'length': len(BUILTIN_SECRET),
+                                              'sha256_prefix': hashlib.sha256(BUILTIN_SECRET.encode()).hexdigest()[:16]}])
+        self.assertEqual(result['total_findings'], 1)
+
+    def test_refusal_findings_are_sorted_capped_and_count_all_matches(self):
+        outcome, out = self.gate(scanner_env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'},
+                                 before=(f'b {BUILTIN_SECRET}\n' * 3).encode(),
+                                 after=(f'a {BUILTIN_SECRET}\n' * 22).encode())
+        result = self.assert_refused(outcome, out, BUILTIN_SECRET)
+        self.assertEqual(result['total_findings'], 25)
+        self.assertEqual([(hit['file'], hit['line'], hit['rule']) for hit in result['findings']],
+                         [('after:after.txt', line, 'github-token') for line in range(1, 21)])
 
     def test_end_to_end_refusal_through_the_cli_for_each_source(self):
         self.install_scanner('scan')
@@ -454,6 +498,16 @@ class InvalidCoordinateTests(SecretGateCase):
                 outcome, out = self.refuse_with(finding_row)
                 self.assert_failed(outcome, out)
 
+    def test_malformed_coordinate_types_fail_closed_for_both_success_statuses(self):
+        for exit_code in (0, 7):
+            for field in ('StartLine', 'EndLine', 'StartColumn', 'EndColumn'):
+                for value in (True, False, None, '1', 1.0):
+                    with self.subTest(exit_code=exit_code, field=field, value=value):
+                        report = row(**{field: value})
+                        self.install_scanner('raw', raw=json.dumps([report]).encode(), exit_code=exit_code)
+                        outcome, out = self.gate(diff=self.DIFF)
+                        self.assert_failed(outcome, out)
+
     def test_one_bad_row_fails_the_scan_even_beside_a_valid_one(self):
         self.install_scanner('raw', raw=json.dumps([row(), row(EndColumn=100)]).encode(), exit_code=7)
         outcome, out = self.gate(diff=self.DIFF)
@@ -468,8 +522,8 @@ class InvalidCoordinateTests(SecretGateCase):
 class ScannerPolicyTests(SecretGateCase):
     """Clean captures, a missing binary, and the explicit stdlib-only opt-in."""
 
-    def stage_repo(self):
-        repo = self.root / 'repo'
+    def stage_repo(self, name='repo'):
+        repo = self.root / name
         repo.mkdir()
         run = lambda *a: subprocess.run(['git', '-C', str(repo), *a], check=True, capture_output=True)
         run('init', '-q', '-b', 'main')
@@ -488,6 +542,7 @@ class ScannerPolicyTests(SecretGateCase):
         result = subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True,
                                 env=environment)
         self.assertTrue(result.stdout, result.stderr)
+        self.assertEqual(result.stderr, '', 'CLI must not forward scanner diagnostics')
         return result.returncode, json.loads(result.stdout)
 
     def test_clean_capture_scans_exactly_the_bytes_it_writes(self):
@@ -505,6 +560,197 @@ class ScannerPolicyTests(SecretGateCase):
         self.assertIn('manifest.json', written)
         self.assertEqual(call['gitleaks_env'], [], 'GITLEAKS_* configuration must not reach the scanner')
         self.assertFalse(Path(call['argv'][1]).exists(), 'scan staging directory must be removed')
+
+    def test_inventory_equivalence_across_modes_bytes_and_duplicate_sources(self):
+        self.install_scanner('scan')
+        cases = (('empty', b''), ('utf8', 'snowman \u2603\r\nlast line'.encode()),
+                 ('binary', b'\x00\xff\r\n\x80'))
+        for mode in ('wip', 'since', 'branch'):
+            for name, data in cases:
+                with self.subTest(mode=mode, bytes=name):
+                    repo = self.stage_repo(f'{mode}-{name}')
+                    base = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+                    (repo / 'readme.txt').unlink()
+                    (repo / 'space\n\u2603.txt').write_bytes(data)
+                    (repo / 'duplicate.txt').write_bytes(data)
+                    (repo / '.gitignore').write_bytes(b'ignored.txt\n')
+                    (repo / 'ignored.txt').write_text(SCANNER_SECRET + '\n')
+                    authority = self.root / f'authority-{mode}-{name}.md'
+                    authority.write_bytes(data)
+                    args = ['--mode', mode, '--authority', authority]
+                    if mode != 'wip':
+                        subprocess.run(['git', '-C', str(repo), 'add', '-A'], check=True, capture_output=True)
+                        subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'inventory fixture'],
+                                       check=True, capture_output=True)
+                        args += ['--base', base]
+                    out = self.root / f'capture-{mode}-{name}'
+                    code, result = self.cli('capture', '--repo', repo, '--out', out, *args)
+                    self.assertEqual((code, result['secret_scan']), (0, {'gitleaks': 'used'}))
+                    call = self.scanner_calls()[-1]
+                    written = {str(path.relative_to(out)): path.read_bytes().hex()
+                               for path in out.rglob('*') if path.is_file() and path.name != 'COMPLETE'}
+                    expected_blobs = {hashlib.sha256(raw).hexdigest() for raw in (b'hello\n', data, b'ignored.txt\n')}
+                    self.assertEqual(set(written), {'diff.patch', 'commits.txt', 'manifest.json'} |
+                                     {f'blobs/{sha}' for sha in expected_blobs})
+                    self.assertEqual(call['staged_bytes'], written, 'scan and storage must use identical payload bytes')
+                    manifest = json.loads((out / 'manifest.json').read_text())
+                    self.assertEqual(set(manifest['after']), {'.gitignore', 'space\n\u2603.txt', 'duplicate.txt'})
+                    sha = hashlib.sha256(data).hexdigest()
+                    self.assertEqual(manifest['after']['duplicate.txt']['sha256'], sha)
+                    self.assertEqual(manifest['after']['space\n\u2603.txt']['sha256'], sha)
+                    self.assertEqual(manifest['authorities'][0]['sha256'], sha)
+                    self.assertEqual(self.cli('verify', '--capture', out)[0], 0)
+                    self.assertFalse(Path(call['argv'][1]).exists())
+        self.assertEqual(len(self.scanner_calls()), 9)
+
+    def test_source_mutation_after_scan_does_not_change_saved_payloads(self):
+        repo = self.stage_repo()
+        self.install_scanner('scan', mutate=(str(repo / 'readme.txt'), (SCANNER_SECRET + '\n').encode()))
+        out = self.root / 'snapshot'
+        code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', out)
+        self.assertEqual((code, result['secret_scan']), (0, {'gitleaks': 'used'}))
+        self.assertEqual((repo / 'readme.txt').read_text(), SCANNER_SECRET + '\n')
+        self.assertEqual(self.cli('read', '--capture', out, '--path', 'readme.txt')[1]['text'], 'hello, world\n')
+        (call,) = self.scanner_calls()
+        written = {str(path.relative_to(out)): path.read_bytes().hex()
+                   for path in out.rglob('*') if path.is_file() and path.name != 'COMPLETE'}
+        self.assertEqual(call['staged_bytes'], written)
+        self.assertEqual(self.cli('verify', '--capture', out)[0], 0)
+        code, drift = self.cli('check', '--capture', out)
+        self.assertEqual((code, drift['outcome'], drift['fresh_review_required']), (3, 'drift', True))
+
+    def test_destination_reserved_during_scan_preserves_the_winning_capture(self):
+        repo = self.stage_repo()
+        winner = self.root / 'winner'
+        code, saved = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', winner,
+                               env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        self.assertEqual(code, 0, saved)
+        expected = {str(path.relative_to(winner)): path.read_bytes()
+                    for path in winner.rglob('*') if path.is_file()}
+        (repo / 'readme.txt').write_text('losing capture bytes\n')
+        out = self.root / 'contested'
+        self.install_scanner('scan', reserve=(str(out), str(winner)))
+        code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', out)
+        # A late mkdir collision is an OSError; the existing CLI maps it to unavailable.
+        self.assertEqual((code, result['outcome']), (5, 'unavailable'))
+        actual = {str(path.relative_to(out)): path.read_bytes() for path in out.rglob('*') if path.is_file()}
+        self.assertEqual(actual, expected, 'the losing writer must not replace any winning byte')
+        code, verified = self.cli('verify', '--capture', out)
+        self.assertEqual((code, verified['capture_id']), (0, saved['capture_id']))
+        self.assertEqual(list(self.root.glob('.review-*')), [])
+        (call,) = self.scanner_calls()
+        self.assertFalse(Path(call['argv'][1]).exists())
+
+    def test_before_only_allowlist_does_not_authorize_a_secret(self):
+        self.install_scanner('scan')
+        repo = self.stage_repo()
+        (repo / 'fixture.txt').write_text(BUILTIN_SECRET + '\n')
+        allowlist = repo / '.code-review-secrets-allow'
+        fingerprint = hashlib.sha256(BUILTIN_SECRET.encode()).hexdigest()
+        allowlist.write_text(f'# reviewed fixture\n{fingerprint.upper()}\tsynthetic example\n')
+        subprocess.run(['git', '-C', str(repo), 'add', '-A'], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'allowlisted fixture'], check=True, capture_output=True)
+        allowed = self.root / 'allowed'
+        code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', allowed)
+        self.assertEqual((code, result['secret_scan']), (0, {'gitleaks': 'used'}))
+        allowlist.unlink()
+        refused = self.root / 'before-only'
+        code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', refused)
+        self.assertEqual((code, result['outcome']), (6, 'secret_detected'))
+        self.assertEqual([hit['rule'] for hit in result['findings']], ['github-token'])
+        self.assertNotIn(BUILTIN_SECRET, json.dumps(result))
+        self.assertFalse(refused.exists())
+
+    def test_scanner_allowlist_uses_exact_byte_span_and_ignores_unredacted_report_fields(self):
+        repo = self.stage_repo()
+        value = SCANNER_SECRET.encode()
+        data = b'\xc3\xa9::' + value + b'\r\n'
+        sha = hashlib.sha256(data).hexdigest()
+        (repo / 'fixture.txt').write_bytes(data)
+        report = row(File='{STAGING}/blobs/' + sha, StartColumn=5, EndColumn=4 + len(value),
+                     Match=BUILTIN_SECRET, Secret=BUILTIN_SECRET, Message=SCANNER_SECRET,
+                     Description=SCANNER_SECRET)
+        self.install_scanner('raw', raw=json.dumps([report]).encode(), exit_code=7)
+        for name, allowed_bytes, expected_code in (('exact', value, 0), ('redacted', b'REDACTED', 6),
+                                                   ('neighboring-bytes', data, 6)):
+            with self.subTest(fingerprint=name):
+                fingerprint = hashlib.sha256(allowed_bytes).hexdigest()
+                (repo / '.code-review-secrets-allow').write_text(f'{fingerprint}\tsynthetic example\n')
+                out = self.root / name
+                code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', out)
+                self.assertEqual(code, expected_code, result)
+                self.assertNotIn(SCANNER_SECRET, json.dumps(result))
+                self.assertNotIn(BUILTIN_SECRET, json.dumps(result))
+                if expected_code == 0:
+                    self.assertEqual(result['secret_scan'], {'gitleaks': 'used'})
+                    self.assertEqual(self.cli('verify', '--capture', out)[0], 0)
+                else:
+                    self.assertEqual(result['findings'], [{'file': 'after:fixture.txt', 'line': 1,
+                                                          'rule': 'gitleaks:fake-rule'}])
+                    self.assertFalse(out.exists())
+
+    def test_denylist_prefix_boundaries_override_an_exact_allowlist(self):
+        self.install_scanner('scan')
+        repo = self.stage_repo()
+        (repo / 'fixture.txt').write_text(BUILTIN_SECRET + '\n')
+        fingerprint = hashlib.sha256(BUILTIN_SECRET.encode()).hexdigest()
+        (repo / '.code-review-secrets-allow').write_text(f'{fingerprint}\tsynthetic example\n')
+        denylist = self.root / 'fingerprints.txt'
+        for length in (8, 16, 64):
+            with self.subTest(prefix_length=length):
+                prefix = fingerprint[:length]
+                denylist.write_text(f'# known denied fixture\n\n{prefix.upper()}\n{prefix}\n')
+                out = self.root / f'denied-{length}'
+                code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', out,
+                                        env={CAPTURE.FINGERPRINT_ENV: str(denylist)})
+                self.assertEqual((code, result['outcome']), (6, 'secret_detected'))
+                self.assertEqual(result['findings'], [{'file': 'after:fixture.txt', 'line': 1,
+                                                      'rule': 'fingerprint-denylist', 'length': len(BUILTIN_SECRET),
+                                                      'sha256_prefix': fingerprint[:16]}])
+                self.assertNotIn(BUILTIN_SECRET, json.dumps(result))
+                self.assertFalse(out.exists())
+
+    def test_invalid_denylist_sources_are_input_errors_before_scanning(self):
+        self.install_scanner('scan')
+        repo = self.stage_repo()
+        locations = []
+        for index, data in enumerate((b'a' * 7, b'a' * 65, b'\xff')):
+            location = self.root / f'invalid-list-{index}'
+            location.write_bytes(data)
+            locations.append(location)
+        locations.append(self.root / 'missing-list')
+        valid = self.root / 'valid-list'
+        valid.write_text('a' * 64 + '\n')
+        linked = self.root / 'linked-list'
+        linked.symlink_to(valid)
+        locations.append(linked)
+        oversized = self.root / 'oversized-list'
+        with oversized.open('wb') as stream:
+            stream.truncate(CAPTURE.MAX_FILE + 1)
+        locations.append(oversized)
+        for index, location in enumerate(locations):
+            with self.subTest(source=location.name):
+                out = self.root / f'invalid-denylist-{index}'
+                code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', out,
+                                        env={CAPTURE.FINGERPRINT_ENV: str(location)})
+                self.assertEqual((code, result['outcome']), (2, 'invalid_input'))
+                self.assertFalse(out.exists())
+        self.assertEqual(self.scanner_calls(), [])
+
+    def test_invalid_allowlist_rows_are_input_errors_before_scanning(self):
+        self.install_scanner('scan')
+        repo = self.stage_repo()
+        rows = (b'\xff', b'a' * 63 + b'\treason\n', b'a' * 65 + b'\treason\n',
+                b'a' * 64 + b'\t \n', b'a' * 64 + b' reason\n')
+        for index, data in enumerate(rows):
+            with self.subTest(row=index):
+                (repo / '.code-review-secrets-allow').write_bytes(data)
+                out = self.root / f'invalid-allowlist-{index}'
+                code, result = self.cli('capture', '--repo', repo, '--mode', 'wip', '--out', out)
+                self.assertEqual((code, result['outcome'], result['path']),
+                                 (2, 'invalid_input', '.code-review-secrets-allow'))
+                self.assertFalse(out.exists())
+        self.assertEqual(self.scanner_calls(), [])
 
     def test_scanner_report_with_no_findings_is_not_a_failure_for_each_empty_shape(self):
         self.install_scanner('raw', raw=b'[]', exit_code=0)
