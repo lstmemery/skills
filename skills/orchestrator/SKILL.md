@@ -160,8 +160,10 @@ missing or uncertain receipts and artifacts remain incomplete.
    reconcile it first. Immediately before any authorized integration or merge,
    rerun the [integration preflight](references/review.md#prepare-an-inspectable-candidate)
    for the current target and candidate heads; proceed only when it returns
-   `outcome: ready`, and retain its report with the merge evidence. Then perform
-   only the authorized next action and verify its actual result. Record artifact
+   `outcome: ready`, and retain its report with the merge evidence. When the
+   target checkout has local changes, follow the [dirty checkout merge
+   procedure](references/review.md#close-or-merge). Then perform only the
+   authorized next action and verify its actual result. Record artifact
    retention and any pending decision before cleanup. Stop only work owned by
    this task. Preserve unlanded changes and pending review artifacts. A completed
    PR-creation task does not establish that its code was merged or its worktree
