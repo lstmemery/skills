@@ -1,0 +1,12 @@
+{
+  "name": "19",
+  "path": "/redacted/treehouse/pool/19/agents",
+  "status": "leased",
+  "branch": "",
+  "detached": true,
+  "flavor": "git",
+  "lease_id": "redacted-lease-id",
+  "lease_holder": "redacted-task-id",
+  "leased_at": "2026-10-11T09:41:26.760520671-07:00",
+  "processes": []
+}

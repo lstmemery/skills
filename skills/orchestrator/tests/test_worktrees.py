@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -30,6 +31,10 @@ class WorktreeAllocationTest(unittest.TestCase):
             self.bin / "treehouse",
             "#!/usr/bin/env python3\n"
             "import os, sys\n"
+            "if os.environ.get('TREEHOUSE_CALLS'):\n"
+            "    with open(os.environ['TREEHOUSE_CALLS'], 'a') as stream: stream.write(repr(sys.argv[1:]) + '\\n')\n"
+            "if os.environ.get('HOST_CALLS'):\n"
+            "    with open(os.environ['HOST_CALLS'], 'a') as stream: stream.write(repr(['treehouse', *sys.argv[1:]]) + '\\n')\n"
             "if sys.argv[1:] == ['status', '--json']:\n"
             "    sys.stdout.write(os.environ.get('STATUS_OUTPUT', ''))\n"
             "    raise SystemExit(0)\n"
@@ -43,6 +48,8 @@ class WorktreeAllocationTest(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import os, subprocess, sys\n"
             "with open(os.environ['GIT_CALLS'], 'a') as stream: stream.write(repr(sys.argv[1:]) + '\\n')\n"
+            "if os.environ.get('HOST_CALLS'):\n"
+            "    with open(os.environ['HOST_CALLS'], 'a') as stream: stream.write(repr(['git', *sys.argv[1:]]) + '\\n')\n"
             "raise SystemExit(subprocess.call([os.environ['REAL_GIT'], *sys.argv[1:]]))\n",
         )
 
@@ -54,7 +61,9 @@ class WorktreeAllocationTest(unittest.TestCase):
         env = dict(os.environ)
         env.update({"PATH": f"{self.bin}:{os.defpath}", "GET_OUTPUT": output,
                     "GET_STATUS": str(status), "STATUS_OUTPUT": status_output,
-                    "GIT_CALLS": str(self.git_calls), "REAL_GIT": self.real_git})
+                    "GIT_CALLS": str(self.git_calls), "TREEHOUSE_CALLS": str(self.root / "treehouse-calls"),
+                    "HOST_CALLS": str(self.root / "host-calls"),
+                    "REAL_GIT": self.real_git})
         return subprocess.run(
             [sys.executable, str(SCRIPT), "acquire", "--repo", str(repo or self.root),
              "--lease-holder", "task-1119", "--expected-base", expected_base],
@@ -357,6 +366,29 @@ class WorktreeAllocationTest(unittest.TestCase):
             "git_common_dir": str((repo / ".git").resolve()),
             "base_commit": base,
         })
+
+    def test_live_treehouse_allocator_shape_reconciles_before_git(self):
+        repo, worktree, base = self.git_fixture()
+        lease_data = json.loads((PACKAGE / "tests/fixtures/treehouse/get-lease.json").read_text())
+        lease_data["path"] = str(worktree)
+        lease_data["lease_id"] = "lease-fixture"
+        lease_data["lease_holder"] = "task-1119"
+        live_status = json.loads((PACKAGE / "tests/fixtures/treehouse/status-live.json").read_text())
+        live_status[0]["path"] = str(worktree)
+        live_status[0]["lease_id"] = "lease-fixture"
+        live_status[0]["lease_holder"] = "task-1119"
+        result = self.allocate(json.dumps(lease_data), status_output=json.dumps(live_status),
+                               repo=repo, expected_base=base)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["path"], str(worktree.resolve()))
+        calls = [ast.literal_eval(line) for line in (self.root / "treehouse-calls").read_text().splitlines()]
+        self.assertEqual(calls, [
+            ["get", "--lease", "--lease-holder", "task-1119", "--json"],
+            ["status", "--json"],
+        ])
+        host_calls = [ast.literal_eval(line) for line in (self.root / "host-calls").read_text().splitlines()]
+        self.assertEqual([call[0] for call in host_calls], ["treehouse", "treehouse", *("git",) * 6])
 
 
 if __name__ == "__main__":
