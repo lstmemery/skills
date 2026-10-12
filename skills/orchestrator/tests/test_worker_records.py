@@ -76,6 +76,98 @@ class WorkerRecordsTest(unittest.TestCase):
         )
         self.assertIn(expected_command, docs)
 
+    def test_check_brief_warns_for_known_leak_path_without_redaction_section(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Inspect TrueNAS system.general and wg0.\n")
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+        self.assertIn("Output redaction", process.stderr)
+
+    def test_check_brief_accepts_output_redaction_section(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Inspect the secrets inventory.\n\n## Output redaction\nUse named fields.\n")
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("BRIEF OK:", process.stdout)
+
+    def test_check_brief_does_not_accept_heading_inside_fenced_code(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "# Task brief\n\nInspect TrueNAS system.general data.\n\n"
+            "```md\n## Output redaction\n```\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+
+    def test_check_brief_accepts_heading_after_longer_closing_fence(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "Inspect TrueNAS system.general data.\n\n"
+            "````md\n## Output redaction\n`````\n\n"
+            "## Output redaction\nUse named fields.\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("BRIEF OK:", process.stdout)
+
+    def test_check_brief_ignores_heading_inside_tilde_fence(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "Inspect TrueNAS system.general data.\n\n"
+            "~~~md\n## Output redaction\n~~~\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+
+    def test_check_brief_unclosed_fence_runs_to_end_of_document(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "Inspect TrueNAS system.general data.\n\n"
+            "```md\n## Output redaction\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+
+    def test_brief_redaction_check_cannot_short_circuit_identity_validation(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Inspect TrueNAS system.general data.\n")
+        checked_brief = self.call("check-brief", brief)
+        self.assertEqual(checked_brief.returncode, 1)
+
+        result = self.root / "result.json"
+        result.write_text(json.dumps(self.make_result(assignment_revision=2)))
+        validated = self.call(
+            "validate-result", result,
+            "--task-id", "worker-a", "--revision", "1",
+        )
+
+        self.assertEqual(validated.returncode, 2)
+        self.assertIn("assignment_revision mismatch", validated.stderr)
+
+    def test_check_brief_ignores_briefs_without_known_leak_path_terms(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Summarize the release notes.\n")
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+
     def test_normalize_result_repairs_known_legacy_shapes_and_reports_changes(self):
         source = self.root / "result.json"
         output = self.root / "normalized.json"

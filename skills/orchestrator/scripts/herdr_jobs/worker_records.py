@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from . import records
@@ -97,6 +98,44 @@ def _check_identity(record, expected, label):
             f"{label} assignment_revision mismatch: expected {expected.assignment_revision}, "
             f"got {record['assignment_revision']!r}"
         )
+
+
+def check_brief_redaction(brief_path):
+    """Warn when a brief names known leak-path hosts without a redaction section."""
+    try:
+        content = Path(brief_path).read_text(encoding="utf-8")
+    except OSError as error:
+        records.invalid(f"cannot read brief at {brief_path}: {error.strerror or error}")
+    # Markdown fenced code is illustrative content, not a section of the brief.
+    # CommonMark closes a fence only with its opening character and at least
+    # its opening length. An unclosed fence extends through end of document.
+    outside_fences = []
+    fence_char = None
+    fence_length = 0
+    for line in content.splitlines():
+        if fence_char is None:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+            if opening:
+                marker, info = opening.groups()
+                if marker[0] == "~" or "`" not in info:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+                    continue
+            outside_fences.append(line)
+            continue
+
+        closing = re.match(r"^ {0,3}([`~]+)[ \t]*$", line)
+        if (closing and closing.group(1)[0] == fence_char
+                and len(closing.group(1)) >= fence_length
+                and len(set(closing.group(1))) == 1):
+            fence_char = None
+            fence_length = 0
+    content = "\n".join(outside_fences)
+    if not re.search(r"truenas|system\.general|\bwg0\b|secrets?", content, re.I):
+        return False
+    if re.search(r"^#{1,6}\s+Output redaction\s*$", content, re.I | re.M):
+        return False
+    return True
 
 
 def _validate_candidate(candidate):
@@ -565,6 +604,11 @@ def build_parser():
     result_parser.add_argument("--revision", type=positive_integer, required=True)
     result_parser.add_argument("--repository-changes", action="store_true")
 
+    brief_parser = commands.add_parser(
+        "check-brief", help="warn when a brief names known leak paths without output redaction"
+    )
+    brief_parser.add_argument("brief", type=Path)
+
     disposition_parser = commands.add_parser("record-disposition", help="write a terminal coordinator disposition")
     disposition_parser.add_argument("worker_dir", type=Path)
     disposition_parser.add_argument("--task-id", required=True)
@@ -610,6 +654,16 @@ def main(argv=None):
                 repository_changes=args.repository_changes,
             )
             print(f"VALID: {args.result_json}")
+            return 0
+        if args.command == "check-brief":
+            if check_brief_redaction(args.brief):
+                print(
+                    f"WARNING: {args.brief} mentions TrueNAS, system.general, wg0, "
+                    "or secrets but has no Output redaction section.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"BRIEF OK: {args.brief}")
             return 0
         if args.command == "record-disposition":
             disposition = DispositionInput(
