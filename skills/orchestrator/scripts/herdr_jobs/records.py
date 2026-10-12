@@ -410,7 +410,7 @@ def absolute(value, base):
 
 
 def policy_record(value):
-    # model_ladder imports the shared validators in records.
+    # Defer to break the records.py -> model_ladder.py -> records.py import cycle.
     from .model_ladder import billing_pool
 
     fields(value, ["schema_version", "default_concurrency", "max_concurrency", "topology", "routes", "runtime_kinds"],
@@ -531,7 +531,7 @@ def ensure_local_lane_admitted(local_config, task_class, local_lane_scope, job_i
 
 
 def prepare(manifest_path, policy_path):
-    # Defer this import to break the records/model_ladder import cycle.
+    # Defer to break the records.py -> model_ladder.py -> records.py import cycle.
     from .model_ladder import (HARNESS_ALIASES, billing_pool, complete_tuple,
                                load_ladder, select, validate_escalation,
                                validate_provider_harness)

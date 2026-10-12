@@ -164,6 +164,7 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
 
     environment = local_lane_environment(source_env, pane_id)
     policy = policy or policy_record(load_json(POLICY_PATH))
+    # Defer to break the engine.py -> local_lane.py -> admission_service.py -> engine.py import cycle.
     from .admission_service import AdmissionService
 
     admission_service = admission_service or AdmissionService()
