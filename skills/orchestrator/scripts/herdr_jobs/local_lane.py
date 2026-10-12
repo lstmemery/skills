@@ -115,7 +115,46 @@ def local_lane_instruction(task_class, local_lane_scope):
         "use them only within this scope and never disclose or pass credential material. "
         "Do not launch jail work or another agent. "
         "The coordinator independently runs the declared validator before accepting output"
+        "\nevidence_gate: investigatory claims cite their source and label unknowns; "
+        "before claiming something is absent, check both the host and jail namespaces, "
+        "or label the result unknown if either cannot be checked"
     )
+
+
+def verify_pane_worktree(pane_id, *, herdr="herdr", run_command=_run_host_command):
+    """Require the target pane cwd to be a registered linked Git worktree."""
+    code, output, _ = run_command([herdr, "pane", "get", pane_id])
+    if code:
+        raise JobError("unavailable_capability", "could not inspect the local-lane pane working directory")
+    try:
+        pane = parse_json(output).get("result", {}).get("pane")
+        cwd = pane.get("cwd") if isinstance(pane, dict) else None
+        if not isinstance(cwd, str) or not cwd:
+            raise ValueError("missing pane cwd")
+        worktree = Path(cwd).resolve(strict=True)
+        if not worktree.is_dir():
+            raise ValueError("pane cwd is not a directory")
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError, JobError) as error:
+        raise JobError("unavailable_capability", "local-lane pane cwd could not be verified") from error
+
+    def git(*args):
+        code, output, _ = run_command(["git", "-C", str(worktree), *args])
+        if code:
+            raise JobError("unavailable_capability", "local-lane pane cwd is not a verified Git worktree")
+        return output.decode("utf-8", errors="strict").strip()
+
+    try:
+        root = Path(git("rev-parse", "--show-toplevel")).resolve(strict=True)
+        common = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir")).resolve(strict=True)
+        listing = git("worktree", "list", "--porcelain", "-z")
+        registered = [Path(field[len("worktree "):]).resolve(strict=True)
+                      for field in listing.split("\0") if field.startswith("worktree ")]
+    except (OSError, RuntimeError, UnicodeError, JobError):
+        raise JobError("unavailable_capability", "local-lane pane cwd is not a verified Git worktree")
+    if root != worktree or common == root / ".git" or worktree not in registered or not registered or registered[0] == worktree:
+        raise JobError("unavailable_capability",
+                       "direct local-lane pane must use a registered linked worktree, not the primary checkout")
+    return str(worktree)
 
 
 def sanitize_pane_environment(pane_id, environment, *, herdr="herdr", run_command=_run_host_command):
@@ -156,13 +195,13 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
     telemetry_path = Path(text(str(telemetry_path), "telemetry file path", 4096)).absolute()
     if telemetry_path.exists() or telemetry_path.is_symlink():
         raise JobError("conflict", "direct local-lane telemetry file already exists")
+    environment = local_lane_environment(source_env, pane_id)
     telemetry = _direct_local_lane_telemetry(local_config)
     try:
         _create_telemetry_file(telemetry_path, telemetry)
     except FileExistsError as error:
         raise JobError("conflict", "direct local-lane telemetry file already exists") from error
 
-    environment = local_lane_environment(source_env, pane_id)
     policy = policy or policy_record(load_json(POLICY_PATH))
     # Defer to break the engine.py -> local_lane.py -> admission_service.py -> engine.py import cycle.
     from .admission_service import AdmissionService
@@ -198,6 +237,7 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
         raise JobError("unavailable_capability",
                        f"direct local-lane admission denied: {admission['reason']}")
     try:
+        verify_pane_worktree(pane_id, herdr=herdr, run_command=run_command)
         result = _launch_direct_local_lane(
             local_config, task_class, pane_id, agent_name, worker_prompt, environment,
             herdr, run_command, effect_context, telemetry, telemetry_path,

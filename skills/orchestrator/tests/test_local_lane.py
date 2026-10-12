@@ -17,6 +17,21 @@ from herdr_jobs.records import JobError, policy_record, load_json
 
 
 class LocalLaneTest(unittest.TestCase):
+    def fake_worktree_host(self, argv):
+        pane_cwd = str(Path.cwd())
+        if argv[:3] == ["herdr", "pane", "get"]:
+            return 0, json.dumps({"result": {"pane": {"cwd": pane_cwd}}}).encode(), b""
+        if argv[:2] == ["git", "-C"]:
+            if "--show-toplevel" in argv:
+                output = pane_cwd
+            elif "--git-common-dir" in argv:
+                output = str(Path.cwd().parents[1] / ".git")
+            else:
+                output = ("worktree /home/deadhand/agents/skills\0"
+                          f"worktree {pane_cwd}\0")
+            return 0, output.encode(), b""
+        return None
+
     def run_fixture(self, *, service=(0, "active", ""), gpu=(0, "3072\n", "")):
         calls = []
 
@@ -124,6 +139,9 @@ class LocalLaneTest(unittest.TestCase):
 
         def fake_host(argv, *, env=None):
             calls.append(argv)
+            worktree_result = self.fake_worktree_host(argv)
+            if worktree_result is not None:
+                return worktree_result
             return 0, b'{"result":{}}', b""
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
@@ -174,6 +192,9 @@ class LocalLaneTest(unittest.TestCase):
         def fake_host(argv, *, env=None):
             calls.append((argv, env))
             active_counts.append(AdmissionStore(admission_dir).status("llama-local")["active_count"])
+            worktree_result = self.fake_worktree_host(argv)
+            if worktree_result is not None:
+                return worktree_result
             if argv[:3] == ["herdr", "agent", "get"]:
                 agent = {"agent_status": agent_state["value"], "pane_id": "moved:1",
                          "agent": "pi", "name": "bounded-task"}
@@ -215,11 +236,13 @@ class LocalLaneTest(unittest.TestCase):
         self.assertEqual(telemetry["quota_signals"], [])
         self.assertEqual(telemetry["coordinator_grade"], "pending")
         self.assertEqual(telemetry["independent_validation"]["status"], "pending")
-        self.assertEqual([call[0][1:3] for call in calls], [
+        self.assertEqual([call[0][1:3] for call in calls if call[0][0] == "herdr"], [
+            ["pane", "get"],
             ["pane", "run"], ["pane", "wait-output"], ["agent", "start"], ["agent", "get"],
             ["agent", "prompt"], ["agent", "get"], ["pane", "read"], ["agent", "get"],
         ])
-        reset_command = calls[0][0][4]
+        reset_command = next(call[0][4] for call in calls
+                             if call[0][:3] == ["herdr", "pane", "run"])
         self.assertIn("env -i", reset_command)
         self.assertIn("HERDR_PANE_ID=moved:1", reset_command)
         expected_env_keys = {
@@ -227,21 +250,59 @@ class LocalLaneTest(unittest.TestCase):
             "HERDR_BIN_PATH", "HERDR_SOCKET_PATH", "PI_CODING_AGENT_DIR",
         }
         for argv, env in calls:
+            if env is None:
+                continue
             self.assertEqual(set(env), expected_env_keys)
             self.assertEqual(env["HOME"], "/home/fixture")
             self.assertEqual(env["PI_CODING_AGENT_DIR"], "/home/fixture/.pi/agent")
             self.assertNotIn("API_TOKEN", env)
             self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
-        self.assertEqual(calls[2][0][-5:], ["--provider", "llama-local", "--model", config["model"],
+        start_call = next(call[0] for call in calls if call[0][:3] == ["herdr", "agent", "start"])
+        prompt_call = next(call[0] for call in calls if call[0][:3] == ["herdr", "agent", "prompt"])
+        self.assertEqual(start_call[-5:], ["--provider", "llama-local", "--model", config["model"],
                                            "--approve"])
-        self.assertEqual(calls[4][0][3], "bounded-task")
-        self.assertNotIn("--wait", calls[4][0])
-        self.assertNotIn("--timeout", calls[4][0])
-        worker_prompt = calls[4][0][4]
+        self.assertEqual(prompt_call[3], "bounded-task")
+        self.assertNotIn("--wait", prompt_call)
+        self.assertNotIn("--timeout", prompt_call)
+        worker_prompt = prompt_call[4]
         self.assertIn("task_class: summary", worker_prompt)
         self.assertIn('"credentials_in_environment": false', worker_prompt)
         self.assertIn("Do not access network, credentials, secrets, auth files, or environment", worker_prompt)
+        self.assertIn("evidence_gate: investigatory claims cite their source and label unknowns", worker_prompt)
+        self.assertIn("check both the host and jail namespaces", worker_prompt)
         self.assertIn("Summarize the supplied fixture.", worker_prompt)
+
+    def test_direct_start_refuses_primary_checkout_before_pane_reset(self):
+        policy = policy_record(load_json(local_lane.POLICY_PATH))
+        config = policy["local_lane"]
+        scope = {"network_access": False, "credential_access": False,
+                 "credentials_in_environment": False, "destructive_actions": False}
+        calls = []
+
+        def fake_host(argv, *, env=None):
+            calls.append(argv)
+            if argv[:3] == ["herdr", "pane", "get"]:
+                return 0, json.dumps({"result": {"pane": {"cwd": "/home/deadhand/agents/skills"}}}).encode(), b""
+            if argv[0] == "git":
+                if "--show-toplevel" in argv:
+                    return 0, b"/home/deadhand/agents/skills", b""
+                if "--git-common-dir" in argv:
+                    return 0, b"/home/deadhand/agents/skills/.git", b""
+                return 0, b"worktree /home/deadhand/agents/skills\0", b""
+            return 0, b'{"result":{}}', b""
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}), \
+                    self.assertRaisesRegex(JobError, "linked worktree"):
+                local_lane.start_direct_local_lane(
+                    config, task_class="summary", local_lane_scope=scope,
+                    pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                    telemetry_path=Path(admission_dir) / "telemetry.json",
+                    source_env={"HOME": "/home/fixture", "PATH": "/bin"},
+                    run_command=fake_host,
+                )
+        self.assertEqual(calls[0][:3], ["herdr", "pane", "get"])
+        self.assertFalse(any(argv[:3] == ["herdr", "pane", "run"] for argv in calls))
 
     def test_direct_start_retains_shared_admission_after_ambiguous_host_start(self):
         policy = policy_record(load_json(local_lane.POLICY_PATH))
@@ -254,6 +315,9 @@ class LocalLaneTest(unittest.TestCase):
         }
 
         def fake_host(argv, *, env=None):
+            worktree_result = self.fake_worktree_host(argv)
+            if worktree_result is not None:
+                return worktree_result
             if argv[:3] == ["herdr", "agent", "start"]:
                 return 1, b"", b"start failed"
             if argv[:3] == ["herdr", "agent", "get"]:
@@ -307,6 +371,9 @@ class LocalLaneTest(unittest.TestCase):
         observed_effects = []
 
         def fake_host(argv, *, env=None):
+            worktree_result = self.fake_worktree_host(argv)
+            if worktree_result is not None:
+                return worktree_result
             if argv[:3] == ["herdr", "agent", "get"]:
                 leases = AdmissionStore(admission_dir).status("llama-local")["leases"]
                 observed_effects.append(leases[0].get("pending_effect"))
@@ -360,6 +427,9 @@ class LocalLaneTest(unittest.TestCase):
         }
 
         def fake_host(argv, *, env=None):
+            worktree_result = self.fake_worktree_host(argv)
+            if worktree_result is not None:
+                return worktree_result
             if argv[:3] == ["herdr", "pane", "run"]:
                 return 1, b"", b"pane run failed before agent start"
             return 0, b'{"result":{}}', b""
