@@ -1,0 +1,43 @@
+{
+  "acceptance": "pending",
+  "active_jobs": 1,
+  "batch_state": "active",
+  "collection_complete": false,
+  "concurrency": 1,
+  "jobs": [
+    {
+      "admission_acquired": true,
+      "admission_wait": null,
+      "agent_name": "c9-aaaaaaaaaaaaaaaaaaaaaaaa",
+      "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "collection": null,
+      "collection_error": null,
+      "issue": null,
+      "job_id": "compatibility-job",
+      "model": "default",
+      "observed": null,
+      "pane_id": "pane-new",
+      "pending_effect": null,
+      "phase": "submitted",
+      "provider": "codex",
+      "resolved_model": null,
+      "route": {
+        "mode": "agent",
+        "runtime": "codex"
+      },
+      "settled": false,
+      "start_diagnostic": null,
+      "worker_disposition": null,
+      "workspace_closed": false,
+      "workspace_id": "workspace-1"
+    }
+  ],
+  "provider_active": {
+    "codex": 1
+  },
+  "request_id": "compatibility-request",
+  "retry_override": null,
+  "run_dir": "$RUN_DIR",
+  "schema_version": 1,
+  "updated_at": "2030-01-01T00:00:00+00:00"
+}
