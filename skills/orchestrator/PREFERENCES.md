@@ -69,12 +69,14 @@ acceptance of worker output.
   selected.
 - When the user names `omp`, launch `omp`. Treat it as a distinct harness from
   `pi`; register a missing process adapter when permitted, rather than substitute.
+- Effort cap (Matt 2026-10-12): `gpt-6-astra` and Claude Opus 5.5 never run above
+  xhigh, in or out of the jail; pass xhigh explicitly where a route defaults higher.
 - "omp-train" with no harness named means Claude Opus 5.5 at xhigh effort:
   `omp-train --claude -p "…"` (the jail's managed Claude settings pin that
   model and effort); that remains the jailed default for shopping. Deep
   research, and an explicit no-harness `omp-train` for research work, uses
-  the jailed Codex research default instead: `gpt-6-astra` at max effort
-  (user instruction 2026-10-03; never substitute another model or effort).
+  the jailed Codex research default instead: `gpt-6-astra` at xhigh effort
+  (user instruction 2026-10-03, effort capped at xhigh 2026-10-12; never substitute another model or effort).
   Research workers keep their worker contract, including the mandatory
   independent source/claim check and the same jail privacy guard.
   The managed Herdr job helper's jail route is Codex-only (schema v1), so
@@ -82,7 +84,7 @@ acceptance of worker output.
   work (shopping) launches with the host pane-command route. Exact jail
   model selection there is unsupported until its separate catalog is
   verified, so confirm at admission that the jail's runtime default is
-  `gpt-6-astra` at max effort; if it cannot be confirmed, hold the launch —
+  `gpt-6-astra` at xhigh effort; if it cannot be confirmed, hold the launch —
   do not substitute.
   Managed jailed Codex jobs use optional `task_class` for their per-run
   stream idle timeout: `short_routine` and missing or unknown classes use
