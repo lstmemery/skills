@@ -18,6 +18,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
+from herdr_jobs.admission import AdmissionStore
 from support import isolate_admission_state
 from herdr_jobs.records import digest, encoded
 
@@ -74,6 +75,10 @@ class JobsTest(unittest.TestCase):
                     acceptance.write_text("# Local lane acceptance fixture.\n")
                     job.update(
                         local_lane=True, writes_repository=True,
+                        task_class="summary",
+                        local_lane_scope={"network_access": False, "credential_access": False,
+                                          "credentials_in_environment": False,
+                                          "destructive_actions": False},
                         repository_worktree={"schema_version": 1, "path": str(self.root),
                                              "lease_id": f"lease-{index}", "lease_holder": "test-request",
                                              "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
@@ -107,6 +112,10 @@ class JobsTest(unittest.TestCase):
             acceptance.write_text("# Local lane acceptance fixture.\n")
             job.update(
                 local_lane=True,
+                task_class="summary",
+                local_lane_scope={"network_access": False, "credential_access": False,
+                                  "credentials_in_environment": False,
+                                  "destructive_actions": False},
                 repository_worktree={"schema_version": 1, "path": str(self.root),
                                      "lease_id": "lease-added", "lease_holder": "test-request",
                                      "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
@@ -402,6 +411,12 @@ class JobsTest(unittest.TestCase):
         self.assertIsNotNone(telemetry["ended_at"])
         self.assertEqual(telemetry["continuation_count"], 0)
         self.assertEqual(telemetry["coordinator_grade"], "pending")
+        prompt = (self.root / "prompt-job0.txt").read_text()
+        self.assertIn("task_class: summary", prompt)
+        self.assertIn('"credentials_in_environment": false', prompt)
+        self.assertIn("trivial, self-contained, validator-checkable", prompt)
+        self.assertIn("Do not access network, credentials, secrets, auth files, or environment", prompt)
+        self.assertIn("Configured MCP tools and extensions remain available", prompt)
 
         code, ungraded = self.call("finish")
 
@@ -418,6 +433,26 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(telemetry["independent_validation"]["exit_code"], 0)
         self.assertEqual(sum(event["action"] == "independent_validator"
                              for event in self.events()), 2)
+
+    def test_preexisting_quota_backoff_is_checkpointed_before_fake_host_launch(self):
+        model = "qwen3.8-27b-uncensored"
+        backoff = AdmissionStore(self.admission_dir).note_rate_limit(
+            "llama-local", model, 3600, "fixture")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model=model, effort="medium")
+
+        code, _ = self.call(wait_seconds=0.3)
+
+        self.assertEqual(code, 0)
+        self.assertFalse((self.root / "events.json").exists())
+        job = self.state()["jobs"][0]
+        self.assertEqual(job["admission_wait"]["retry_at"], backoff["retry_at"])
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
+        signals = telemetry["quota_signals"]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual((signals[0]["kind"], signals[0]["source"],
+                          signals[0]["provider"], signals[0]["retry_at"]),
+                         ("backoff", "admission", "llama-local", backoff["retry_at"]))
+        self.assertTrue(signals[0]["observed_at"])
 
     def test_local_lane_cannot_be_accepted_when_independent_validator_fails(self):
         self.write_jobs(1, runtime="pi", provider="llama-local",

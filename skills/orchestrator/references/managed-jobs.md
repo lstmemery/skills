@@ -71,7 +71,7 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator`, `local_lane_scope` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
@@ -90,6 +90,19 @@ The `local_lane` flag is a deliberate opt-in for an ordinary host job outside
 the integer ladder. It requires the complete override tuple
 `runtime: pi`, `provider: llama-local`, `model: qwen3.8-27b-uncensored`, and
 `effort: medium`; do not include `model_level`, fallback, or escalation fields.
+It also requires `task_class` from the policy allowlist: `triage`, `summary`,
+`contract_artifact`, `bounded_code_edit`, `inventory`, or
+`local_file_analysis`. A missing or unsupported class is refused during
+request preparation, before host preflight or launch. These classes are for
+trivial, self-contained, validator-checkable work with supplied local inputs;
+networked, credentialed, destructive, and review-verdict tasks are excluded.
+Each request must also declare `local_lane_scope` with `network_access`,
+`credential_access`, `credentials_in_environment`, and `destructive_actions`
+all set to `false`; any missing or true field is refused during preparation.
+Do not put credentials or secrets in task files or override instructions. The
+final prompt is checked for common secret-value patterns before launch. The
+worker instructions prohibit reading the process environment or secret files;
+the launcher adds no credential values to the worker prompt.
 The job must set `writes_repository: true`, use its recorded throwaway linked
 worktree for `cwd`, declare acceptance tests, and provide
 `independent_validator: {"argv": ["...", "{output_dir}"]}`. The command is
@@ -103,8 +116,10 @@ jail.
 Pi starts with its normal `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), so its
 configured MCP servers and extensions remain available. The local route does
 not add `--no-mcp` or `--no-extensions`, replace the agent directory, or edit
-live Pi configuration. Read-only setup inspection and any future config
-changes belong in the task's `live-config-proposal.md`.
+live Pi configuration. Configured tools remain available, but their use must
+stay within the declared bounded class and must not disclose credential
+material. Read-only setup inspection and any future config changes belong in
+the task's `live-config-proposal.md`.
 
 For a jailed Codex job, optional `task_class` selects the per-run provider
 stream idle timeout from `launch-policy.json`: `short_routine` uses 300000 ms

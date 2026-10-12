@@ -358,6 +358,23 @@ class TransportTest(unittest.TestCase):
         self.assertNotIn("--no-mcp", start)
         self.assertNotIn("--no-extensions", start)
 
+    def test_local_lane_refuses_secret_material_in_the_prompt_before_start(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="pi", provider="llama-local", route={"mode": "agent", "runtime": "pi"},
+                         local_lane=True, override={"effort": "medium"})
+        self.job["resolved_model"] = "qwen3.8-27b-uncensored"
+
+        prompts = (
+            "Use API_TOKEN=secret-value for authentication",
+            "-----BEGIN " + "PRIVATE KEY-----\nfixture-key\n-----END PRIVATE KEY-----",
+        )
+        with patch("herdr_jobs.transport.command", fake.command):
+            for prompt in prompts:
+                with self.subTest(prompt=prompt[:20]), self.assertRaisesRegex(JobError, "secret-like material"):
+                    self.adapter.effect("start", self.job, prompt)
+
+        self.assertEqual(fake.calls, [])
+
     def test_claude_effort_maps_without_an_explicit_model(self):
         fake = FakeHerdr()
         self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"},

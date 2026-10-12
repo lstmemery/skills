@@ -11,6 +11,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.admission import AdmissionStore
+from herdr_jobs.engine import Engine, task_telemetry
 from herdr_jobs.model_ladder import load_ladder, native_arguments, provider_arguments, select
 from herdr_jobs.records import JobError, policy_record, prepare
 from herdr_jobs.transport import catalog_models, pi_catalog
@@ -77,7 +78,7 @@ class LadderTest(unittest.TestCase):
         fixture.adapter.binding["supported_kinds"] = ["codex", "pi", "claude"]
         return fixture
 
-    def local_lane(self, **extra):
+    def local_lane(self, task_class="summary", include_scope=True, **extra):
         acceptance = self.root / "acceptance-test.py"
         acceptance.write_text("# Independent acceptance fixture.\n")
         repository_worktree = {"schema_version": 1, "path": str(self.root),
@@ -91,11 +92,18 @@ class LadderTest(unittest.TestCase):
             override={"instruction": "Use the explicitly approved local route.", "runtime": "pi",
                       "model": "qwen3.8-27b-uncensored", "provider": "llama-local", "effort": "medium"},
         )
+        if task_class is not None:
+            values["task_class"] = task_class
+        if include_scope:
+            values["local_lane_scope"] = {
+                "network_access": False, "credential_access": False,
+                "credentials_in_environment": False, "destructive_actions": False,
+            }
         values.update(extra)
         return self.prepared(**values)
 
     def test_local_lane_is_explicit_fixed_tuple_outside_integer_ladder(self):
-        local = self.local_lane()
+        local = self.local_lane(task_class="summary")
         self.assertTrue(local["local_lane"])
         self.assertEqual((local["route"], local["provider"], local["model"],
                           local["model_route"]["level"], local["model_route"]["choice"]),
@@ -115,7 +123,31 @@ class LadderTest(unittest.TestCase):
             ({"model_level": 1}, "outside the integer model ladder"),
         ):
             with self.subTest(extra=extra), self.assertRaisesRegex(JobError, message):
-                self.local_lane(**extra)
+                self.local_lane(task_class="summary", **extra)
+
+    def test_local_lane_requires_one_of_the_bounded_task_classes(self):
+        with self.assertRaisesRegex(JobError, "local_lane requires an allowlisted task_class"):
+            self.local_lane(task_class=None)
+        for task_class in ("review_verdict", "networked_research", "credentialed_operation",
+                           "destructive_action", "unlisted"):
+            with self.subTest(task_class=task_class), self.assertRaisesRegex(JobError, "task_class"):
+                self.local_lane(task_class=task_class)
+        for task_class in ("triage", "summary", "contract_artifact", "bounded_code_edit",
+                           "inventory", "local_file_analysis"):
+            with self.subTest(task_class=task_class):
+                self.assertTrue(self.local_lane(task_class=task_class)["local_lane"])
+
+    def test_local_lane_requires_an_explicit_safe_scope_declaration(self):
+        with self.assertRaisesRegex(JobError, "requires an explicit local_lane_scope"):
+            self.local_lane(include_scope=False)
+        for unsafe_scope in ("network_access", "credential_access",
+                             "credentials_in_environment", "destructive_actions"):
+            with self.subTest(unsafe_scope=unsafe_scope):
+                scope = {"network_access": False, "credential_access": False,
+                         "credentials_in_environment": False, "destructive_actions": False}
+                scope[unsafe_scope] = True
+                with self.assertRaisesRegex(JobError, "local_lane_scope must exclude"):
+                    self.local_lane(local_lane_scope=scope)
 
     def test_quota_or_operational_failure_cannot_authorize_escalation(self):
         for category in ("operational", "quota"):
@@ -141,6 +173,35 @@ class LadderTest(unittest.TestCase):
         default = self.prepared()
         self.assertEqual(default["model_route"]["level"], 1)
         self.assertNotIn("0,", self.csv.read_text().splitlines())
+
+    def test_existing_admission_backoff_is_recorded_once_in_quota_telemetry(self):
+        class ExistingBackoff:
+            def acquire(self, provider, model, lease_id, cap, request_id, bypass_admission=False):
+                return {"admitted": False, "lease_held": False, "reason": "backoff",
+                        "provider": provider, "provider_active": 0, "cap": cap,
+                        "retry_at": 1900000000.0}
+
+        engine = Engine(self.root, object(), object(), admission_store=ExistingBackoff())
+        engine.state = {"request": {"request_id": "task-1", "policy": {
+            "provider_admission": {"default_provider_cap": 4,
+                                    "provider_caps": {"llama-local": 1}}}}}
+        spec = {"local_lane": True, "route": {"runtime": "pi"},
+                "model_route": {"lane": "local_lane", "choice": "explicit_opt_in",
+                                "level": None, "effort": "medium"},
+                "override": {"effort": "medium"}, "model": "qwen3.8-27b-uncensored"}
+        job = {"provider": "llama-local", "admission_model": "qwen3.8-27b-uncensored",
+               "admission_lease_id": "lease-1", "admission_acquired": False,
+               "telemetry": task_telemetry(spec, "qwen3.8-27b-uncensored", "llama-local")}
+
+        self.assertFalse(engine.acquire_admission(job))
+        self.assertFalse(engine.acquire_admission(job))
+        self.assertEqual(job["admission_wait"]["retry_at"], 1900000000.0)
+        signals = job["telemetry"]["quota_signals"]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual((signals[0]["kind"], signals[0]["source"],
+                          signals[0]["provider"], signals[0]["retry_at"]),
+                         ("backoff", "admission", "llama-local", 1900000000.0))
+        self.assertTrue(signals[0]["observed_at"])
 
     def test_all_sixteen_tuples_and_native_start_arguments(self):
         levels = load_ladder(self.csv)

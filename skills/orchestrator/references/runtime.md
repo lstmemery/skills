@@ -180,9 +180,20 @@ disable these resources for the local route.
 
 The managed equivalent is an ordinary job with `local_lane: true`, the exact
 Pi/`llama-local`/Qwen/medium tuple, a repository worktree, named acceptance
-tests, and `independent_validator.argv` containing `{output_dir}`. Its
-preflight, single-slot admission, telemetry, and finish-time validation use
-the same policy as direct launches; see [managed jobs](managed-jobs.md).
+tests, an allowlisted `task_class` (`triage`, `summary`, `contract_artifact`,
+`bounded_code_edit`, `inventory`, or `local_file_analysis`), and
+`independent_validator.argv` containing `{output_dir}`. Refuse missing or
+unsupported classes before launch. The class scope is trivial, self-contained,
+validator-checkable work on supplied local inputs; do not use the route for
+networked, credentialed, destructive, or review-verdict tasks. Do not place
+credentials or secrets in the task prompt or inspect them in the process
+environment. Each request declares `local_lane_scope` with
+`network_access`, `credential_access`, `credentials_in_environment`, and
+`destructive_actions` all false; the helper refuses any omitted or enabled
+scope. The configured MCP and extension resources remain available and must
+stay within the declared class. Its preflight, single-slot admission, telemetry,
+and finish-time validation use the same policy as direct launches; see
+[managed jobs](managed-jobs.md).
 
 When a direct worker reports HTTP 429 or a rate-limit response, record its
 Retry-After or reset metadata before another start, then release the completed

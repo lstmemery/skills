@@ -11,7 +11,7 @@ from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fie
                       ensure_task_admitted, integer, load_json, now, parse_json, read_regular, save,
                       jail_context_path, protected_paths_record, text, version)
 from .retry import prepare_pi_run_profile
-from .transport import BudgetExpired, EffectUnknown, RateLimited
+from .transport import BudgetExpired, EffectUnknown, RateLimited, contains_secret_material
 from .model_ladder import billing_pool
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
@@ -139,6 +139,20 @@ class Engine:
             job["admission_wait"] = {"reason": result["reason"], "provider": result["provider"],
                                       "provider_active": result["provider_active"], "cap": result["cap"],
                                       "retry_at": result["retry_at"]}
+            if result["reason"] == "backoff":
+                signal = {"kind": "backoff", "source": "admission",
+                          "provider": result["provider"], "observed_at": now(),
+                          "retry_at": result["retry_at"]}
+                already_recorded = any(
+                    isinstance(item, dict)
+                    and item.get("kind") == signal["kind"]
+                    and item.get("source") == signal["source"]
+                    and item.get("provider") == signal["provider"]
+                    and item.get("retry_at") == signal["retry_at"]
+                    for item in job["telemetry"]["quota_signals"]
+                )
+                if not already_recorded:
+                    job["telemetry"]["quota_signals"].append(signal)
         else:
             job["admission_wait"] = None
         if not result["admitted"] and result["reason"] == "backoff" and result["lease_held"]:
@@ -498,6 +512,16 @@ class Engine:
 
     def prompt(self, job):
         spec = job["spec"]
+        if spec.get("local_lane") is True:
+            allowed_task_classes = self.state["request"]["policy"]["local_lane"]["allowed_task_classes"]
+            if spec.get("task_class") not in allowed_task_classes:
+                raise JobError("invalid_input", "local_lane requires an allowlisted task_class before launch")
+            scope = spec.get("local_lane_scope")
+            expected_scope = {"network_access", "credential_access",
+                              "credentials_in_environment", "destructive_actions"}
+            if (not isinstance(scope, dict) or set(scope) != expected_scope
+                    or any(value is not False for value in scope.values())):
+                raise JobError("invalid_input", "local_lane requires an explicit safe scope declaration before launch")
         worker_result = spec.get("worker_result")
         identity = worker_result or {
             "task_id": spec["job_id"],
@@ -560,7 +584,17 @@ class Engine:
             )
         if spec.get("local_lane") is True:
             optional_blocks.append(
-                "local_lane: explicit opt-in outside the integer ladder; use only the assigned throwaway worktree; do not launch jail work or another agent; Pi's configured agent directory supplies normal MCP and extension resources; do not disable them; the coordinator independently runs the declared validator before accepting output"
+                f"local_lane: task_class: {spec['task_class']}; "
+                f"declared_scope: {encoded(spec['local_lane_scope']).decode()}; "
+                "this allowlisted class is limited to trivial, self-contained, "
+                "validator-checkable work using supplied local inputs in the assigned throwaway worktree. "
+                "Do not access network, credentials, secrets, auth files, or environment; "
+                "do not perform destructive actions or review verdicts. "
+                "Never include a credential or secret in the prompt or output. "
+                "Configured MCP tools and extensions remain available under the user's configuration; "
+                "use them only within this scope and never disclose or pass credential material. "
+                "Do not launch jail work or another agent. "
+                "The coordinator independently runs the declared validator before accepting output"
             )
         if spec.get("tracker_writes"):
             optional_blocks.append(
@@ -596,11 +630,14 @@ class Engine:
                 "A coordinator-declared independent_validator runs against this output directory during finish; "
                 "the coordinator must also record accepted, rework, or rejected after reviewing its result.\n"
             )
-        return (f"{instructions}{spec['task']}\n\nManaged-job output contract:\n"
-                f"Expected result: {spec['output_expectation']}\n"
-                f"Output directory: {job['worker_output']}\n"
-                f"Telemetry path: {Path(job['worker_output']) / 'telemetry.json'}\n"
-                + brief + worker_contract + telemetry_contract + output_contract + encoded(receipt).decode() + "\n")
+        prompt = (f"{instructions}{spec['task']}\n\nManaged-job output contract:\n"
+                  f"Expected result: {spec['output_expectation']}\n"
+                  f"Output directory: {job['worker_output']}\n"
+                  f"Telemetry path: {Path(job['worker_output']) / 'telemetry.json'}\n"
+                  + brief + worker_contract + telemetry_contract + output_contract + encoded(receipt).decode() + "\n")
+        if spec.get("local_lane") is True and contains_secret_material(prompt):
+            raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
+        return prompt
 
     def effect(self, job, action):
         self.deadline.check()

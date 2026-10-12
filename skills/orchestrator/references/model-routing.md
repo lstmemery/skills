@@ -48,6 +48,16 @@ the same native catalog/config/effort checks as managed preflight and reserve
 shared provider admission before creating a pane. Preserve the existing host
 binding, startup verification, isolated worktree, and route-specific isolation;
 the explicit local lane uses a host worktree and no jail.
+The managed local lane requires an allowlisted `task_class` (`triage`,
+`summary`, `contract_artifact`, `bounded_code_edit`, `inventory`, or
+`local_file_analysis`) and refuses missing or unsupported classes before
+launch. Keep its work trivial, self-contained, validator-checkable, and
+limited to supplied local inputs. Exclude networked, credentialed, destructive,
+and review-verdict tasks; never include secrets in the prompt or inspect them
+in the process environment. Each request declares `local_lane_scope` with
+`network_access`, `credential_access`, `credentials_in_environment`, and
+`destructive_actions` all false; configured MCP tools and extensions stay
+available under the user's settings and must remain within this scope.
 
 Escalate at most one level per demonstrated failure, with at most two upward
 steps per assignment before rescoping with the coordinator. Record the previous

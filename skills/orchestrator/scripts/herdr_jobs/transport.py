@@ -47,6 +47,9 @@ KNOWN_TOKEN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]+|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|"
     r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|glpat-[A-Za-z0-9_-]{12,}|tk_[A-Za-z0-9_-]{12,})\b")
 URL_PASSWORD = re.compile(r"(?i)(https?://[^\s/:@]+:)([^\s/@]+)(@)")
+PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]{0,8000}?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+)
 ACTIVE_TURN_STATUS = re.compile(
     r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
     r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
@@ -78,6 +81,13 @@ def _redacted_assignment(match):
     value = match.group("value")
     quote = value[0] if value[0] in ("\"", "'") and value.endswith(value[0]) else ""
     return match.group("prefix") + quote + "<redacted>" + quote
+
+
+def contains_secret_material(value):
+    """Detect common credential values before local-lane prompt submission."""
+    return any(pattern.search(value) for pattern in (
+        SENSITIVE_ASSIGNMENT, AUTH_SCHEME_TOKEN, KNOWN_TOKEN, URL_PASSWORD, PRIVATE_KEY_BLOCK,
+    ))
 
 
 def cli_diagnostic(argv, exit_code, stdout, stderr):
@@ -473,6 +483,8 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        if spec.get("local_lane") is True and contains_secret_material(prompt):
+            raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
         validate_provider_harness(spec["route"]["runtime"], spec.get("provider"))
         if action == "retry_setup":
             profile = fields(job.get("retry_profile"), ["agent_dir", "session_dir", "settings_sha256"],

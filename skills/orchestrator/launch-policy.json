@@ -55,6 +55,14 @@
     "require_repository_worktree": true,
     "require_independent_validator": true,
     "mcp_configuration": "inherit_pi_agent_dir",
-    "extensions": "inherit_pi_agent_dir"
+    "extensions": "inherit_pi_agent_dir",
+    "allowed_task_classes": [
+      "triage",
+      "summary",
+      "contract_artifact",
+      "bounded_code_edit",
+      "inventory",
+      "local_file_analysis"
+    ]
   }
 }

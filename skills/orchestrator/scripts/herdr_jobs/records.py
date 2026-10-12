@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 
 WORKER_MODES = frozenset(("literal", "inferential"))
 CONTEXT_KINDS = frozenset(("test", "fixture", "source", "schema", "dependency", "document"))
+LOCAL_LANE_TASK_CLASSES = frozenset((
+    "triage", "summary", "contract_artifact", "bounded_code_edit", "inventory",
+    "local_file_analysis",
+))
 
 # run-jail.sh mounts these host sources into the worker at the corresponding
 # container roots. PII_JAIL_S0_TEST_ROOT mirrors jail-session.sh's test-only
@@ -439,7 +443,8 @@ def policy_record(value):
     if local_lane is not None:
         fields(local_lane, ["model", "provider", "effort", "service_unit",
                             "minimum_free_gpu_memory_mib", "require_repository_worktree",
-                            "require_independent_validator", "mcp_configuration", "extensions"],
+                            "require_independent_validator", "mcp_configuration", "extensions",
+                            "allowed_task_classes"],
                label="local_lane")
         if (local_lane["model"] != "qwen3.8-27b-uncensored"
                 or local_lane["provider"] != "llama-local"
@@ -456,6 +461,12 @@ def policy_record(value):
         if (local_lane["mcp_configuration"] != "inherit_pi_agent_dir"
                 or local_lane["extensions"] != "inherit_pi_agent_dir"):
             invalid("local_lane must inherit the user's configured Pi MCP and extension resources")
+        task_classes = local_lane["allowed_task_classes"]
+        if (not isinstance(task_classes, list) or not task_classes
+                or any(not isinstance(item, str) or item not in LOCAL_LANE_TASK_CLASSES
+                       for item in task_classes)
+                or len(set(task_classes)) != len(task_classes)):
+            invalid("local_lane allowed_task_classes must be a nonempty unique subset of the bounded task classes")
     if not isinstance(value["runtime_kinds"], dict) or not value["runtime_kinds"]:
         invalid("runtime_kinds must be a nonempty object")
     for runtime, kind in value["runtime_kinds"].items():
@@ -536,7 +547,7 @@ def prepare(manifest_path, policy_path):
                 ["override", "repository_worktree", "worker_result", "task_class",
                 "model_level", "model_fallback", "escalation", "worker_mode", "mode",
                 "protected_paths", "editable_paths", "acceptance_tests", "required_context",
-                "tracker_writes", "local_lane", "independent_validator"], "job")
+                "tracker_writes", "local_lane", "independent_validator", "local_lane_scope"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -576,6 +587,17 @@ def prepare(manifest_path, policy_path):
                 invalid(f"{job_id}: local_lane is an ordinary host route; it cannot change a jail task")
             if local_config is None:
                 raise JobError("unavailable_capability", f"{job_id}: local_lane is not configured")
+            if task_class is None:
+                invalid(f"{job_id}: local_lane requires an allowlisted task_class")
+            if task_class not in local_config["allowed_task_classes"]:
+                invalid(f"{job_id}: local_lane task_class is not allowlisted")
+            if "local_lane_scope" not in job:
+                invalid(f"{job_id}: local_lane requires an explicit local_lane_scope declaration")
+            local_scope = fields(job["local_lane_scope"],
+                                 ["network_access", "credential_access", "credentials_in_environment",
+                                  "destructive_actions"], label=f"{job_id}.local_lane_scope")
+            if any(value is not False for value in local_scope.values()):
+                invalid(f"{job_id}: local_lane_scope must exclude network, credentials, and destructive actions")
             if any(key in job for key in ("model_level", "model_fallback", "escalation")):
                 invalid(f"{job_id}: local_lane is outside the integer model ladder")
             expected_tuple = {"runtime": "pi", "model": local_config["model"],
@@ -604,6 +626,8 @@ def prepare(manifest_path, policy_path):
             }
         elif independent_validator is not None:
             invalid(f"{job_id}: independent_validator is reserved for the local_lane route")
+        elif "local_lane_scope" in job:
+            invalid(f"{job_id}: local_lane_scope is reserved for the local_lane route")
         elif (local_config is not None and explicit
               and override.get("provider") == local_config["provider"]):
             invalid(f"{job_id}: llama-local requires the explicit local_lane opt-in")
