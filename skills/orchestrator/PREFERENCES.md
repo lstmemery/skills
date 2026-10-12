@@ -21,6 +21,8 @@ acceptance of worker output.
   an explicit opt-out in the current request. Deliver only finished reports,
   not plans, drafts, or worker slices. Report the observed delivery state; say a
   report was emailed only after the delivery helper verifies receipt.
+  Jailed report fact-check requirements before PrivateBin/PDF delivery are in
+  [the research reference](../research/REFERENCE.md#jailed-research-delivery).
 - Delegate as much execution as possible. Use the coordinator for routing,
   task state, and user communication; delegate substantive reasoning and review.
   Fast models are preferred for coordinators. No exact model is pinned here.

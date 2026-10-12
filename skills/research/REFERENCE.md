@@ -16,6 +16,11 @@ The answer must stand alone without the working notes. Before delivery, confirm
 the shared [evidence contract](EVIDENCE.md), valid filename/date, and the active
 runtime's delivery requirements. Deliver only the finished report.
 
+## Jailed research delivery
+
+For the jailed report fact-check gate before PrivateBin/PDF delivery, follow the
+[deep-research delivery rule](../deep-research/SKILL.md#check-and-deliver).
+
 ## Worker contract
 
 For a delegated focused investigation, give one bounded question, non-goals,
