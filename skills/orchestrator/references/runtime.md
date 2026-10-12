@@ -177,6 +177,11 @@ submits once through `herdr agent prompt` or `pane send-text` followed by Enter,
 and requires an active-turn `Working` observation. A trust or authentication
 dialog before or after submission stops the operation without dialog input.
 The managed launcher uses the same operation for its non-Codex prompt step.
+Managed job manifests can select the pane route per job with
+`"prompt_transport": "pane_text"`; this sends the prompt with `pane send-text`
+and then presses Enter. The default `"agent_prompt"` route uses
+`herdr agent prompt`. Both routes run through the same submit-and-verify helper,
+and a failed or unverified submission is never replayed through the other route.
 
 For a managed Codex job, start a fresh Codex session with the complete managed
 prompt as the final native argument. Scope project trust to the assigned working

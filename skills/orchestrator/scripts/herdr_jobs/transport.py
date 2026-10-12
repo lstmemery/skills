@@ -19,7 +19,7 @@ from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
-from .prompt import PromptNotStarted, submit_and_verify
+from .prompt import PromptNotStarted, pane_text_submit, submit_and_verify
 
 
 class BudgetExpired(Exception):
@@ -495,7 +495,11 @@ class NativeTransport:
                 if runtime_args:
                     argv += ["--", *runtime_args]
         elif action == "prompt":
-            argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
+            prompt_transport = spec.get("prompt_transport", "agent_prompt")
+            if prompt_transport == "pane_text":
+                argv = None
+            else:
+                argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
         elif action == "jail":
             timeout_ms = spec.get("jail_stream_idle_timeout_ms", 300000)
             launch = ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "-c",
@@ -538,6 +542,9 @@ class NativeTransport:
                                 start_diagnostic=start_diagnostic)
         if action == "prompt":
             def submit_prompt():
+                if spec.get("prompt_transport", "agent_prompt") == "pane_text":
+                    pane_text_submit(command, self.herdr, pane, prompt, self.deadline)
+                    return
                 code, output, error_output = command(argv, self.deadline)
                 rate_limit = rate_limit_from_output(
                     (error_output + b"\n" + output).decode("utf-8", "replace"),
