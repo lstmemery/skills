@@ -16,13 +16,15 @@ session.
 2. **No empty digests.** A digest with zero timeline entries must not ship. If a
    session genuinely has no reportable activity, drop the digest row from the
    plan and say so in the build evidence instead.
-3. **Role comes from the invocation, not the first prompt.** Scan every user
-   turn for `You are the /orchestrator` (coordinator) and worker-dispatch
-   patterns (`You are a worker/code reviewer/read-only reviewer`,
-   `parent-dispatched worker task`, `Read and execute your brief` or
-   `Read and execute /…`, `Work autonomously to completion`). Coordinator
-   wins over worker. A session whose first prompt looks interactive but which
-   contains an orchestrator invocation is a coordinator session.
+3. **Record invocation evidence and derive the role from it.** For each digest,
+   add a top-level `- Invocation evidence: ...` line copied from the session
+   launch arguments, skill/agent invocation, or brief recorded in the
+   transcript. Do not infer a role from arbitrary prompt text or copy it from
+   the index. The verifier recognizes explicit coordinator, reviewer, and
+   worker invocation forms in this field. If the transcript has no clear
+   invocation evidence, record no field; the role is `unknown` regardless of
+   the index Role cell. The verifier reports known disagreements and
+   `verify --write` updates the index Role cell from the invocation evidence.
 
 ## Verification
 
@@ -38,13 +40,13 @@ python3 skills/retro/scripts/retro_prep_digest.py verify --corpus CORPUS --repor
   end) and the timeline entry count, satisfying the R-09 acceptance: coverage
   is reported per session and every digest has a non-zero timeline.
 - Exit `2` — failures: truncated digests (timeline or span ends before the
-  listed session end, beyond `--grace-minutes`, default 2), empty digests,
-  span clips, and index.md coordinator rows that disagree with the
-  invocation-based role. Fix the corpus; do not ship a failing build.
-- `--write` annotates `index.md` in place: coordinator roles are corrected to
-  `coordinator (was: <old>)` and empty digests are flagged
-  `[empty-digest]`. Treat `--write` as a triage aid, not a substitute for
-  rebuilding the affected digests.
+  listed session end), empty digests, span clips, and known index Role cells
+  that disagree with invocation evidence. Fix the corpus; do not ship a
+  failing build.
+- `--write` updates each index Role cell from the invocation evidence and
+  flags empty digests with `[empty-digest]`. Missing or unrecognized evidence
+  is written as `unknown`. Treat `--write` as a triage aid, not a substitute
+  for rebuilding the affected digests.
 - Every listed session must have a digest: a listed session with no digest
   file fails verify (`NO-DIGEST`, exit `2`). This is the R-09 acceptance
   default. Pass `--allow-missing-digests` only when a build intentionally
@@ -52,8 +54,7 @@ python3 skills/retro/scripts/retro_prep_digest.py verify --corpus CORPUS --repor
   and friction-heavy worker sessions); those sessions are then reported
   without failing.
 
-`derive-role` classifies one prompt text from stdin (`role` TAB `basis`) and is
-the same logic the verifier applies to digest user turns.
-
 The verifier reads only `index.md` and `sessions/*.md` — never raw
-transcripts — so it is safe to run inside the retro's read boundaries.
+transcripts — so it is safe to run inside the retro's read boundaries. The
+corpus builder must preserve the invocation evidence from its transcript in
+the digest metadata for the verifier to use.

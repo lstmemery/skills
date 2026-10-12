@@ -15,8 +15,9 @@ mechanical, so the next corpus build cannot repeat them quietly:
   `--allow-missing-digests` is passed for intentionally digest-less
   builds, and empty digests are flagged in the report and, with
   `--write`, in index.md itself.
-- Role labels come from the invocation metadata supplied to the corpus build
-  and recorded in the index. Digest content is not role evidence.
+- Role labels come from explicit invocation evidence recorded from the
+  transcript in each digest. Index roles are checked against that evidence;
+  absent evidence means `unknown`.
 
 Inputs are the corpus artifacts themselves: `index.md` (the triage
 table every build already writes) and the per-session digests under
@@ -29,7 +30,7 @@ Usage:
 
 Exit codes: 0 all checks passed, 1 fatal usage/parse error, 2 check
 failures found (truncated or empty digest, listed session without a
-digest, span clip).
+digest, span clip, or known invocation-role mismatch).
 """
 
 import argparse
@@ -40,13 +41,29 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-VERSION = 3
+VERSION = 4
 
 ENTRY_TIME_RE = re.compile(r"^###\s+(\d{1,2}):(\d{2}):(\d{2})")
 DATETIME_RE = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s*([A-Za-z0-9+\-:/]+))?")
 SPAN_LINE_RE = re.compile(r"^\s*-\s*Session span:\s*(.+)$", re.MULTILINE)
 SPAN_TO_RE = re.compile(r"\s+to\s+")
+INVOCATION_EVIDENCE_RE = re.compile(
+    r"^\s*-\s*Invocation evidence:\s*(.*?)\s*$", re.MULTILINE)
+
+INVOCATION_ROLE_PATTERNS = (
+    ("coordinator", re.compile(
+        r"you are (?:the|an) /?orchestrator\b|(?:^|[\s`])/orchestrator\b",
+        re.IGNORECASE)),
+    ("reviewer", re.compile(
+        r"you are (?:a|an|the) (?:code|read[- ]only) reviewer\b"
+        r"|(?:^|[\s`])/(?:code-review|reviewer)\b", re.IGNORECASE)),
+    ("worker", re.compile(
+        r"you are (?:a|an|the) worker\b|parent-dispatched worker task"
+        r"|read and execute (?:your brief|/)"
+        r"|work autonomously to completion|(?:^|[\s`])/worker\b",
+        re.IGNORECASE)),
+)
 
 
 def norm_role(cell):
@@ -76,6 +93,7 @@ class Digest:
     path: Path
     span_start: datetime = None
     span_end: datetime = None
+    invocation_evidence: str = None
     entries: list = field(default_factory=list)      # [(seconds, title)]
 
 
@@ -87,6 +105,7 @@ class SessionCheck:
     last_entry: str = None
     coverage_gap_minutes: float = None
     span_end: str = None
+    role_index: str = None
     role_invocation: str = None
     status: str = "OK"
     problems: list = field(default_factory=list)
@@ -121,6 +140,29 @@ def split_row(line):
             current = []
         else:
             current.append(char)
+    cells.append("".join(current).strip())
+    return cells
+
+
+def split_row_for_write(line):
+    """Split a row while retaining Markdown escapes for lossless rewriting."""
+    cells, current, in_ticks, escaped = [], [], False, False
+    for char in line:
+        if escaped:
+            current.extend(("\\", char))
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "`":
+            in_ticks = not in_ticks
+            current.append(char)
+        elif char == "|" and not in_ticks:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        current.append("\\")
     cells.append("".join(current).strip())
     return cells
 
@@ -173,7 +215,7 @@ def parse_index(path):
 
 
 def parse_digest(path):
-    """Parse span header and timeline entries from a built digest."""
+    """Parse span, explicit invocation evidence, and timeline entries."""
     text = path.read_text(encoding="utf-8")
     digest = Digest(path=path)
     span = SPAN_LINE_RE.search(text)
@@ -182,6 +224,10 @@ def parse_digest(path):
         if len(parts) == 2:
             digest.span_start = parse_naive(parts[0])
             digest.span_end = parse_naive(parts[1])
+    header = text.split("## Timeline", maxsplit=1)[0]
+    invocation = INVOCATION_EVIDENCE_RE.search(header)
+    if invocation:
+        digest.invocation_evidence = invocation.group(1).strip()
     lines = text.splitlines()
     in_timeline = False
     for line in lines:
@@ -195,6 +241,16 @@ def parse_digest(path):
                     h, m, s = (int(time_match.group(i)) for i in range(1, 4))
                     digest.entries.append((h * 3600 + m * 60 + s, line.lstrip("# ").strip()))
     return digest
+
+
+def derive_role(invocation_evidence):
+    """Classify only the digest's explicit invocation evidence, else unknown."""
+    if not invocation_evidence:
+        return "unknown"
+    for role, pattern in INVOCATION_ROLE_PATTERNS:
+        if pattern.search(invocation_evidence):
+            return role
+    return "unknown"
 
 
 def find_digest(sessions_dir, row):
@@ -235,16 +291,30 @@ def format_gap(seconds):
 
 def check_session(row, sessions_dir, allow_missing_digests):
     check = SessionCheck(row=row)
-    check.role_invocation = norm_role(row.role)
+    check.role_index = norm_role(row.role) or "unknown"
+    check.role_invocation = "unknown"
     path = find_digest(sessions_dir, row)
     if path is None:
         check.status = "NO-DIGEST"
         if not allow_missing_digests:
             check.problems.append("no digest file found for listed session")
+        if check.role_index != "unknown":
+            check.problems.append(
+                "note: invocation role is unknown because no transcript digest was found; "
+                f"index role {check.role_index!r} is not used")
         return check
     check.digest_path = str(path)
     digest = parse_digest(path)
     check.entries = len(digest.entries)
+    check.role_invocation = derive_role(digest.invocation_evidence)
+    if check.role_invocation == "unknown" and check.role_index != "unknown":
+        check.problems.append(
+            "note: invocation evidence is absent or unrecognized; "
+            f"index role {check.role_index!r} is not used")
+    elif check.role_index != check.role_invocation:
+        check.problems.append(
+            f"index role {check.role_index!r} does not match invocation role "
+            f"{check.role_invocation!r}")
 
     if digest.span_end is not None:
         check.span_end = digest.span_end.strftime("%Y-%m-%d %H:%M:%S")
@@ -281,11 +351,7 @@ def check_session(row, sessions_dir, allow_missing_digests):
 
 
 def annotate_index(path, checks):
-    """Rewrite index.md to flag empty digests, preserving invocation roles.
-
-    The Role column is not inferred or rewritten from digest content. The
-    empty-digest annotation is added in place without changing that role.
-    """
+    """Write invocation roles and empty-digest flags into the index."""
     by_line = {c.row.line_no: c for c in checks}
     lines = path.read_text(encoding="utf-8").splitlines()
     role_col = None
@@ -296,28 +362,34 @@ def annotate_index(path, checks):
             break
     if role_col is None:
         raise ValueError(f"{path}: no index table header containing Session ID and Role")
+    changed = 0
     for line_no, check in by_line.items():
-        cells = split_row(lines[line_no - 1].strip().strip("|"))
-        role_cell = cells[role_col]
-        if check.status == "EMPTY" and "[empty-digest]" not in role_cell:
-            role_cell = f"{role_cell} [empty-digest]".strip()
+        original = lines[line_no - 1]
+        cells = split_row_for_write(original.strip().strip("|"))
+        role_cell = check.role_invocation or "unknown"
+        if check.status == "EMPTY":
+            role_cell = f"{role_cell} [empty-digest]"
+        if cells[role_col] == role_cell:
+            continue
         cells[role_col] = role_cell
         lines[line_no - 1] = "| " + " | ".join(cells) + " |"
+        changed += 1
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return sum(1 for c in checks if c.status == "EMPTY")
+    return changed
 
 
 def render_report(checks):
     header = ("| Session | Status | Entries | Last entry | Gap to end (min) | "
-              "Role (invocation) | Problems |")
-    lines = [header, "|---|---|---:|---|---:|---|---|"]
+              "Role (index) | Role (invocation) | Problems |")
+    lines = [header, "|---|---|---:|---|---:|---|---|---|"]
     for check in checks:
-        lines.append("| `{}` | {} | {} | {} | {} | {} | {} |".format(
+        lines.append("| `{}` | {} | {} | {} | {} | {} | {} | {} |".format(
             check.row.session_id[:12],
             check.status,
             check.entries if check.entries is not None else "n/a",
             check.last_entry or "n/a",
             check.coverage_gap_minutes if check.coverage_gap_minutes is not None else "n/a",
+            check.role_index or "unknown",
             check.role_invocation or "n/a",
             "; ".join(check.problems) or "—",
         ))
@@ -337,7 +409,8 @@ def cmd_verify(args):
     checks = [check_session(row, sessions_dir, args.allow_missing_digests)
               for row in rows]
     report_text, failed = render_report(checks)
-    missing = sum(1 for c in checks if c.status == "NO-DIGEST" and c.problems)
+    missing = sum(1 for c in checks
+                  if c.status == "NO-DIGEST" and not args.allow_missing_digests)
     print(report_text)
     if args.report:
         payload = {
@@ -352,6 +425,7 @@ def cmd_verify(args):
                 "last_entry": c.last_entry,
                 "coverage_gap_minutes": c.coverage_gap_minutes,
                 "span_end": c.span_end,
+                "role_index": c.role_index,
                 "role_invocation": c.role_invocation,
                 "status": c.status,
                 "problems": c.problems,
@@ -361,10 +435,10 @@ def cmd_verify(args):
             json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     if args.write:
         changed = annotate_index(index_path, checks)
-        print(f"index.md updated: {changed} row(s) annotated")
+        print(f"index.md updated: {changed} row(s) changed")
     if failed or missing:
         print(f"VERIFY FAILED: {failed} session(s) with truncated or empty digests "
-              f"or span clips"
+              f"or span clips or invocation role mismatches"
               + (f"; {missing} listed session(s) without a digest "
                  f"(pass --allow-missing-digests for digest-less builds)"
                  if missing else ""),
@@ -384,7 +458,7 @@ def main(argv=None):
                              "(default: every listed session needs a digest)")
     verify.add_argument("--report", help="write JSON coverage report to this path")
     verify.add_argument("--write", action="store_true",
-                        help="annotate index.md: preserve invocation roles, flag empty digests")
+                        help="write invocation roles to index.md and flag empty digests")
     verify.set_defaults(func=cmd_verify)
 
     args = parser.parse_args(argv)
