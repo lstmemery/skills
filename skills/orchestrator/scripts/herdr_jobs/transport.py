@@ -19,6 +19,7 @@ from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
+from .prompt import PromptNotStarted, submit_and_verify
 
 
 class BudgetExpired(Exception):
@@ -535,6 +536,25 @@ class NativeTransport:
                 return {"prompt_submitted": True, "start_diagnostic": start_diagnostic}
             raise EffectUnknown("Codex prompt delivery is unverified; inspect the owned pane before retrying",
                                 start_diagnostic=start_diagnostic)
+        if action == "prompt":
+            def submit_prompt():
+                code, output, error_output = command(argv, self.deadline)
+                rate_limit = rate_limit_from_output(
+                    (error_output + b"\n" + output).decode("utf-8", "replace"),
+                    source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
+                if rate_limit is not None:
+                    raise RateLimited(rate_limit)
+                if code:
+                    raise PromptNotStarted(
+                        f"{Path(argv[0]).name} {argv[1]} exited {code}; inspect the owned pane")
+
+            try:
+                submit_and_verify(submit_prompt, lambda: self.observe(job), deadline=self.deadline)
+                return {"prompt_submitted": True}
+            except RateLimited:
+                raise
+            except (PromptNotStarted, BudgetExpired, JobError, UnicodeError) as error:
+                raise EffectUnknown(str(error) or "prompt start could not be verified; inspect before retrying") from error
         try:
             if action in ("start", "prompt"):
                 code, output, error_output = command(argv, self.deadline)

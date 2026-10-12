@@ -171,6 +171,13 @@ Record workspace/pane/name before prompting. Pass native arguments only through
 the installed CLI's supported argument boundary. Do not turn a brief into shell
 code: use structured argv where possible and shell-quote any necessary command.
 
+For ad-hoc prompts, use the submit-and-verify operation in
+`scripts/herdr_jobs/prompt.py`. It checks the owned worker before writing,
+submits once through `herdr agent prompt` or `pane send-text` followed by Enter,
+and requires an active-turn `Working` observation. A trust or authentication
+dialog before or after submission stops the operation without dialog input.
+The managed launcher uses the same operation for its non-Codex prompt step.
+
 For a managed Codex job, start a fresh Codex session with the complete managed
 prompt as the final native argument. Scope project trust to the assigned working
 directory and pass a resolved model only when one was requested:
