@@ -52,6 +52,29 @@ class WorkerRecordsTest(unittest.TestCase):
             self.assertIn(value, process.stdout)
         self.assertIn("candidate", process.stdout)
         self.assertIn("--repository-changes", process.stdout)
+        validate_command = (
+            'python3 scripts/worker-records.py validate-result '
+            '"$WORKER_DIR/result.json" --task-id "$TASK_ID" --revision "$REVISION"'
+        )
+        self.assertIn(validate_command, process.stdout)
+
+    def test_schema_validate_command_matches_argparse_and_worker_docs(self):
+        process = self.call("schema", "--format", "md")
+        self.assertEqual(process.returncode, 0, process.stderr)
+
+        help_process = self.call("validate-result", "--help")
+        self.assertEqual(help_process.returncode, 0, help_process.stderr)
+        self.assertIn("--task-id TASK_ID", help_process.stdout)
+        self.assertIn("--revision REVISION", help_process.stdout)
+        self.assertNotIn("--assignment-revision", help_process.stdout)
+        self.assertNotIn("--assignment-revision", process.stdout)
+
+        docs = (SCRIPT.parents[1] / "references/workers.md").read_text()
+        expected_command = (
+            'python3 scripts/worker-records.py validate-result \\\n'
+            '  "$WORKER_DIR/result.json" --task-id "$TASK_ID" --revision "$REVISION"'
+        )
+        self.assertIn(expected_command, docs)
 
     def test_normalize_result_repairs_known_legacy_shapes_and_reports_changes(self):
         source = self.root / "result.json"
