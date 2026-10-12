@@ -16,6 +16,8 @@ validation. Do not ask again whether to send it. Honor an explicit opt-out in
 the current request. Workers return their slice artifacts to the coordinator
 and never deliver them. Report only the delivery state observed; say the report
 was emailed only after the delivery helper verifies receipt.
+For jailed research's independent fact-check requirement before PrivateBin/PDF
+delivery, follow the [delivery rule](REFERENCE.md#jailed-research-delivery).
 
 Use the request first, then relevant supplied prior art and sources that own
 the claims: official documentation, code, specifications, APIs, or original

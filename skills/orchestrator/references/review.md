@@ -180,6 +180,16 @@ them or provide an explicit immutable snapshot; a HEAD SHA cannot identify
 uncommitted work. Generated artifacts outside the candidate remain separately
 identified. Use the task's actual base, not an assumed `main` or a last-turn diff.
 
+## Close or merge
+
+For an authorized merge into a checkout with local changes, preserve them by
+merging in a clean temporary worktree and fast-forwarding the target, or by
+`git stash push` (which includes the index), merging, then
+`git stash pop --index`. Record the pre-merge status and verify the restored
+status matches it. If a failed merge resets dirty files, recover the stash
+with `git fsck --unreachable`, identify the `WIP on` commit, then run
+`git stash apply --index SHA`.
+
 ## Herdr view
 
 Use the installed reviewr contract if compatible. Its documented branch scope
