@@ -83,6 +83,26 @@ class ReviewCompatibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(PREFLIGHT.PreflightError, "duplicate disposition"):
                 PREFLIGHT.review_records(review.parent, "task-1", root / "workers.txt")
 
+    def test_duplicate_json_keys_rejected_by_both_consumers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            review, _ = review_bundle(root, "v2-reproducer")
+            path = review / "review-evidence.json"
+            raw = path.read_text()
+            raw = raw.replace(
+                '"disposition": "fixed"',
+                '"disposition": "fixed", "disposition": "fixed"',
+                1,
+            )
+            path.write_text(raw)
+            with self.assertRaisesRegex(records.JobError, "duplicate JSON key: disposition"):
+                review_dispositions.sync_dispositions(review.parent)
+            output, diagnostics = PREFLIGHT.review_records(
+                review.parent, "task-1", root / "workers.txt"
+            )
+            self.assertEqual(output, [])
+            self.assertTrue(any("duplicate JSON key: disposition" in item for item in diagnostics))
+
     def test_preflight_rejects_bundle_disagreement_and_nonallowlisted_legacy_prose(self):
         for mutation in ("markdown", "done", "identity", "legacy", "capture"):
             with self.subTest(case=mutation), tempfile.TemporaryDirectory() as temporary:
