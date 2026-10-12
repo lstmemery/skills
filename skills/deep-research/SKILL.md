@@ -97,10 +97,13 @@ drafts, slice artifacts, and check notes are working material. Honor an explicit
 user opt-out. Under a runtime where delivery is coordinator-controlled (the
 jail), finish at the written, declared artifacts; never attempt or claim
 delivery. Before the coordinator queues a jailed report for PrivateBin/PDF
-delivery, a checker worker with a different worker identity must independently
-fact-check it and leave `fact-check.md` beside the report. Missing evidence or
-any unresolved failed check blocks delivery until corrected and rechecked. See
-the [jailed research delivery rule](../research/REFERENCE.md#jailed-research-delivery).
+delivery, a checker worker with a different worker identity must independently verify every
+cited claim against its primary source — the source of record, not a secondary
+summary — and leave `fact-check.md` beside the report. That file must record
+each claim corrected, what changed, and that the correction was rechecked.
+Missing `fact-check.md`, missing evidence, or any unresolved failed check blocks
+delivery until corrected and rechecked. The coordinator owns this gate. See the
+[jailed research delivery rule](../research/REFERENCE.md#jailed-research-delivery).
 Report the delivery state actually observed. Say the report was
 emailed only after the delivery helper verifies receipt. If the active runtime
 offers no delivery mechanism, report that gap and leave the finished report

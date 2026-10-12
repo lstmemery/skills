@@ -279,7 +279,10 @@ The helper appends exact output instructions and generated identities to each wo
 
 Outcome is `complete`, `partial`, `blocked`, or `failed`; unresolved items are strings. Artifact paths are bounded relative paths and may not traverse symlinks. The collector hashes and copies the receipt and artifacts into a revision directory, preserving old revisions. The receipt's existence or valid structure does not establish factual correctness.
 
-Deep-research artifacts keep their content contracts. Receipts and intermediate artifacts are internal state, not publication payloads. The final-report delivery contract remains separate.
+Deep-research artifacts keep their content contracts. Receipts and intermediate
+artifacts are internal state, not publication payloads. The final-report delivery
+contract remains separate. Before a jailed research report is queued for delivery,
+follow the [canonical deep-research fact-check gate](../../deep-research/SKILL.md#check-and-deliver).
 
 ## Results, effects, and fallback
 
