@@ -4,6 +4,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from unittest.mock import patch
@@ -18,18 +19,15 @@ from herdr_jobs.records import JobError, policy_record, load_json
 
 class LocalLaneTest(unittest.TestCase):
     def fake_worktree_host(self, argv):
-        pane_cwd = str(Path.cwd())
+        repo_root = Path(__file__).resolve().parents[3]
+        pane_cwd = str(repo_root)
         if argv[:3] == ["herdr", "pane", "get"]:
             return 0, json.dumps({"result": {"pane": {"cwd": pane_cwd}}}).encode(), b""
         if argv[:2] == ["git", "-C"]:
-            if "--show-toplevel" in argv:
-                output = pane_cwd
-            elif "--git-common-dir" in argv:
-                output = str(Path.cwd().parents[1] / ".git")
-            else:
-                output = ("worktree /home/deadhand/agents/skills\0"
-                          f"worktree {pane_cwd}\0")
-            return 0, output.encode(), b""
+            result = subprocess.run(
+                argv, check=True, capture_output=True, cwd=repo_root,
+            )
+            return 0, result.stdout, b""
         return None
 
     def run_fixture(self, *, service=(0, "active", ""), gpu=(0, "3072\n", "")):
