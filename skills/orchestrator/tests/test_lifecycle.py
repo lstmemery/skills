@@ -596,6 +596,20 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(InMemoryEffectAdapter(observations=observed).observe(state), observed["job-1"])
         self.assertEqual(DeterministicObservationAdapter(observed).observe(state), observed["job-1"])
 
+    def test_run_observation_with_unmatched_job_id_emits_no_effect(self):
+        reducer = JobLifecycle()
+        first = job()
+        first["phase"] = "ready"
+        first["observed"] = {"state": "idle", "identity_verified": True}
+        run_state = {"jobs": [first]}
+
+        transition = reducer.step(run_state, {"job_id": "missing", "state": "idle",
+                                               "identity_verified": True})
+
+        self.assertEqual(transition.effects, [])
+        self.assertEqual(transition.next_state, run_state)
+        self.assertIn("no unsettled job matches", transition.reason)
+
     def test_rate_limit_is_a_known_retry_state(self):
         reducer = JobLifecycle()
         state = job()

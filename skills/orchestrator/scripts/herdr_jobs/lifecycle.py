@@ -185,13 +185,17 @@ class JobLifecycle:
             raise InvalidState("run jobs must be an array")
         if not jobs:
             return Transition(next_state, reason="no jobs")
-        selected = 0
         target = observation.get("job_id") if isinstance(observation, Mapping) else None
+        selected = None
         for index, job in enumerate(jobs):
             if (isinstance(job, Mapping) and not job.get("settled")
                     and (target is None or job_id_of(job) == target)):
                 selected = index
                 break
+        if selected is None:
+            reason = (f"no unsettled job matches observation job_id {target!r}"
+                      if target is not None else "no unsettled jobs")
+            return Transition(next_state, reason=reason)
         job_transition = self._step_job(jobs[selected], observation)
         jobs[selected] = dict(job_transition.next_state)
         return Transition(next_state, list(job_transition.effects), job_transition.reason, job_transition.unknown)
