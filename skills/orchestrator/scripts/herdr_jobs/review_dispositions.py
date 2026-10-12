@@ -1,20 +1,17 @@
 """Synchronize coordinator dispositions from review-response.md into review evidence."""
 
-import json
 import os
 from pathlib import Path
-import re
 import stat
 
 from . import records
 from . import review_evidence
-from .review_evidence import FINDING_EVIDENCE_FIELDS
-from .review_evidence import REVIEW_EVIDENCE_SCHEMA_VERSIONS
+# Preserve existing constant exports while keeping the contract in its owner.
+from .review_evidence import (
+    AXES, EVIDENCE_NAME, FINDING_EVIDENCE_FIELDS, IDENTIFIER, REVIEW_EVIDENCE_SCHEMA_VERSIONS,
+)
 
 
-AXES = ("standards", "spec")
-IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]+$")
-EVIDENCE_NAME = "review-evidence.json"
 BACKUP_SUFFIX = ".pre-disposition-sync"
 
 
@@ -50,63 +47,6 @@ def _review_directories(task_dir):
     if not directories:
         records.invalid(f"no review directories found in {task_dir}")
     return directories
-
-
-def _validate_finding_evidence(finding, review_name, schema_version):
-    error = review_evidence.finding_evidence_error(finding, review_name, schema_version)
-    if error is not None:
-        records.invalid(error)
-
-
-def _load_evidence(review_dir):
-    evidence_path = review_dir / EVIDENCE_NAME
-    try:
-        raw = records.read_regular(evidence_path)
-    except FileNotFoundError as error:
-        records.invalid(f"missing {EVIDENCE_NAME} at {evidence_path}")
-    except OSError as error:
-        records.invalid(f"cannot read {EVIDENCE_NAME} at {evidence_path}: {error.strerror or error}")
-    try:
-        evidence = records.parse_json(raw)
-    except records.JobError as error:
-        records.invalid(f"invalid {EVIDENCE_NAME} at {evidence_path}: {error}")
-
-    if (
-        not isinstance(evidence, dict)
-        or type(evidence.get("schema_version")) is not int
-        or evidence["schema_version"] not in REVIEW_EVIDENCE_SCHEMA_VERSIONS
-    ):
-        records.invalid(f"invalid {EVIDENCE_NAME} schema in {review_dir.name}")
-    axes = evidence.get("axes")
-    if not isinstance(axes, dict) or set(axes) != set(AXES):
-        records.invalid(f"{review_dir.name} must record both Standards and Spec axes")
-
-    finding_map = {}
-    for axis in AXES:
-        axis_record = axes[axis]
-        if (
-            not isinstance(axis_record, dict)
-            or axis_record.get("status") != "complete"
-            or not isinstance(axis_record.get("findings"), list)
-        ):
-            records.invalid(f"{review_dir.name} {axis} review is incomplete")
-        for finding in axis_record["findings"]:
-            if (
-                not isinstance(finding, dict)
-                or not {"id", "disposition"} <= finding.keys()
-                or finding.keys()
-                - {"id", "disposition", "reason", *FINDING_EVIDENCE_FIELDS}
-            ):
-                records.invalid(f"{review_dir.name} has a malformed finding")
-            finding_id = finding["id"]
-            if not isinstance(finding_id, str) or not IDENTIFIER.fullmatch(finding_id):
-                records.invalid(f"{review_dir.name} has an invalid finding ID")
-            _validate_finding_evidence(finding, review_dir.name, evidence["schema_version"])
-            key = (review_dir.name, finding_id)
-            if key in finding_map:
-                records.invalid(f"{review_dir.name} repeats finding ID {finding_id}")
-            finding_map[key] = finding
-    return evidence_path, raw, evidence, finding_map
 
 
 def _save_backup(path, data):
@@ -146,47 +86,22 @@ def sync_dispositions(task_dir):
         records.invalid(f"task directory does not exist or is a symlink: {task_dir}")
     task_dir = task_dir.resolve()
     response = _parse_response(_read_response(task_dir / "review-response.md"))
-    evidence_files = {}
-    all_findings = {}
-    updated = {}
+    try:
+        documents = [
+            review_evidence.read_disposition_evidence(directory)
+            for directory in _review_directories(task_dir)
+        ]
+        changed = review_evidence.apply_dispositions(documents, response)
+    except review_evidence.ReviewEvidenceError as error:
+        records.invalid(str(error))
 
-    for review_dir in _review_directories(task_dir):
-        evidence_path, raw, evidence, findings = _load_evidence(review_dir)
-        evidence_files[review_dir.name] = (evidence_path, raw)
-        all_findings.update(findings)
-        updated[review_dir.name] = evidence
-
-    unknown = sorted(set(response) - set(all_findings))
-    if unknown:
-        names = ", ".join(f"{review}/{finding}" for review, finding in unknown)
-        records.invalid(f"review-response.md has unknown finding(s): {names}")
-    missing = sorted(set(all_findings) - set(response))
-    if missing:
-        names = ", ".join(f"{review}/{finding}" for review, finding in missing)
-        records.invalid(f"review-response.md is missing disposition(s) for: {names}")
-
-    for key, (disposition, reason) in response.items():
-        finding = all_findings[key]
-        finding["disposition"] = disposition
-        finding["reason"] = reason
-
-    changed = []
-    for review_name, evidence in updated.items():
-        evidence_path, original = evidence_files[review_name]
-        replacement = (
-            json.dumps(evidence, indent=2, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            + b"\n"
-        )
-        if replacement != original:
-            changed.append((evidence_path, original, replacement))
-
-    for path, original, _replacement in changed:
-        _save_backup(path, original)
-    for path, _original, replacement in changed:
+    for change in changed:
+        _save_backup(change.path, change.original)
+    for change in changed:
         try:
-            records.atomic_bytes(path, replacement)
+            records.atomic_bytes(change.path, change.replacement)
         except OSError as error:
-            records.invalid(f"cannot write review evidence at {path}: {error.strerror or error}")
+            records.invalid(f"cannot write review evidence at {change.path}: {error.strerror or error}")
 
     if not changed:
         return 0
