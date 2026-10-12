@@ -217,7 +217,7 @@ class JobsTest(unittest.TestCase):
         self.write_jobs(1, ["shopping"])
         code, result = self.call(preview=True)
         self.assertEqual((code, result.get("error")), (5, "decision_needed"), result)
-        self.assertIn("omp-train --claude", result["message"])
+        self.assertIn("jail-agent --claude", result["message"])
         self.assertIn("PREFERENCES.md", result["message"])
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
@@ -229,7 +229,7 @@ class JobsTest(unittest.TestCase):
         code, result = self.call("resume")
 
         self.assertEqual((code, result.get("error")), (5, "decision_needed"), result)
-        self.assertIn("omp-train --claude", result["message"])
+        self.assertIn("jail-agent --claude", result["message"])
         self.assertIn("PREFERENCES.md", result["message"])
         self.assertEqual(self.events(), [])
         self.assertEqual((self.run / "state.json").read_bytes(), checkpoint)

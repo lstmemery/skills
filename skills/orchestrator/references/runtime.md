@@ -353,13 +353,13 @@ submission. A prompt timeout or stalled response can occur after delivery;
 read agent state/output before any resend.
 
 For a host-launched jailed job, use the pane command route for the exact
-`omp-train --harness codex exec ...` process. Starting a bare Codex agent would
+`jail-agent --harness codex exec ...` process. Starting a bare Codex agent would
 lose the selected jail boundary. Observe that command's actual foreground
 process, exit/result, and supported lifecycle; do not assume a native agent API
 owns a wrapper-launched process. This branch is unavailable from a jail lacking
 the host launcher/session.
 
-Jailed `claude -p` workers (`omp-train --claude -p "…"`):
+Jailed `claude -p` workers (`jail-agent --claude -p "…"`):
 
 - Put this in every brief: run sub-agents and shells in the foreground only
   (parallel Agent calls in one message are fine), and write the report and

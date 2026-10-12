@@ -34,7 +34,7 @@ pin explicit requests, escalate only on demonstrated difficulty, and use only
 the same-level configured fallback with concrete availability/quota evidence.
 Keep research and shopping jail defaults outside the ladder.
 
-For independent ordinary-agent and omp-train jobs in an authorized Herdr host
+For independent ordinary-agent and jail-agent jobs in an authorized Herdr host
 session, use **Managed Herdr Jobs** below. Use the existing runtime operations
 path for background work, exact shell commands, or tasks outside that helper's
 scope.
@@ -72,7 +72,7 @@ For persistent coordinator replacement, read `references/successor.md` before an
 
 ## Managed Herdr Jobs
 
-Use `scripts/herdr-jobs.py` for independent ordinary-agent and omp-train jobs.
+Use `scripts/herdr-jobs.py` for independent ordinary-agent and jail-agent jobs.
 It validates the request and host binding, records launch effects, observes
 workers, and collects bounded result artifacts. Read
 [managed-jobs.md](references/managed-jobs.md) for the request schema, receipt
@@ -126,7 +126,7 @@ missing or uncertain receipts and artifacts remain incomplete.
    the gap and hold implementation until it is resolved. Finish with a bounded
    assignment and a selected runtime, not an open-ended instruction to manage
    the whole queue.
-3. **Launch.** For independent ordinary-agent or omp-train jobs in an authorized
+3. **Launch.** For independent ordinary-agent or jail-agent jobs in an authorized
    Herdr host session, use **Managed Herdr Jobs** above. Otherwise choose
    execution through [runtime operations](references/runtime.md). Inside Herdr,
    use a new worker pane in its own workspace. Allocate an isolated worktree

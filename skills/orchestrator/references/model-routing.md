@@ -208,8 +208,8 @@ jail model discovery remains outside the managed adapter. Shopping keeps
 jailed Claude Opus 5.5 at xhigh effort via the host pane-command route; the
 Codex-only managed helper still refuses it. A named non-jail harness requires
 an explicit ordinary assignment as documented in preferences. No host access
-from inside a jail is introduced. `omp-train` defaults and `omp` identity are
-unchanged.
+from inside a jail is introduced. `jail-agent` keeps the existing defaults and
+`omp` harness identity.
 
 Policies without `model_ladder` retain their schema-v1 runtime selection
 contract. Existing explicit manifests and saved runs remain pinned; resume

@@ -22,8 +22,19 @@ def execute(request, run_process=subprocess.run, jail_exports=None):
     if protected_paths != request["protected_paths"]:
         raise JobError("invalid_input", "jail launch request must carry the default protected paths")
     argv = request["argv"]
-    if not isinstance(argv, list) or len(argv) != 6 or argv[:5] != ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check"]:
-        raise JobError("invalid_input", "launcher request must use the supported omp-train Codex command")
+    supported_prefixes = (
+        ["jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check"],
+        ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check"],
+    )
+    if (
+        not isinstance(argv, list)
+        or len(argv) != 6
+        or argv[:5] not in supported_prefixes
+    ):
+        raise JobError(
+            "invalid_input",
+            "launcher request must use the supported jail-agent or omp-train Codex command",
+        )
     text(argv[-1], "task")
     text(request["exit_path"], "exit path", 4096)
     try:

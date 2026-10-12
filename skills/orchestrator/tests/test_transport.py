@@ -796,7 +796,7 @@ class TransportTest(unittest.TestCase):
         runner_argv = shlex.split(argv[4])
         self.assertEqual(runner_argv[2], "--request")
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000", prompt])
         self.assertEqual(request["protected_paths"], protected_paths_record(["keys/"]))
@@ -811,7 +811,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000",
                                            prompt])
@@ -824,7 +824,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=600000",
                                            prompt])
@@ -837,7 +837,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000",
                                            prompt])
@@ -850,7 +850,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["omp-train", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000",
                                            prompt])
@@ -874,7 +874,7 @@ class TransportTest(unittest.TestCase):
         (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
         (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
         request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
-                   "argv": ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
+                   "argv": ["jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
                    "exit_path": self.job["exit_record"],
                    "required_context": [
                        {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
@@ -892,7 +892,7 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(calls, [(request["argv"], False)])
         self.assertEqual(load_json(self.job["exit_record"])["exit_code"], 23)
 
-    def test_runner_rejects_host_readable_context_outside_jail_exports_before_launch(self):
+    def test_runner_accepts_legacy_omp_train_codex_command_during_alias_period(self):
         module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
         runner = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(runner)
@@ -900,6 +900,30 @@ class TransportTest(unittest.TestCase):
         (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
         request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
                    "argv": ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
+                   "exit_path": self.job["exit_record"],
+                   "required_context": [
+                       {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
+                       {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
+                   ],
+                   "protected_paths": protected_paths_record(["keys/"]), "editable_paths": []}
+        calls = []
+
+        def launch(argv, check):
+            calls.append((argv, check))
+            return SimpleNamespace(returncode=0)
+
+        self.assertEqual(runner.execute(request, run_process=launch,
+                                        jail_exports=self.jail_exports), 0)
+        self.assertEqual(calls, [(request["argv"], False)])
+
+    def test_runner_rejects_host_readable_context_outside_jail_exports_before_launch(self):
+        module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
+        runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(runner)
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
+                   "argv": ["jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
                    "exit_path": self.job["exit_record"],
                    "required_context": [
                        {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
@@ -922,7 +946,7 @@ class TransportTest(unittest.TestCase):
         (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
         (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
         request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1",
-                   "argv": ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
+                   "argv": ["jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check", "literal task"],
                    "exit_path": self.job["exit_record"],
                    "required_context": [
                        {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},

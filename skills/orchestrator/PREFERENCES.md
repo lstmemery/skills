@@ -6,7 +6,7 @@ capabilities; unknown usage is not exhaustion.
 
 ## Managed Herdr Jobs
 
-For independent ordinary-agent and omp-train jobs in an authorized Herdr host
+For independent ordinary-agent and jail-agent jobs in an authorized Herdr host
 session, [launch-policy.json](launch-policy.json) is the executable authority
 and [managed-jobs.md](references/managed-jobs.md) defines request overrides,
 receipts, collection, and recovery. Keep executable routing in that policy
@@ -71,12 +71,15 @@ acceptance of worker output.
   `pi`; register a missing process adapter when permitted, rather than substitute.
 - Effort cap (Matt 2026-10-12): `gpt-6-astra` and Claude Opus 5.5 never run above
   xhigh, in or out of the jail; pass xhigh explicitly where a route defaults higher.
-- "omp-train" with no harness named means Claude Opus 5.5 at xhigh effort:
-  `omp-train --claude -p "…"` (the jail's managed Claude settings pin that
-  model and effort); that remains the jailed default for shopping. Deep
-  research, and an explicit no-harness `omp-train` for research work, uses
-  the jailed Codex research default instead: `gpt-6-astra` at xhigh effort
-  (user instruction 2026-10-03, effort capped at xhigh 2026-10-12; never substitute another model or effort).
+- `jail-agent` is the canonical fish entry point. The live function currently
+  defaults to the `omp` harness; pass `--harness codex` for Codex or `--claude`
+  for Claude. `omp-train` remains a forwarding alias for one release cycle or
+  30 days, whichever is longer, and passes its arguments unchanged.
+  Shopping workers that need Claude use `jail-agent --claude -p "…"` (the
+  jail's managed Claude settings pin the model and effort). Deep research uses
+  `jail-agent --harness codex` with the jailed Codex research default:
+  `gpt-6-astra` at xhigh effort (user instruction 2026-10-03, effort capped at
+  xhigh 2026-10-12; never substitute another model or effort).
   Research workers keep their worker contract, including the mandatory
   independent source/claim check and the same jail privacy guard.
   The managed Herdr job helper's jail route is Codex-only (schema v1), so
@@ -95,7 +98,7 @@ acceptance of worker output.
   re-issuing the job as `task_kind: ordinary`; a runtime override on the jail
   route itself is refused, never converted.
   On a host Herdr session, launch jailed Codex research with the native route
-  for the exact `omp-train --harness codex exec --skip-git-repo-check`
+  for the exact `jail-agent --harness codex exec --skip-git-repo-check`
   process as a pane command in its own workspace — the host `codex` binary is
   not the jail. Shopping workers load skill `shopping`; deep research workers
   follow their worker contract. Inside a jail, use only an available in-jail
