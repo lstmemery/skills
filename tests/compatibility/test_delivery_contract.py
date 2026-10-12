@@ -12,13 +12,27 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compatibility.builders import golden, load_module, write_files
+from compatibility.builders import golden, load_module, write_files, write_json
 
 
 HELPERS = load_module("compat_mail_helpers", "skills-local/research-delivery/tests/test_send_report_email.py")
 MAILER = HELPERS.mailer
 RECOVERY = load_module("compat_recovery", "skills-local/research-delivery/reverify_pending.py")
 DELIVERY = load_module("compat_delivery", "skills-local/research-delivery/deliver.py")
+
+from delivery_state import Receipt
+
+
+class FixtureMailer:
+    def __init__(self, receipt, code, calls):
+        self.receipt, self.code, self.calls = receipt, code, calls
+
+    def verify(self, report, message_id, *, timeout):
+        self.calls.append(message_id)
+        return Receipt(self.receipt["state"], self.receipt["message_id"], self.code)
+
+    def send(self, *args, **kwargs):
+        raise AssertionError("recovery cannot send")
 
 
 class DeliveryCompatibilityTests(unittest.TestCase):
@@ -67,7 +81,7 @@ class DeliveryCompatibilityTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, receipt["exit_code"], json.dumps(receipt["result"]), "")
 
                 with redirect_stderr(io.StringIO()):
-                    result = DELIVERY.deliver_report(report, root / "destination", runner=runner)
+                    result = DELIVERY.deliver_report(report, root / "destination", runner=runner, message_id_factory=lambda: fixture["message_id"])
                 observed = result.as_dict()
                 self.assertTrue(Path(observed["pdf"]).is_file())
                 observed["pdf"] = "report.pdf"
@@ -82,31 +96,44 @@ class DeliveryCompatibilityTests(unittest.TestCase):
                 write_files(archive, {"brief.md": "# Fixture brief\n", **case["files"]})
                 calls = []
 
-                def runner(argv, **kwargs):
-                    calls.append(argv)
-                    return subprocess.CompletedProcess(argv, 0, json.dumps(fixture["receipts"]["delivered"]["result"]), "")
-
-                with patch.object(RECOVERY.time, "strftime", return_value=fixture["delivered_at"]):
+                with redirect_stderr(io.StringIO()):
                     summary = RECOVERY.reverify_pending(
-                        root, mailer=Path("fixture-mailer.py"), runner=runner,
+                        root, mailer=FixtureMailer(fixture["receipts"]["delivered"]["result"], 0, calls),
                         today=date.fromisoformat(fixture["day"]), logger=lambda line: None,
                     )
                 self.assertEqual([summary.checked, summary.delivered, summary.pending, summary.invalid], case["counts"])
                 self.assertEqual(len(calls), case["counts"][0])
-                for argv in calls:
-                    self.assertIn("--verify-only", argv)
-                    self.assertNotIn("--check-existing", argv)
-                    self.assertEqual(argv[argv.index("--message-id") + 1], fixture["message_id"])
-                self.assertEqual((archive / "email-message-id").read_text(), case["files"]["email-message-id"])
+                self.assertEqual(calls, [fixture["message_id"]] * case["counts"][0])
+                for filename, contents in case["files"].items():
+                    self.assertEqual((archive / filename).read_text(), contents)
+                self.assertEqual(list(archive.glob("emailed.unverified.*")), [])
                 if summary.delivered:
-                    self.assertEqual((archive / "emailed").read_text(), fixture["delivered_marker"])
-                    self.assertEqual((archive / "emailed").stat().st_mode & 0o777, 0o600)
-                    if "emailed" in case["files"]:
-                        backups = list(archive.glob("emailed.unverified.*"))
-                        self.assertEqual(len(backups), 1)
-                        self.assertEqual(backups[0].read_text(), case["files"]["emailed"])
-                else:
-                    self.assertEqual((archive / "emailed").exists(), "emailed" in case["files"])
+                    record = RECOVERY.DeliveryRecord.read(archive / "brief.md")
+                    self.assertEqual((record.state, record.message_id), ("delivered", fixture["message_id"]))
+                    self.assertEqual((archive / "brief.delivery.json").stat().st_mode & 0o777, 0o600)
+                self.assertEqual((archive / "emailed").exists(), "emailed" in case["files"])
+
+    def test_versioned_pending_record_recovers_once_without_legacy_writes(self):
+        fixture = golden("delivery-v1")
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "2026-10-02"
+            write_files(archive, {"brief.md": fixture["markdown"], "fixture.pdf": fixture["pdf"]})
+            write_json(archive / "brief.delivery.json", fixture["record"])
+            calls = []
+            receipt = dict(state="delivered", message_id=fixture["record"]["message_id"])
+            mailer = FixtureMailer(receipt, 0, calls)
+            summary = RECOVERY.reverify_pending(Path(temporary), mailer=mailer,
+                                                today=date(2026, 10, 2), logger=lambda line: None)
+            self.assertEqual((summary.checked, summary.delivered), (1, 1))
+            record = fixture["record"] | {"state": "delivered"}
+            self.assertEqual(json.loads((archive / "brief.delivery.json").read_text()), record)
+            again = RECOVERY.reverify_pending(Path(temporary), mailer=mailer,
+                                              today=date(2026, 10, 2), logger=lambda line: None)
+            self.assertEqual(again.checked, 0)
+            self.assertEqual(calls, [record["message_id"]])
+            self.assertFalse((archive / "email-message-id").exists())
+            self.assertFalse((archive / "emailed").exists())
+
 
     def test_unverified_or_mismatched_receipt_does_not_mark_delivery(self):
         fixture = golden("delivery")
@@ -120,15 +147,12 @@ class DeliveryCompatibilityTests(unittest.TestCase):
                     receipt["message_id"] = "<different@example.invalid>"
                 calls = []
 
-                def runner(argv, **kwargs):
-                    calls.append(argv)
-                    return subprocess.CompletedProcess(argv, code, json.dumps(receipt), "")
-
-                summary = RECOVERY.reverify_pending(root, mailer=Path("fixture-mailer.py"), runner=runner,
-                                                    today=date.fromisoformat(fixture["day"]), logger=lambda line: None)
+                summary = RECOVERY.reverify_pending(
+                    root, mailer=FixtureMailer(receipt, code, calls),
+                    today=date.fromisoformat(fixture["day"]), logger=lambda line: None,
+                )
                 self.assertEqual((summary.checked, summary.pending, summary.delivered), (1, 1, 0))
-                self.assertEqual(len(calls), 1)
-                self.assertIn("--verify-only", calls[0])
+                self.assertEqual(calls, [fixture["message_id"]])
                 self.assertFalse((archive / "emailed").exists())
 
 
