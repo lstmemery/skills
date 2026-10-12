@@ -727,6 +727,11 @@ class JobsTest(unittest.TestCase):
         self.assertIn('"task_id": "brief-task"', prompt)
         self.assertIn('"assignment_revision": 3', prompt)
         self.assertIn('result_schema: "Copy scripts/worker-records.py schema', prompt)
+        self.assertIn(
+            'python3 scripts/worker-records.py validate-result "$WORKER_DIR/result.json" '
+            '--task-id "$TASK_ID" --revision "$REVISION"',
+            prompt,
+        )
         self.assertIn("delegation-authorized.toml", prompt)
         self.assertIn("token-allowlist.txt", prompt)
         self.assertIn(str(self.context_test), prompt)
