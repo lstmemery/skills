@@ -450,11 +450,44 @@ class JobsTest(unittest.TestCase):
 
         self.assertEqual((code, result["finish_complete"]), (0, True))
         telemetry = json.loads((output / "telemetry.json").read_text())
-        self.assertEqual(telemetry["coordinator_grade"], "accepted")
+        self.assertEqual(telemetry["coordinator_grade"], "pending")
+        grade_record_path = self.run / "coordinator-grades.json"
+        self.assertTrue(grade_record_path.is_file())
+        self.assertNotEqual(grade_record_path.parent, output)
+        grade_record = json.loads(grade_record_path.read_text())
+        self.assertEqual(grade_record["grades"]["job0"]["grade"], "accepted")
+        self.assertNotIn("telemetry", self.state()["jobs"][0])
+        self.assertNotIn("coordinator_grade", self.state()["jobs"][0])
         self.assertEqual(telemetry["independent_validation"]["status"], "passed")
         self.assertEqual(telemetry["independent_validation"]["exit_code"], 0)
         self.assertEqual(sum(event["action"] == "independent_validator"
                              for event in self.events()), 2)
+
+    def test_worker_cannot_forge_coordinator_grade_in_writable_telemetry(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local",
+                        model="qwen3.8-27b-uncensored", effort="medium")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "telemetry-tamper", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.call()
+
+        job = self.state()["jobs"][0]
+        output = Path(job["host_output"])
+        telemetry_path = output / "telemetry.json"
+        telemetry = json.loads(telemetry_path.read_text())
+        telemetry["coordinator_grade"] = "accepted"
+        telemetry_path.write_text(json.dumps(telemetry))
+
+        code, result = self.call("finish")
+
+        outcome = result["finish"]["jobs"]["job0"]
+        self.assertEqual((code, result["finish_complete"]), (10, False))
+        self.assertIn("tamper", outcome["issue"].lower())
+        self.assertFalse(result["jobs"][0]["workspace_closed"])
+        sanitized = json.loads(telemetry_path.read_text())
+        self.assertEqual(sanitized["coordinator_grade"], "pending")
+        self.assertFalse((self.run / "coordinator-grades.json").exists())
 
     def test_preexisting_quota_backoff_is_checkpointed_before_fake_host_launch(self):
         model = "qwen3.8-27b-uncensored"
@@ -492,7 +525,9 @@ class JobsTest(unittest.TestCase):
         self.assertIn("cannot be accepted", result["finish"]["jobs"]["job0"]["issue"])
         output = Path(self.state()["jobs"][0]["host_output"])
         telemetry = json.loads((output / "telemetry.json").read_text())
-        self.assertEqual(telemetry["coordinator_grade"], "accepted")
+        self.assertEqual(telemetry["coordinator_grade"], "pending")
+        self.assertEqual(json.loads((self.run / "coordinator-grades.json").read_text())
+                         ["grades"]["job0"]["grade"], "accepted")
         self.assertEqual(telemetry["independent_validation"]["status"], "failed")
         self.assertEqual(telemetry["independent_validation"]["exit_code"], 9)
 

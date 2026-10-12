@@ -203,10 +203,12 @@ checkpoint and public engine result byte-compatible. Older checkpoints that
 embedded telemetry in job records remain loadable; the next checkpoint moves
 that data to the sidecar. The sidecar records the selected route (`lane`,
 `level`, `choice`, `model`, `effort`, `harness`, `provider`), start/end times,
-continuation count and reasons, quota signals, coordinator grade, and
-independent-validation status. Workers must not edit this file. A local-lane
-`finish` requires a coordinator grade; an `accepted` grade additionally
-requires a passing independent validator.
+continuation count and reasons, quota signals, a `coordinator_grade` slot that
+must remain `pending`, and independent-validation status. A non-pending grade in
+worker-writable telemetry is treated as tampering and ignored. `finish` stores
+the actual grade in coordinator-owned `coordinator-grades.json` in the run
+directory. A local-lane `finish` requires a coordinator grade; an `accepted`
+grade additionally requires a passing independent validator.
 
 Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–32 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
 

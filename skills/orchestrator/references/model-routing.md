@@ -153,11 +153,13 @@ well as coordinator summaries.
 The managed coordinator writes one `telemetry.json` per task attempt. Its
 versioned route record has `lane`, `level`, `choice`, `model`, `effort`,
 `harness`, and `provider`; the task record also has `started_at`, `ended_at`,
-`continuation_count`, `continuation_reasons`, `quota_signals`,
-`coordinator_grade`, and `independent_validation`. Workers must not edit this
-file or claim the coordinator's grade. A quota retry records its signal/reset
-and continuation reason, and local-lane completion records the independent
-validator result.
+`continuation_count`, `continuation_reasons`, `quota_signals`, a
+`coordinator_grade` slot that remains `pending`, and `independent_validation`.
+The actual coordinator grade lives in coordinator-owned `coordinator-grades.json`
+in the run directory. A non-pending grade in worker-writable telemetry is
+treated as tampering and ignored. Workers must not edit telemetry or claim the
+coordinator's grade. A quota retry records its signal/reset and continuation
+reason, and local-lane completion records the independent validator result.
 
 ## Native contracts and capability gaps
 

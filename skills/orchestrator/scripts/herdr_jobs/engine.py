@@ -33,6 +33,9 @@ class Engine:
         self.admission = admission_store or AdmissionStore()
         self.lifecycle = JobLifecycle()
         self.state = None
+        self.grade_record_path = self.root / "coordinator-grades.json"
+        self.coordinator_grades = {}
+        self.telemetry_grade_tampering = set()
 
     def admission_config(self):
         return self.state["request"]["policy"].get("provider_admission", {
@@ -209,6 +212,42 @@ class Engine:
             save(output / "telemetry.json", telemetry)
         save(self.path, persisted)
 
+    def load_coordinator_grades(self):
+        try:
+            record = load_json(self.grade_record_path, 1048576)
+        except FileNotFoundError:
+            return {}
+        except (OSError, JobError) as error:
+            raise JobError("conflict", "stored coordinator grade record is unavailable or invalid") from error
+        fields(record, ["schema_version", "grades"], label="coordinator-grades.json")
+        version(record["schema_version"])
+        grades = record["grades"]
+        if not isinstance(grades, dict):
+            raise JobError("conflict", "stored coordinator grades must be an object")
+        jobs = {job["spec"]["job_id"]: job for job in self.state["jobs"]}
+        for job_id, grade_record in grades.items():
+            if job_id not in jobs:
+                raise JobError("conflict", "stored coordinator grade references an unknown job")
+            fields(grade_record, ["attempt_id", "grade"], label="coordinator grade")
+            if grade_record["attempt_id"] != jobs[job_id]["attempt_id"]:
+                raise JobError("conflict", f"{job_id}: stored coordinator grade belongs to another attempt")
+            if (not isinstance(grade_record["grade"], str)
+                    or grade_record["grade"] not in COORDINATOR_GRADES):
+                raise JobError("conflict", "stored coordinator grade is invalid")
+        return grades
+
+    def record_coordinator_grade(self, job, grade):
+        job_id = job["spec"]["job_id"]
+        existing = self.coordinator_grades.get(job_id)
+        if existing is not None:
+            if existing["attempt_id"] != job["attempt_id"]:
+                raise JobError("conflict", f"{job_id}: coordinator grade belongs to another attempt")
+            if existing["grade"] != grade:
+                raise JobError("conflict", f"{job_id}: coordinator grade is already recorded as {existing['grade']}")
+            return
+        self.coordinator_grades[job_id] = {"attempt_id": job["attempt_id"], "grade": grade}
+        save(self.grade_record_path, {"schema_version": 1, "grades": self.coordinator_grades})
+
     def validate_preview(self, request):
         self.state = {"request": request}
         for spec in request["jobs"]:
@@ -240,6 +279,7 @@ class Engine:
         if not isinstance(state["jobs"], list) or len(state["jobs"]) != len(state["request"]["jobs"]):
             raise JobError("conflict", "stored jobs do not match the request")
         self.state = state
+        self.telemetry_grade_tampering = set()
         for job, spec in zip(state["jobs"], state["request"]["jobs"]):
             fields(job, ["spec", "attempt_id", "agent_name", "resolved_model", "phase", "pane_id", "previous_pane_ids",
                          "pending_effect", "history", "observed", "activity_seen", "settled", "collection",
@@ -291,6 +331,11 @@ class Engine:
                     except (OSError, JobError) as error:
                         raise JobError("conflict", "stored task telemetry is unavailable or invalid") from error
             job["telemetry"] = telemetry
+            if (isinstance(job["telemetry"], dict)
+                    and "coordinator_grade" in job["telemetry"]
+                    and job["telemetry"]["coordinator_grade"] != "pending"):
+                self.telemetry_grade_tampering.add(spec["job_id"])
+                job["telemetry"]["coordinator_grade"] = "pending"
             validate_task_telemetry(job["telemetry"], expected_telemetry["route"])
             if job["start_diagnostic"] is not None:
                 diagnostic = fields(job["start_diagnostic"], ["command", "exit_code", "stdout", "stderr"],
@@ -395,6 +440,7 @@ class Engine:
                     and not job["settled"] and not job["admission_acquired"]):
                 self.acquire_admission(job, bypass_admission=True)
         integer(state["request"]["concurrency"], "stored concurrency", 1, 64)
+        self.coordinator_grades = self.load_coordinator_grades()
         self.state = state
 
     def initialize(self, request, capabilities, binding_path):
@@ -412,6 +458,8 @@ class Engine:
                       "session_id": capabilities["session_id"], "binding_digest": digest(encoded(capabilities["binding"])),
                       "jobs": jobs, "created_at": now(), "updated_at": now()}
         self.state["retry_override"] = request.get("retry_override")
+        self.coordinator_grades = {}
+        self.telemetry_grade_tampering = set()
         self.validate_prompts()
         self.checkpoint()
 
@@ -612,9 +660,9 @@ class Engine:
         expectation = spec.get("output_expectation", task or "Complete the assigned task.")
         telemetry_contract = (
             "Launcher-owned telemetry.json (schema_version 1) records route {lane, level, choice, model, effort, harness, provider}, "
-            "started_at, ended_at, continuation_count, continuation_reasons, quota_signals, coordinator_grade, "
-            "and independent_validation. Do not edit this file or claim a coordinator grade; the launcher and "
-            "coordinator own it.\n"
+            "started_at, ended_at, continuation_count, continuation_reasons, quota_signals, a coordinator_grade slot "
+            "that remains pending, and independent_validation. Do not edit this file or claim a coordinator grade; "
+            "the launcher and coordinator own it.\n"
         )
         if spec.get("local_lane") is True:
             output_contract += (
@@ -802,16 +850,21 @@ class Engine:
             job_id = job["spec"]["job_id"]
             worker = job["spec"].get("worker_result")
             validation = "pending" if worker else "not_requested"
+            if job_id in self.telemetry_grade_tampering:
+                issue = ("worker-writable telemetry contained a coordinator_grade; tampering was detected "
+                         "and the value was ignored. Rerun finish with --coordinator-grade after review.")
+                job["issue"] = issue
+                self.checkpoint()
+                outcomes[job_id] = {"finished": False, "issue": issue,
+                                    "worker_result_validation": validation}
+                continue
             if not job["settled"] or job["collection"] is None or job["collection_error"]:
                 outcomes[job_id] = {"finished": False, "issue": "worker is not settled with a collected receipt",
                                     "worker_result_validation": validation}
                 continue
             requested_grade = coordinator_grades.get(job_id)
             if requested_grade is not None:
-                previous_grade = job["telemetry"]["coordinator_grade"]
-                if previous_grade not in ("pending", requested_grade):
-                    raise JobError("conflict", f"{job_id}: coordinator grade is already recorded as {previous_grade}")
-                job["telemetry"]["coordinator_grade"] = requested_grade
+                self.record_coordinator_grade(job, requested_grade)
             if job["spec"].get("local_lane") is True:
                 try:
                     validation_result = self.transport.validate_independent(job)
@@ -845,7 +898,7 @@ class Engine:
                     "observed_at": now(), "evidence": evidence,
                 }
                 self.checkpoint()
-                grade = job["telemetry"]["coordinator_grade"]
+                grade = self.coordinator_grades.get(job_id, {}).get("grade", "pending")
                 if grade == "pending":
                     outcomes[job_id] = {"finished": False,
                                         "issue": "local_lane requires --coordinator-grade JOB_ID=accepted|rework|rejected",
@@ -965,7 +1018,7 @@ class Engine:
             outcomes[job_id] = {"finished": True, "workspace_closed": True,
                                 "worker_disposition": job.get("worker_disposition"),
                                 "worker_result_validation": validation,
-                                "coordinator_grade": job["telemetry"]["coordinator_grade"],
+                                "coordinator_grade": self.coordinator_grades.get(job_id, {}).get("grade", "pending"),
                                 "independent_validation": job["telemetry"]["independent_validation"]["status"]}
             if worker:
                 outcomes[job_id]["worker_result_outcome"] = result["outcome"]

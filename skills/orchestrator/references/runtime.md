@@ -192,8 +192,10 @@ admission with the pending-effect marker, replaces the pane shell with an
 `env -i` shell, starts Pi, submits the brief through the verified submit
 helper, and waits for the worker to finish before releasing admission. The
 telemetry records route, model, effort, harness, start/end times, continuation
-count and reasons, quota signals, coordinator grade, and independent-validation
-status. It records the start time before issuing the Herdr start command and
+count and reasons, quota signals, a coordinator-grade slot that remains pending,
+and independent-validation status. The actual coordinator grade is stored in
+coordinator-owned `coordinator-grades.json` in the run directory. It records the
+start time before issuing the Herdr start command and
 the end time only after the worker reaches `done`. The telemetry path must be
 new; the launcher refuses to overwrite an existing record.
 Its environment is limited to `HOME`, `PATH`, `TERM`, `LANG`, Herdr's pane
