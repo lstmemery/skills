@@ -1,13 +1,18 @@
 import base64
+from contextlib import redirect_stdout
+import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import patch
@@ -46,9 +51,9 @@ class CaptureTests(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-m', message)
 
-    def invoke(self, command, *args, env=None):
+    def invoke(self, command, *args, env=None, timeout=None):
         result = subprocess.run([sys.executable, str(SCRIPT), command, *map(str, args)],
-                                capture_output=True, text=True, env=os.environ | (env or {}))
+                                capture_output=True, text=True, env=os.environ | (env or {}), timeout=timeout)
         self.assertTrue(result.stdout, result.stderr)
         return result.returncode, json.loads(result.stdout)
 
@@ -460,6 +465,272 @@ class CaptureTests(unittest.TestCase):
             result = CAPTURE.write_capture(out, manifest, blobs, b'', b'')
         self.assertEqual(result['gitleaks'], 'stdlib-only')
         self.assertTrue((out / 'COMPLETE').exists())
+
+    def test_authority_leaf_and_ancestor_symlinks_are_gaps_without_target_bytes(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        value = ('ghp_' + 'EXAMPLE' + 'Q7xK2mPzL9vR4tYw' * 2).encode()
+        (outside / 'spec.md').write_bytes(value)
+        leaf = self.root / 'leaf.md'
+        leaf.symlink_to(outside / 'spec.md')
+        ancestor = self.root / 'ancestor'
+        ancestor.symlink_to(outside, target_is_directory=True)
+        out, result = self.capture(extra=['--authority', leaf, '--authority', ancestor / 'spec.md'],
+                                   env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        self.assertEqual(result['coverage'], 'incomplete')
+        manifest = json.loads((out / 'manifest.json').read_text())
+        self.assertEqual([row['gap'] for row in manifest['authorities']],
+                         ['Authority symlinks are not followed'] * 2)
+        self.assertTrue(all('sha256' not in row for row in manifest['authorities']))
+        self.assertNotIn(value, [path.read_bytes() for path in (out / 'blobs').iterdir()])
+        self.assertEqual(self.invoke('verify', '--capture', out)[0], 0)
+
+    def test_wip_symlink_ancestor_is_a_gap_without_external_bytes(self):
+        nested = self.repo / 'nested'
+        nested.mkdir()
+        (nested / 'file.txt').write_text('tracked original\n')
+        self.commit('nested tracked source')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        value = ('ghp_' + 'EXAMPLE' + 'Q7xK2mPzL9vR4tYw' * 2).encode()
+        (outside / 'file.txt').write_bytes(value)
+        shutil.rmtree(nested)
+        nested.symlink_to(outside, target_is_directory=True)
+        out, result = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        self.assertEqual(result['coverage'], 'incomplete')
+        manifest = json.loads((out / 'manifest.json').read_text())
+        self.assertEqual(manifest['after']['nested/file.txt'], {'mode': 'unsupported', 'gap': 'Ancestor is a symlink'})
+        self.assertNotIn(value, [path.read_bytes() for path in (out / 'blobs').iterdir()])
+        self.assertEqual(self.invoke('read', '--capture', out, '--path', 'nested/file.txt')[0], 5)
+
+    def test_destination_symlinks_and_symlinked_parents_do_not_write(self):
+        target = self.root / 'target'
+        target.mkdir()
+        (target / 'sentinel').write_bytes(b'keep original bytes')
+        link = self.root / 'destination-link'
+        link.symlink_to(target, target_is_directory=True)
+        dangling = self.root / 'dangling'
+        dangling.symlink_to(self.root / 'missing')
+        parent_link = self.root / 'parent-link'
+        parent_link.symlink_to(target, target_is_directory=True)
+        for out, code, outcome in ((link, 3, 'conflict'), (dangling, 3, 'conflict'),
+                                   (parent_link / 'new', 2, 'invalid_input')):
+            with self.subTest(destination=out.name):
+                actual, result = self.invoke('capture', '--repo', self.repo, '--mode', 'wip', '--out', out,
+                                            env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+                self.assertEqual((actual, result['outcome']), (code, outcome))
+                self.assertEqual((target / 'sentinel').read_bytes(), b'keep original bytes')
+                self.assertEqual({path.name for path in target.iterdir()}, {'sentinel'})
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(dangling.is_symlink())
+        self.assertEqual(list(self.root.glob('.review-*')), [])
+
+    def test_all_capture_consumers_reject_tampered_payloads_and_completion(self):
+        (self.repo / 'file.txt').write_text('committed after\n')
+        self.commit('captured history')
+        authority = self.root / 'spec.md'
+        authority.write_text('captured authority\n')
+        original, saved = self.capture('since', self.initial, extra=['--authority', authority],
+                                       env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        manifest = json.loads((original / 'manifest.json').read_text())
+        blobs = [manifest['before']['file.txt']['sha256'], manifest['after']['file.txt']['sha256'],
+                 manifest['authorities'][0]['sha256']]
+        cases = [('manifest.json', 'Capture manifest digest mismatch'),
+                 ('COMPLETE', 'Capture completion marker mismatch'),
+                 ('diff.patch', 'Capture artifact digest mismatch'),
+                 ('commits.txt', 'Capture artifact digest mismatch')]
+        cases += [(f'blobs/{sha}', 'Captured source digest mismatch') for sha in blobs]
+        for index, (relative, message) in enumerate(cases):
+            with self.subTest(artifact=relative):
+                out = self.root / f'tampered-{index}'
+                shutil.copytree(original, out)
+                code, verified = self.invoke('verify', '--capture', out)
+                self.assertEqual((code, verified['capture_id']), (0, saved['capture_id']))
+                if relative == 'manifest.json':
+                    altered = dict(manifest, empty=not manifest['empty'])
+                    (out / relative).write_text(json.dumps(altered))
+                else:
+                    (out / relative).write_bytes(b'tampered bytes\n')
+                for command in ('verify', 'read', 'check'):
+                    args = ['--path', 'file.txt'] if command == 'read' else []
+                    code, result = self.invoke(command, '--capture', out, *args)
+                    self.assertEqual((code, result['outcome']), (4, 'corrupt'))
+                    self.assertEqual(result['message'], message)
+
+    def test_all_capture_consumers_reject_symlinked_storage_even_with_matching_bytes(self):
+        original, _ = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        manifest = json.loads((original / 'manifest.json').read_text())
+        sha = manifest['after']['file.txt']['sha256']
+        cases = [('.', 2, 'invalid_input'), ('blobs', 2, 'invalid_input')]
+        cases += [(name, 5, 'unavailable') for name in
+                  ('manifest.json', 'COMPLETE', 'diff.patch', 'commits.txt', f'blobs/{sha}')]
+        for index, (relative, expected_code, outcome) in enumerate(cases):
+            with self.subTest(artifact=relative):
+                out = self.root / f'linked-{index}'
+                if relative == '.':
+                    out.symlink_to(original, target_is_directory=True)
+                else:
+                    shutil.copytree(original, out)
+                    target = out / relative
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                    target.symlink_to(original / relative)
+                for command in ('verify', 'read', 'check'):
+                    args = ['--path', 'file.txt'] if command == 'read' else []
+                    code, result = self.invoke(command, '--capture', out, *args)
+                    self.assertEqual((code, result['outcome']), (expected_code, outcome))
+
+    def test_incomplete_nonregular_and_malformed_captures_never_verify(self):
+        original, _ = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        manifest = json.loads((original / 'manifest.json').read_text())
+        sha = manifest['after']['file.txt']['sha256']
+        for index, relative in enumerate(('manifest.json', 'COMPLETE', 'diff.patch', 'commits.txt', f'blobs/{sha}')):
+            with self.subTest(missing=relative):
+                out = self.root / f'incomplete-{index}'
+                shutil.copytree(original, out)
+                (out / relative).unlink()
+                code, result = self.invoke('verify', '--capture', out)
+                self.assertEqual((code, result['outcome']), (5, 'unavailable'))
+        for index, relative in enumerate(('manifest.json', 'COMPLETE', 'diff.patch', 'commits.txt', f'blobs/{sha}')):
+            with self.subTest(nonregular=relative):
+                out = self.root / f'fifo-capture-{index}'
+                shutil.copytree(original, out)
+                (out / relative).unlink()
+                os.mkfifo(out / relative)
+                code, result = self.invoke('verify', '--capture', out, timeout=10)
+                # Manifest parsing catches Failure's ValueError base; other reads retain unsupported.
+                expected = (2, 'invalid_input') if relative == 'manifest.json' else (5, 'unsupported')
+                self.assertEqual((code, result['outcome']), expected)
+        for index, raw in enumerate((b'{', b'[]', b'null', b'{}', b'\xff')):
+            with self.subTest(manifest=raw):
+                out = self.root / f'malformed-{index}'
+                shutil.copytree(original, out)
+                (out / 'manifest.json').write_bytes(raw)
+                code, result = self.invoke('verify', '--capture', out)
+                self.assertEqual((code, result['outcome']), (2, 'invalid_input'))
+        (original / 'COMPLETE').write_bytes(b'\xff')
+        code, result = self.invoke('verify', '--capture', original)
+        self.assertEqual((code, result['outcome']), (5, 'unavailable'))
+
+    def test_saved_capture_verifies_and_reads_without_the_source_repository(self):
+        out, saved = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        shutil.rmtree(self.repo)
+        code, verified = self.invoke('verify', '--capture', out)
+        self.assertEqual((code, verified['capture_id']), (0, saved['capture_id']))
+        code, read = self.invoke('read', '--capture', out, '--path', 'file.txt')
+        self.assertEqual((code, read['text']), (0, 'first\n'))
+
+    def test_capture_identity_is_independent_of_destination_and_json_presentation(self):
+        first, saved = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        second, repeated = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        self.assertEqual(saved['capture_id'], repeated['capture_id'])
+        manifest = json.loads((second / 'manifest.json').read_text())
+        (second / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+        code, verified = self.invoke('verify', '--capture', second)
+        self.assertEqual((code, verified['capture_id']), (0, saved['capture_id']))
+        self.assertEqual((first / 'COMPLETE').read_bytes(), (second / 'COMPLETE').read_bytes())
+
+    def test_cli_failure_outcomes_keep_their_exit_codes(self):
+        (self.repo / 'binary').write_bytes(b'\x00\xff')
+        out, _ = self.capture(env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+        corrupt = self.root / 'corrupt'
+        shutil.copytree(out, corrupt)
+        (corrupt / 'COMPLETE').write_bytes(b'wrong capture id\n')
+        (self.repo / 'leak.txt').write_text('ghp_' + 'EXAMPLE' + 'Q7xK2mPzL9vR4tYw' * 2 + '\n')
+        cases = (
+            ('missing-input', 'capture', [], 2, 'invalid_input'),
+            ('missing-base', 'capture', ['--repo', self.repo, '--mode', 'since', '--out', self.root / 'no-base'], 2, 'invalid_input'),
+            ('bad-ref', 'capture', ['--repo', self.repo, '--mode', 'since', '--base', 'missing-ref', '--out', self.root / 'bad-ref'], 2, 'git_error'),
+            ('reservation', 'capture', ['--repo', self.repo, '--mode', 'wip', '--out', out], 3, 'conflict'),
+            ('drift', 'check', ['--capture', out], 3, 'drift'),
+            ('integrity', 'verify', ['--capture', corrupt], 4, 'corrupt'),
+            ('binary-reader', 'read', ['--capture', out, '--path', 'binary'], 5, 'unsupported'),
+            ('missing-capture', 'verify', ['--capture', self.root / 'missing'], 5, 'unavailable'),
+            ('secret', 'capture', ['--repo', self.repo, '--mode', 'wip', '--out', self.root / 'secret'], 6, 'secret_detected'),
+        )
+        for name, command, args, expected_code, outcome in cases:
+            with self.subTest(failure=name):
+                code, result = self.invoke(command, *args, env={CAPTURE.SECRETS_SCANNER_ENV: 'stdlib-only'})
+                self.assertEqual((code, result['outcome']), (expected_code, outcome))
+        self.assertFalse((self.root / 'secret').exists())
+
+    def test_cli_git_timeout_is_an_unavailable_json_result(self):
+        out = self.root / 'timed-out'
+        argv = [str(SCRIPT), 'capture', '--repo', str(self.repo), '--mode', 'wip', '--out', str(out)]
+        stdout = io.StringIO()
+        with (patch.object(sys, 'argv', argv), redirect_stdout(stdout),
+              patch.object(CAPTURE.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 30))):
+            code = CAPTURE.main()
+        self.assertEqual((code, json.loads(stdout.getvalue())['outcome']), (5, 'unavailable'))
+        self.assertFalse(out.exists())
+
+
+class BoundedReadContractTests(unittest.TestCase):
+    """Deterministic OS-boundary probes for races that a CLI fixture cannot schedule."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = self.root / 'payload'
+
+    def test_regular_reads_accept_the_inclusive_bound_and_reject_larger_files(self):
+        for size in (0, 1, 63, 64):
+            with self.subTest(size=size):
+                data = b'x' * size
+                self.path.write_bytes(data)
+                self.assertEqual(CAPTURE.bounded_file(self.path, 64), data)
+        self.path.write_bytes(b'x' * 65)
+        with self.assertRaises(CAPTURE.Failure) as raised:
+            CAPTURE.bounded_file(self.path, 64)
+        self.assertEqual((raised.exception.result['outcome'], raised.exception.result['limit']), ('unsupported', 64))
+
+    def test_leaf_symlinks_and_directories_are_not_read_as_regular_files(self):
+        self.path.write_bytes(b'benign target bytes')
+        link = self.root / 'link'
+        link.symlink_to(self.path)
+        with self.assertRaises(OSError) as raised:
+            CAPTURE.bounded_file(link, 64)
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
+        with self.assertRaises(OSError) as raised:
+            CAPTURE.bounded_file(self.root, 64)
+        self.assertEqual(raised.exception.errno, errno.EISDIR)
+
+    def test_read_detects_growth_beyond_the_bound_after_the_size_check(self):
+        self.path.write_bytes(b'x' * 65)
+        info = self.path.stat()
+        fields = ('st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        before = SimpleNamespace(**{field: getattr(info, field) for field in fields})
+        before.st_size = 64
+        with patch.object(CAPTURE.os, 'fstat', return_value=before):
+            with self.assertRaises(CAPTURE.Failure) as raised:
+                CAPTURE.bounded_file(self.path, 64)
+        self.assertEqual((raised.exception.result['outcome'], raised.exception.result['message']),
+                         ('conflict', 'File grew beyond capture bound'))
+
+    def test_read_detects_identity_size_and_timestamp_changes_without_growth(self):
+        self.path.write_bytes(b'unchanged bytes\n')
+        info = self.path.stat()
+        fields = ('st_mode', 'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        before = {field: getattr(info, field) for field in fields}
+        for field in fields[1:]:
+            with self.subTest(changed=field):
+                after = dict(before)
+                after[field] += 1
+                with patch.object(CAPTURE.os, 'fstat', side_effect=[SimpleNamespace(**before), SimpleNamespace(**after)]):
+                    with self.assertRaises(CAPTURE.Failure) as raised:
+                        CAPTURE.bounded_file(self.path, 64)
+                self.assertEqual((raised.exception.result['outcome'], raised.exception.result['message']),
+                                 ('conflict', 'File changed while reading'))
+
+    def test_repository_paths_reject_absolute_empty_and_parent_traversal_names(self):
+        for name in ('', '..', '../outside', 'nested/../payload', str(self.root / 'payload')):
+            with self.subTest(path=name):
+                with self.assertRaises(CAPTURE.Failure) as raised:
+                    CAPTURE.work_entry(self.root, name, CAPTURE.Collector())
+                self.assertEqual(raised.exception.result['outcome'], 'invalid_input')
 
 
 if __name__ == '__main__':
