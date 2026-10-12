@@ -1,0 +1,102 @@
+{
+  "binding_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "created_at": "2030-01-01T00:00:00+00:00",
+  "host_contract": null,
+  "jobs": [
+    {
+      "activity_seen": true,
+      "admission_acquired": true,
+      "admission_lease_id": "$LEASE",
+      "admission_model": "default",
+      "admission_wait": null,
+      "agent_name": "c9-aaaaaaaaaaaaaaaaaaaaaaaa",
+      "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "collection": null,
+      "collection_error": null,
+      "exit_record": "$RUN_DIR/lifecycle/compatibility-job/exit.json",
+      "history": [
+        {
+          "action": "split",
+          "observed_at": "2030-01-01T00:00:00+00:00",
+          "pane_id": "pane-old"
+        },
+        {
+          "action": "move",
+          "observed_at": "2030-01-01T00:00:00+00:00",
+          "pane_id": "pane-new"
+        },
+        {
+          "action": "start",
+          "observed_at": "2030-01-01T00:00:00+00:00",
+          "pane_id": "pane-new"
+        }
+      ],
+      "host_output": "$RUN_DIR/workers/compatibility-job/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "issue": null,
+      "observed": null,
+      "pane_id": "pane-new",
+      "pending_effect": null,
+      "phase": "submitted",
+      "previous_pane_ids": [
+        "pane-old"
+      ],
+      "provider": "codex",
+      "rate_limit_seen": false,
+      "rate_limit_until": null,
+      "resolved_model": null,
+      "retry_override": null,
+      "retry_profile": null,
+      "settled": false,
+      "start_diagnostic": null,
+      "spec": {
+        "job_id": "compatibility-job",
+        "output_expectation": "A fixture report.",
+        "route": {
+          "mode": "agent",
+          "runtime": "codex"
+        },
+        "task": "Run the compatibility fixture.",
+        "task_kind": "ordinary",
+        "writes_repository": false
+      },
+      "worker_disposition": null,
+      "worker_disposition_override": null,
+      "worker_output": "$RUN_DIR/workers/compatibility-job/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workspace_closed": false,
+      "workspace_id": "workspace-1"
+    }
+  ],
+  "request": {
+    "concurrency": 1,
+    "jobs": [
+      {
+        "job_id": "compatibility-job",
+        "output_expectation": "A fixture report.",
+        "route": {
+          "mode": "agent",
+          "runtime": "codex"
+        },
+        "task": "Run the compatibility fixture.",
+        "task_kind": "ordinary",
+        "writes_repository": false
+      }
+    ],
+    "policy": {
+      "provider_admission": {
+        "default_backoff_seconds": 60,
+        "default_provider_cap": 4,
+        "provider_caps": {
+          "codex": 2
+        }
+      }
+    },
+    "policy_digest": "fixture-policy-digest",
+    "request_id": "compatibility-request",
+    "schema_version": 1
+  },
+  "request_digest": "fd25a6de33e9423cf083078e70482cb527bd078126e0466c33885695eafadecd",
+  "retry_override": null,
+  "schema_version": 1,
+  "session_id": "compatibility-session",
+  "updated_at": "2030-01-01T00:00:00+00:00"
+}
