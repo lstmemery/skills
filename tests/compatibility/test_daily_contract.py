@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compatibility.builders import DailyArchive, ROOT, golden, write_files, write_json
+from compatibility.builders import AGENTS_ROOT, DailyArchive, golden, write_files, write_json
 
 
 class DailyCompatibilityTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class DailyCompatibilityTests(unittest.TestCase):
             config = Path(temporary) / "route.json"
             write_json(config, fixture["config"])
             for workflow in ("hn", "ml"):
-                script = ROOT / f"skills-local/{workflow}-daily-brief/{workflow}_daily_brief.py"
+                script = AGENTS_ROOT / f"skills-local/{workflow}-daily-brief/{workflow}_daily_brief.py"
                 for route in ("primary", "fallback"):
                     for output, expected in fixture["routes"][route].items():
                         with self.subTest(workflow=workflow, route=route, output=output):

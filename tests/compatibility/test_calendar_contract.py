@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compatibility.builders import ROOT, calendar_block, golden, load_module
+from compatibility.builders import AGENTS_ROOT, calendar_block, golden, load_module
 
 
 CALENDAR = load_module("compat_calendar", "skills-local/nextcloud-calendar/nextcloud_calendar.py")
@@ -46,7 +46,7 @@ class CalendarCompatibilityTests(unittest.TestCase):
                 self.assertEqual(violations, [])
 
     def test_classifier_cli_accepts_event_list_and_calendar_response(self):
-        script = ROOT / "skills-local/meal-plan/scripts/calendar_days.py"
+        script = AGENTS_ROOT / "skills-local/meal-plan/scripts/calendar_days.py"
         for case in golden("calendar")["cases"]:
             for envelope in (case["events"], {"ok": True, "events": case["events"]}):
                 with self.subTest(case=case["name"], envelope=isinstance(envelope, dict)):

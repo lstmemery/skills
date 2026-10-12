@@ -33,16 +33,18 @@ def _agents_root():
     )
 
 
-ROOT = _agents_root()
+AGENTS_ROOT = _agents_root()
 
 
 def golden(name):
     return json.loads((FIXTURES / (name + ".json")).read_text(encoding="utf-8"))
 
 
-def load_module(name, relative):
-    path = Path(relative)
-    spec = importlib.util.spec_from_file_location(name, path if path.is_absolute() else ROOT / path)
+def load_module(name, source_path):
+    path = Path(source_path)
+    if not path.is_absolute():
+        path = AGENTS_ROOT / path
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -163,13 +165,13 @@ class DailyArchive:
         self.archive = self.skill / "briefs" / self.fixture["day"]
         self.archive.mkdir(parents=True)
         self.bin.mkdir()
-        source = ROOT / "skills-local" / self.skill.name
+        source = AGENTS_ROOT / "skills-local" / self.skill.name
         for name in ("daily-run.sh", workflow + "_daily_brief.py"):
             shutil.copy2(source / name, self.skill / name)
         common_dir = self.root / "skills-local/daily-brief-common"
         common_dir.mkdir(parents=True, exist_ok=True)
         for name in ("runner-common.sh", "route_config.py"):
-            shutil.copy2(ROOT / "skills-local/daily-brief-common" / name, common_dir / name)
+            shutil.copy2(AGENTS_ROOT / "skills-local/daily-brief-common" / name, common_dir / name)
         write_json(self.skill / "runtime-config.json", self.fixture["config"])
         for name in ("codex", "orchestrator", "date"):
             shutil.copy2(FIXTURES / "daily-process.py", self.bin / name)
