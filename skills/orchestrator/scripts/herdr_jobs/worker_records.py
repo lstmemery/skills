@@ -93,6 +93,11 @@ def _check_identity(record, expected, label):
         records.invalid(
             f"{label} task_id mismatch: expected {expected.task_id!r}, got {record['task_id']!r}"
         )
+    if record["assignment_revision"] != expected.assignment_revision:
+        records.invalid(
+            f"{label} assignment_revision mismatch: expected {expected.assignment_revision}, "
+            f"got {record['assignment_revision']!r}"
+        )
 
 
 def check_brief_redaction(brief_path):
@@ -101,16 +106,15 @@ def check_brief_redaction(brief_path):
         content = Path(brief_path).read_text(encoding="utf-8")
     except OSError as error:
         records.invalid(f"cannot read brief at {brief_path}: {error.strerror or error}")
+    # Markdown fenced code is illustrative content, not a section of the brief.
+    content = re.sub(
+        r"(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?^ {0,3}\1[ \t]*$", "", content
+    )
     if not re.search(r"truenas|system\.general|\bwg0\b|secrets?", content, re.I):
         return False
     if re.search(r"^#{1,6}\s+Output redaction\s*$", content, re.I | re.M):
         return False
     return True
-    if record["assignment_revision"] != expected.assignment_revision:
-        records.invalid(
-            f"{label} assignment_revision mismatch: expected {expected.assignment_revision}, "
-            f"got {record['assignment_revision']!r}"
-        )
 
 
 def _validate_candidate(candidate):
