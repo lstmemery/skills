@@ -272,6 +272,23 @@ def _read_json(filesystem, path, description):
     return raw, value
 
 
+def _read_review_evidence(filesystem, path, *, regular=False):
+    """Read review evidence with the same strict JSON rules for every consumer."""
+    try:
+        raw = filesystem.read_regular(path) if regular else filesystem.read(path)
+    except FileNotFoundError as error:
+        raise ReviewEvidenceError(f"missing {EVIDENCE_NAME} at {path}") from error
+    except OSError as error:
+        raise ReviewEvidenceError(f"cannot read {EVIDENCE_NAME} at {path}: {error}") from error
+    try:
+        evidence = records.parse_json(raw)
+    except records.JobError as error:
+        raise ReviewEvidenceError(f"invalid {EVIDENCE_NAME} at {path}: {error}") from error
+    if not isinstance(evidence, dict):
+        raise ReviewEvidenceError(f"{EVIDENCE_NAME} must be a JSON object: {path}")
+    return raw, evidence
+
+
 _DISPOSITION_STAGE = object()
 
 
@@ -428,7 +445,7 @@ class ReviewBundle:
         filesystem = LocalReviewFiles() if filesystem is None else filesystem
         directory = Path(directory)
         name = directory.name
-        evidence_raw, evidence = _read_json(filesystem, directory / EVIDENCE_NAME, "review evidence")
+        evidence_raw, evidence = _read_review_evidence(filesystem, directory / EVIDENCE_NAME)
         findings, axis_ids = _validate_evidence(evidence, name, expected_task=expected_task)
         _validate_identities(evidence, name, worker_roster)
         capture_id = evidence["capture_id"]
@@ -511,18 +528,7 @@ class EvidenceUpdate:
 def read_disposition_evidence(review_dir, *, filesystem=None):
     filesystem = LocalReviewFiles() if filesystem is None else filesystem
     evidence_path = review_dir / EVIDENCE_NAME
-    try:
-        raw = filesystem.read_regular(evidence_path)
-    except FileNotFoundError as error:
-        raise ReviewEvidenceError(f"missing {EVIDENCE_NAME} at {evidence_path}") from error
-    except OSError as error:
-        raise ReviewEvidenceError(
-            f"cannot read {EVIDENCE_NAME} at {evidence_path}: {error.strerror or error}"
-        ) from error
-    try:
-        evidence = records.parse_json(raw)
-    except records.JobError as error:
-        raise ReviewEvidenceError(f"invalid {EVIDENCE_NAME} at {evidence_path}: {error}") from error
+    raw, evidence = _read_review_evidence(filesystem, evidence_path, regular=True)
     _validate_evidence(evidence, review_dir.name)
     return DispositionEvidence(evidence_path, raw)
 
