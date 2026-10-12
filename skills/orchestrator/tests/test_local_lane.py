@@ -19,13 +19,34 @@ from herdr_jobs.records import JobError, policy_record, load_json
 
 class LocalLaneTest(unittest.TestCase):
     def fake_worktree_host(self, argv):
-        repo_root = Path(__file__).resolve().parents[3]
+        if not hasattr(self, "_fake_worktree_tmp"):
+            self._fake_worktree_tmp = tempfile.TemporaryDirectory()
+            fixture_root = Path(self._fake_worktree_tmp.name)
+            primary = fixture_root / "primary"
+            linked = fixture_root / "linked"
+            git_env = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+            git_env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+            subprocess.run(["git", "init", str(primary)], cwd=fixture_root, env=git_env,
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                            "user.email=fixture@example.invalid", "commit", "--allow-empty",
+                            "-m", "fixture"], cwd=primary, env=git_env,
+                           check=True, capture_output=True)
+            subprocess.run(["git", "worktree", "add", "-b", "fixture-linked",
+                            str(linked)], cwd=primary, env=git_env,
+                           check=True, capture_output=True)
+            self.addCleanup(self._fake_worktree_tmp.cleanup)
+            self._fake_worktree_path = linked
+            self._fake_worktree_git_env = git_env
+        repo_root = self._fake_worktree_path
         pane_cwd = str(repo_root)
         if argv[:3] == ["herdr", "pane", "get"]:
             return 0, json.dumps({"result": {"pane": {"cwd": pane_cwd}}}).encode(), b""
         if argv[:2] == ["git", "-C"]:
             result = subprocess.run(
                 argv, check=True, capture_output=True, cwd=repo_root,
+                env=self._fake_worktree_git_env,
             )
             return 0, result.stdout, b""
         return None
