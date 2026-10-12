@@ -47,14 +47,20 @@ launch authorization or capability validation. A direct launcher must apply
 the same native catalog/config/effort checks as managed preflight and reserve
 shared provider admission before creating a pane. Preserve the existing host
 binding, startup verification, isolated worktree, and route-specific isolation;
-the explicit local lane uses a host worktree and no jail.
+the explicit local lane uses a host worktree and no jail. Direct local Pi starts
+must use `scripts/local-lane.py start`, which applies the same
+`task_class`/`local_lane_scope` validator as managed jobs. Do not start the
+local model through a raw `herdr agent start --approve` command.
 The managed local lane requires an allowlisted `task_class` (`triage`,
 `summary`, `contract_artifact`, `bounded_code_edit`, `inventory`, or
 `local_file_analysis`) and refuses missing or unsupported classes before
 launch. Keep its work trivial, self-contained, validator-checkable, and
 limited to supplied local inputs. Exclude networked, credentialed, destructive,
 and review-verdict tasks; never include secrets in the prompt or inspect them
-in the process environment. Each request declares `local_lane_scope` with
+in the process environment. Both direct and managed launches replace the pane
+shell with an `env -i` allowlist containing `HOME`, `PATH`, `TERM`, `LANG`,
+Herdr pane integration values, and Pi agent/session directory values when set;
+API keys and tokens are not passed to Pi. Each request declares `local_lane_scope` with
 `network_access`, `credential_access`, `credentials_in_environment`, and
 `destructive_actions` all false; configured MCP tools and extensions stay
 available under the user's settings and must remain within this scope.

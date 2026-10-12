@@ -47,7 +47,6 @@
       "retry_override": null,
       "retry_profile": null,
       "settled": false,
-      "start_diagnostic": null,
       "spec": {
         "job_id": "compatibility-job",
         "output_expectation": "A fixture report.",
@@ -58,6 +57,31 @@
         "task": "Run the compatibility fixture.",
         "task_kind": "ordinary",
         "writes_repository": false
+      },
+      "start_diagnostic": null,
+      "telemetry": {
+        "continuation_count": 0,
+        "continuation_reasons": [],
+        "coordinator_grade": "pending",
+        "ended_at": null,
+        "independent_validation": {
+          "evidence": null,
+          "exit_code": null,
+          "observed_at": null,
+          "status": "not_required"
+        },
+        "quota_signals": [],
+        "route": {
+          "choice": "default",
+          "effort": null,
+          "harness": "codex",
+          "lane": "ordinary",
+          "level": null,
+          "model": null,
+          "provider": "codex"
+        },
+        "schema_version": 1,
+        "started_at": "2030-01-01T00:00:00+00:00"
       },
       "worker_disposition": null,
       "worker_disposition_override": null,

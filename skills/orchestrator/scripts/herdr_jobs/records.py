@@ -513,6 +513,23 @@ def ensure_task_admitted(task_kind, job_id):
                        "skills/orchestrator/PREFERENCES.md")
 
 
+def ensure_local_lane_admitted(local_config, task_class, local_lane_scope, job_id):
+    """Apply the local-lane class and explicit-scope gate to every launch route."""
+    if task_class is None:
+        invalid(f"{job_id}: local_lane requires an allowlisted task_class")
+    task_class = identifier(task_class, "task_class")
+    if task_class not in local_config["allowed_task_classes"]:
+        invalid(f"{job_id}: local_lane task_class is not allowlisted")
+    if local_lane_scope is None:
+        invalid(f"{job_id}: local_lane requires an explicit local_lane_scope declaration")
+    local_scope = fields(local_lane_scope,
+                         ["network_access", "credential_access", "credentials_in_environment",
+                          "destructive_actions"], label=f"{job_id}.local_lane_scope")
+    if any(value is not False for value in local_scope.values()):
+        invalid(f"{job_id}: local_lane_scope must exclude network, credentials, and destructive actions")
+    return task_class, local_scope
+
+
 def prepare(manifest_path, policy_path):
     # Defer this import to break the records/model_ladder import cycle.
     from .model_ladder import (HARNESS_ALIASES, billing_pool, complete_tuple,
@@ -587,17 +604,8 @@ def prepare(manifest_path, policy_path):
                 invalid(f"{job_id}: local_lane is an ordinary host route; it cannot change a jail task")
             if local_config is None:
                 raise JobError("unavailable_capability", f"{job_id}: local_lane is not configured")
-            if task_class is None:
-                invalid(f"{job_id}: local_lane requires an allowlisted task_class")
-            if task_class not in local_config["allowed_task_classes"]:
-                invalid(f"{job_id}: local_lane task_class is not allowlisted")
-            if "local_lane_scope" not in job:
-                invalid(f"{job_id}: local_lane requires an explicit local_lane_scope declaration")
-            local_scope = fields(job["local_lane_scope"],
-                                 ["network_access", "credential_access", "credentials_in_environment",
-                                  "destructive_actions"], label=f"{job_id}.local_lane_scope")
-            if any(value is not False for value in local_scope.values()):
-                invalid(f"{job_id}: local_lane_scope must exclude network, credentials, and destructive actions")
+            task_class, local_scope = ensure_local_lane_admitted(
+                local_config, task_class, job.get("local_lane_scope"), job_id)
             if any(key in job for key in ("model_level", "model_fallback", "escalation")):
                 invalid(f"{job_id}: local_lane is outside the integer model ladder")
             expected_tuple = {"runtime": "pi", "model": local_config["model"],

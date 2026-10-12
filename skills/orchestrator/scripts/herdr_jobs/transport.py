@@ -19,7 +19,9 @@ from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
-from .local_lane import check_preconditions as check_local_lane_preconditions
+from .security import ANSI_ESCAPE, contains_secret_material, safe_cli_text as _safe_cli_text
+from .local_lane import (check_preconditions as check_local_lane_preconditions,
+                         local_lane_environment, sanitize_pane_environment)
 
 
 class BudgetExpired(Exception):
@@ -38,18 +40,6 @@ class RateLimited(Exception):
         self.signal = signal
 
 
-ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)(?P<prefix>[\"']?[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)")
-AUTH_SCHEME_TOKEN = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
-KNOWN_TOKEN = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]+|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|glpat-[A-Za-z0-9_-]{12,}|tk_[A-Za-z0-9_-]{12,})\b")
-URL_PASSWORD = re.compile(r"(?i)(https?://[^\s/:@]+:)([^\s/@]+)(@)")
-PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]{0,8000}?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-)
 ACTIVE_TURN_STATUS = re.compile(
     r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
     r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
@@ -60,34 +50,6 @@ ACTIVE_TURN_STATUS = re.compile(
 def _cli_command_name(argv):
     parts = [Path(argv[0]).name, *argv[1:3]]
     return " ".join(parts)
-
-
-def _safe_cli_text(value, maximum=2048):
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "replace")
-    value = ANSI_ESCAPE.sub("", str(value))
-    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value)
-    value = AUTH_SCHEME_TOKEN.sub(r"\1 <redacted>", value)
-    value = URL_PASSWORD.sub(r"\1<redacted>\3", value)
-    value = SENSITIVE_ASSIGNMENT.sub(_redacted_assignment, value)
-    value = KNOWN_TOKEN.sub("<redacted>", value)
-    value = re.sub(r"\s+", " ", value).strip()
-    if len(value) > maximum:
-        return value[:maximum - 3] + "..."
-    return value
-
-
-def _redacted_assignment(match):
-    value = match.group("value")
-    quote = value[0] if value[0] in ("\"", "'") and value.endswith(value[0]) else ""
-    return match.group("prefix") + quote + "<redacted>" + quote
-
-
-def contains_secret_material(value):
-    """Detect common credential values before local-lane prompt submission."""
-    return any(pattern.search(value) for pattern in (
-        SENSITIVE_ASSIGNMENT, AUTH_SCHEME_TOKEN, KNOWN_TOKEN, URL_PASSWORD, PRIVATE_KEY_BLOCK,
-    ))
 
 
 def cli_diagnostic(argv, exit_code, stdout, stderr):
@@ -187,12 +149,12 @@ class Deadline:
             raise BudgetExpired()
 
 
-def command(argv, deadline, cwd=None):
+def command(argv, deadline, cwd=None, env=None):
     deadline.check()
     chunks = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, cwd=cwd)
+                                   stderr=subprocess.PIPE, cwd=cwd, env=env)
     except OSError as error:
         raise JobError("unavailable_capability", f"cannot execute {argv[0]}: {error.strerror}") from error
     try:
@@ -483,6 +445,9 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        local_environment = None
+        if spec.get("local_lane") is True and action in ("start", "prompt"):
+            local_environment = local_lane_environment(pane_id=pane)
         if spec.get("local_lane") is True and contains_secret_material(prompt):
             raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
         validate_provider_harness(spec["route"]["runtime"], spec.get("provider"))
@@ -575,7 +540,11 @@ class NativeTransport:
                                 start_diagnostic=start_diagnostic)
         try:
             if action in ("start", "prompt"):
-                code, output, error_output = command(argv, self.deadline)
+                if local_environment is None:
+                    code, output, error_output = command(argv, self.deadline)
+                else:
+                    code, output, error_output = command(argv, self.deadline,
+                                                          env=local_environment)
                 rate_limit = rate_limit_from_output(
                     (error_output + b"\n" + output).decode("utf-8", "replace"),
                     source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
@@ -593,6 +562,13 @@ class NativeTransport:
             if action == "move":
                 moved = at(result, ["result", "move_result"])
                 pane_id = text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)
+                if spec.get("local_lane") is True:
+                    local_environment = local_lane_environment(pane_id=pane_id)
+                    sanitize_pane_environment(
+                        pane_id, local_environment, herdr=self.herdr,
+                        run_command=lambda command_argv, *, env=None: command(
+                            command_argv, self.deadline, env=env),
+                    )
                 workspace = moved.get("workspace") if isinstance(moved, dict) else None
                 if not isinstance(workspace, dict):
                     workspace = moved.get("created_workspace") if isinstance(moved, dict) else None

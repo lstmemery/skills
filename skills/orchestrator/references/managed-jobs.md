@@ -102,7 +102,12 @@ all set to `false`; any missing or true field is refused during preparation.
 Do not put credentials or secrets in task files or override instructions. The
 final prompt is checked for common secret-value patterns before launch. The
 worker instructions prohibit reading the process environment or secret files;
-the launcher adds no credential values to the worker prompt.
+the launcher adds no credential values to the worker prompt. Before a local Pi
+start, the launcher replaces the moved pane's shell with an `env -i` shell and
+runs its Herdr CLI calls with the same allowlist: `HOME`, `PATH`, `TERM`,
+`LANG`, Herdr pane integration variables, and Pi agent/session directory
+variables when present. API keys and tokens from the coordinator environment
+are not passed to the worker.
 The job must set `writes_repository: true`, use its recorded throwaway linked
 worktree for `cwd`, declare acceptance tests, and provide
 `independent_validator: {"argv": ["...", "{output_dir}"]}`. The command is

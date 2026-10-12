@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shlex
 import sys
@@ -23,6 +24,7 @@ class FakeHerdr:
 
     def __init__(self, state="working", output="Working", start_code=0, prompt_error=None):
         self.calls = []
+        self.environments = []
         self.state = state
         self.output = output
         self.start_code = start_code
@@ -30,8 +32,9 @@ class FakeHerdr:
         self.retry_environment = {}
         self.retry_output = None
 
-    def command(self, argv, deadline, cwd=None):
+    def command(self, argv, deadline, cwd=None, env=None):
         self.calls.append(argv)
+        self.environments.append(env)
         if argv[:3] == ["herdr", "agent", "start"]:
             return self.start_code, b'{"result":{}}', b"agent_not_ready: timed out" if self.start_code else b""
         if argv[:3] == ["herdr", "agent", "prompt"] and self.prompt_error:
@@ -47,6 +50,8 @@ class FakeHerdr:
             return 0, output.encode(), b""
         if argv[:3] == ["herdr", "pane", "run"]:
             shell_command = argv[4]
+            if shell_command.startswith("exec /usr/bin/env -i"):
+                return 0, b"", b""
             if shell_command.startswith("export "):
                 for assignment in shlex.split(shell_command[len("export "):]):
                     key, value = assignment.split("=", 1)
@@ -348,7 +353,16 @@ class TransportTest(unittest.TestCase):
                          local_lane=True, override={"effort": "medium"})
         self.job["resolved_model"] = "qwen3.8-27b-uncensored"
 
-        with patch("herdr_jobs.transport.command", fake.command):
+        source_env = {
+            "HOME": str(self.root), "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "TERM": "xterm-256color", "LANG": "C.UTF-8",
+            "HERDR_ENV": "1", "HERDR_PANE_ID": "coordinator:1",
+            "HERDR_BIN_PATH": "/usr/local/bin/herdr", "HERDR_SOCKET_PATH": "/run/user/1000/herdr.sock",
+            "PI_CODING_AGENT_DIR": str(self.root / ".pi" / "agent"),
+            "API_TOKEN": "fake-secret-token",
+        }
+        with patch.dict(os.environ, source_env, clear=True), \
+                patch("herdr_jobs.transport.command", fake.command):
             self.adapter.effect("start", self.job, "Assigned work")
 
         start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
@@ -357,6 +371,43 @@ class TransportTest(unittest.TestCase):
                                  "qwen3.8-27b-uncensored", "--approve"])
         self.assertNotIn("--no-mcp", start)
         self.assertNotIn("--no-extensions", start)
+        start_env = fake.environments[fake.calls.index(start)]
+        self.assertEqual(set(start_env), {
+            "HOME", "PATH", "TERM", "LANG", "HERDR_ENV", "HERDR_PANE_ID",
+            "HERDR_BIN_PATH", "HERDR_SOCKET_PATH", "PI_CODING_AGENT_DIR",
+        })
+        self.assertEqual(start_env["HERDR_PANE_ID"], "moved:1")
+        self.assertEqual(start_env["PI_CODING_AGENT_DIR"], str(self.root / ".pi" / "agent"))
+        self.assertNotIn("API_TOKEN", start_env)
+
+    def test_managed_local_lane_move_resets_pane_with_env_i_allowlist(self):
+        self.spec.update(kind="pi", provider="llama-local", local_lane=True,
+                         route={"mode": "agent", "runtime": "pi"})
+        source_env = {
+            "HOME": str(self.root), "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "TERM": "xterm-256color", "LANG": "C.UTF-8",
+            "HERDR_ENV": "1", "HERDR_BIN_PATH": "/usr/local/bin/herdr",
+            "HERDR_SOCKET_PATH": "/run/user/1000/herdr.sock",
+            "PI_CODING_AGENT_DIR": str(self.root / ".pi" / "agent"),
+            "OPENAI_API_KEY": "fake-secret-key", "AWS_SECRET_ACCESS_KEY": "fake-secret-key",
+        }
+        fake = FakeHerdr()
+
+        with patch.dict(os.environ, source_env, clear=True), \
+                patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("move", self.job, "")
+
+        self.assertEqual(result["pane_id"], "moved:1")
+        self.assertEqual([call[1:3] for call in fake.calls], [["pane", "run"], ["pane", "wait-output"]])
+        self.assertIn("env -i", fake.calls[0][4])
+        for env in fake.environments:
+            self.assertEqual(set(env), {
+                "HOME", "PATH", "TERM", "LANG", "HERDR_ENV", "HERDR_PANE_ID",
+                "HERDR_BIN_PATH", "HERDR_SOCKET_PATH", "PI_CODING_AGENT_DIR",
+            })
+            self.assertEqual(env["HERDR_PANE_ID"], "moved:1")
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
 
     def test_local_lane_refuses_secret_material_in_the_prompt_before_start(self):
         fake = FakeHerdr()

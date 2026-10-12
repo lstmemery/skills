@@ -8,10 +8,13 @@ import uuid
 
 from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
-                      ensure_task_admitted, integer, load_json, now, parse_json, read_regular, save,
+                      ensure_local_lane_admitted, ensure_task_admitted, integer, load_json, now,
+                      parse_json, read_regular, save,
                       jail_context_path, protected_paths_record, text, version)
 from .retry import prepare_pi_run_profile
-from .transport import BudgetExpired, EffectUnknown, RateLimited, contains_secret_material
+from .local_lane import local_lane_instruction
+from .security import contains_secret_material
+from .transport import BudgetExpired, EffectUnknown, RateLimited
 from .model_ladder import billing_pool
 from .lifecycle import JobLifecycle
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
@@ -534,15 +537,11 @@ class Engine:
     def prompt(self, job):
         spec = job["spec"]
         if spec.get("local_lane") is True:
-            allowed_task_classes = self.state["request"]["policy"]["local_lane"]["allowed_task_classes"]
-            if spec.get("task_class") not in allowed_task_classes:
-                raise JobError("invalid_input", "local_lane requires an allowlisted task_class before launch")
-            scope = spec.get("local_lane_scope")
-            expected_scope = {"network_access", "credential_access",
-                              "credentials_in_environment", "destructive_actions"}
-            if (not isinstance(scope, dict) or set(scope) != expected_scope
-                    or any(value is not False for value in scope.values())):
-                raise JobError("invalid_input", "local_lane requires an explicit safe scope declaration before launch")
+            local_config = self.state["request"]["policy"].get("local_lane")
+            if local_config is None:
+                raise JobError("unavailable_capability", "local lane is not configured by the pinned policy")
+            ensure_local_lane_admitted(local_config, spec.get("task_class"),
+                                       spec.get("local_lane_scope"), spec["job_id"])
         worker_result = spec.get("worker_result")
         identity = worker_result or {
             "task_id": spec["job_id"],
@@ -604,19 +603,8 @@ class Engine:
                 "repository_change: preserve the recorded worktree/base; do not edit protected controls or acceptance tests; return the candidate record; inspect the full diff and run git diff --check and every acceptance test at every model level; implementation escalation requires a concrete reasoning failure"
             )
         if spec.get("local_lane") is True:
-            optional_blocks.append(
-                f"local_lane: task_class: {spec['task_class']}; "
-                f"declared_scope: {encoded(spec['local_lane_scope']).decode()}; "
-                "this allowlisted class is limited to trivial, self-contained, "
-                "validator-checkable work using supplied local inputs in the assigned throwaway worktree. "
-                "Do not access network, credentials, secrets, auth files, or environment; "
-                "do not perform destructive actions or review verdicts. "
-                "Never include a credential or secret in the prompt or output. "
-                "Configured MCP tools and extensions remain available under the user's configuration; "
-                "use them only within this scope and never disclose or pass credential material. "
-                "Do not launch jail work or another agent. "
-                "The coordinator independently runs the declared validator before accepting output"
-            )
+            optional_blocks.append(local_lane_instruction(
+                spec["task_class"], spec["local_lane_scope"]))
         if spec.get("tracker_writes"):
             optional_blocks.append(
                 f"tracker_write: {encoded(spec['tracker_writes']).decode()}"
