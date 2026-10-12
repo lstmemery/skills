@@ -51,7 +51,7 @@ class LadderRegressionTest(unittest.TestCase):
 
     def escalation(self, level):
         return {"previous_level": level - 1,
-                "failure": {"kind": "failure", "source": "fixture",
+                "failure": {"kind": "failure", "category": "reasoning", "source": "fixture",
                              "observed_at": "2026-10-10T15:00:00Z", "summary": "failed"},
                 "expected_improvement": "finish"}
 

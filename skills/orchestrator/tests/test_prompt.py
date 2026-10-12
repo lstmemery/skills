@@ -3,10 +3,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from herdr_jobs.prompt import PromptNotStarted, pane_text_submit, submit_and_verify
+from herdr_jobs.prompt import (PromptNotStarted, has_active_turn_status, pane_text_submit,
+                               submit_and_verify)
 
 
 class PromptTest(unittest.TestCase):
+    def test_active_turn_status_requires_the_visible_working_marker(self):
+        self.assertTrue(has_active_turn_status("\x1b[32mWorking\x1b[0m\n"))
+        self.assertFalse(has_active_turn_status("The prompt says Working here."))
+        self.assertFalse(has_active_turn_status("Working\nFinished"))
+
     def test_submits_once_and_waits_for_verified_working(self):
         events = []
         observations = iter([

@@ -32,6 +32,8 @@ def parser():
                              help="explicitly override one worker disposition (repeatable; requires a reason)")
             sub.add_argument("--coordinator-override-reason",
                              help="required reason recorded with every coordinator disposition override")
+            sub.add_argument("--coordinator-grade", action="append", metavar="JOB_ID=GRADE",
+                             help="record accepted, rework, or rejected after coordinator review")
         if name in ("run", "add"):
             sub.add_argument("--manifest", required=True)
             sub.add_argument("--policy", required=True)
@@ -58,6 +60,20 @@ def parse_finish_overrides(values, reason):
         if not reason or len(reason) > 10000:
             raise JobError("invalid_input", "coordinator override reason must contain 1 to 10000 characters")
     return overrides, reason
+
+
+def parse_coordinator_grades(values):
+    grades = {}
+    for value in values or []:
+        job_id, separator, grade = value.partition("=")
+        if (not separator or not job_id.strip() or not grade.strip() or "=" in grade
+                or grade.strip() not in ("accepted", "rework", "rejected")):
+            raise JobError("invalid_input", "coordinator grade must be JOB_ID=accepted|rework|rejected")
+        job_id = job_id.strip()
+        if job_id in grades:
+            raise JobError("invalid_input", f"duplicate coordinator grade for {job_id}")
+        grades[job_id] = grade.strip()
+    return grades
 
 
 def finish_message(finish):
@@ -97,9 +113,11 @@ def main(argv=None, transport_factory=NativeTransport):
         if not 0 <= args.wait_seconds <= 60:
             raise JobError("invalid_input", "wait-seconds must be finite and between 0 and 60")
         disposition_overrides, override_reason = ({}, None)
+        coordinator_grades = {}
         if args.operation == "finish":
             disposition_overrides, override_reason = parse_finish_overrides(
                 args.coordinator_disposition_override, args.coordinator_override_reason)
+            coordinator_grades = parse_coordinator_grades(args.coordinator_grade)
         root = Path(args.run_dir).absolute()
         request = prepare(args.manifest, args.policy) if args.operation in ("run", "add") else None
         if args.operation == "add" and len(request["jobs"]) != 1:
@@ -146,6 +164,8 @@ def main(argv=None, transport_factory=NativeTransport):
                             next_argv += ["--coordinator-disposition-override", item]
                         if override_reason is not None:
                             next_argv += ["--coordinator-override-reason", override_reason]
+                        for item in args.coordinator_grade or []:
+                            next_argv += ["--coordinator-grade", item]
                 else:
                     result = {"schema_version": 1, "request_id": request["request_id"], "run_dir": str(root),
                               "batch_state": "checkpointed", "run_created": False, "collection_complete": False,
@@ -173,7 +193,7 @@ def main(argv=None, transport_factory=NativeTransport):
                     engine.append_jobs(request, capabilities)
             engine.drive(status_only=args.operation in ("status", "finish"))
             if args.operation == "finish":
-                finish = engine.finish(disposition_overrides, override_reason)
+                finish = engine.finish(disposition_overrides, override_reason, coordinator_grades)
             result = engine.result()
             if args.operation == "finish":
                 result["finish"] = finish

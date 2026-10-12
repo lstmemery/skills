@@ -5,8 +5,8 @@ from pathlib import Path
 import time
 
 from herdr_jobs.records import JobError, load_json, save
-from herdr_jobs.transport import (EffectUnknown, RateLimited, cli_diagnostic,
-                                  cli_diagnostic_message)
+from herdr_jobs.transport import (BudgetExpired, EffectUnknown, RateLimited,
+                                  cli_diagnostic, cli_diagnostic_message)
 
 
 class FakeHost:
@@ -88,6 +88,15 @@ class FakeHost:
             (output / "receipt.json").write_text("not JSON")
         elif mode not in ("missing", "working", "blocked", "ambiguous", "unverified_working"):
             save(output / "receipt.json", receipt)
+
+    def validate_independent(self, job):
+        code = self.fixture.get("independent_validator_exit_code", 0)
+        self.events.append({"action": "independent_validator", "job_id": job["spec"]["job_id"],
+                            "exit_code": code, "at": time.time()})
+        save(self.events_path, self.events)
+        if self.fixture.get("independent_validator_timeout"):
+            raise BudgetExpired()
+        return {"exit_code": code, "evidence": f"fixture validator exit={code}"}
 
     def effect(self, action, job, prompt):
         self.event(action, job)

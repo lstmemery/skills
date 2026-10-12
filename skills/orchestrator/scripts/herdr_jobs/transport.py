@@ -19,7 +19,11 @@ from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
-from .prompt import PromptNotStarted, pane_text_submit, submit_and_verify
+from .security import ANSI_ESCAPE, contains_secret_material, safe_cli_text as _safe_cli_text
+from .local_lane import (check_preconditions as check_local_lane_preconditions,
+                         local_lane_environment, sanitize_pane_environment)
+from .prompt import (PromptNotStarted, has_active_turn_status, pane_text_submit,
+                     submit_and_verify)
 
 
 class BudgetExpired(Exception):
@@ -38,46 +42,9 @@ class RateLimited(Exception):
         self.signal = signal
 
 
-ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)(?P<prefix>[\"']?[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)")
-AUTH_SCHEME_TOKEN = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
-KNOWN_TOKEN = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]+|sk-(?:proj-)?[A-Za-z0-9_-]{16,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|glpat-[A-Za-z0-9_-]{12,}|tk_[A-Za-z0-9_-]{12,})\b")
-URL_PASSWORD = re.compile(r"(?i)(https?://[^\s/:@]+:)([^\s/@]+)(@)")
-ACTIVE_TURN_STATUS = re.compile(
-    r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
-    r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
-    re.IGNORECASE,
-)
-
-
 def _cli_command_name(argv):
     parts = [Path(argv[0]).name, *argv[1:3]]
     return " ".join(parts)
-
-
-def _safe_cli_text(value, maximum=2048):
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "replace")
-    value = ANSI_ESCAPE.sub("", str(value))
-    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", value)
-    value = AUTH_SCHEME_TOKEN.sub(r"\1 <redacted>", value)
-    value = URL_PASSWORD.sub(r"\1<redacted>\3", value)
-    value = SENSITIVE_ASSIGNMENT.sub(_redacted_assignment, value)
-    value = KNOWN_TOKEN.sub("<redacted>", value)
-    value = re.sub(r"\s+", " ", value).strip()
-    if len(value) > maximum:
-        return value[:maximum - 3] + "..."
-    return value
-
-
-def _redacted_assignment(match):
-    value = match.group("value")
-    quote = value[0] if value[0] in ("\"", "'") and value.endswith(value[0]) else ""
-    return match.group("prefix") + quote + "<redacted>" + quote
 
 
 def cli_diagnostic(argv, exit_code, stdout, stderr):
@@ -177,12 +144,12 @@ class Deadline:
             raise BudgetExpired()
 
 
-def command(argv, deadline, cwd=None):
+def command(argv, deadline, cwd=None, env=None):
     deadline.check()
     chunks = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, cwd=cwd)
+                                   stderr=subprocess.PIPE, cwd=cwd, env=env)
     except OSError as error:
         raise JobError("unavailable_capability", f"cannot execute {argv[0]}: {error.strerror}") from error
     try:
@@ -288,6 +255,13 @@ class NativeTransport:
         planned = [job for job in request["jobs"] if not status_only and
                    (job["job_id"] not in previous or previous[job["job_id"]]["phase"] in ("pending", "split", "moved"))]
         planned_ids = {job["job_id"] for job in planned}
+        for job in planned:
+            if job.get("local_lane") is True:
+                def run_local_check(argv):
+                    code, output, error = command(argv, self.deadline)
+                    return (code, output.decode("utf-8", "replace"),
+                            error.decode("utf-8", "replace"))
+                check_local_lane_preconditions(request["policy"]["local_lane"], run_local_check)
         writer_checks = []
         if not status_only:
             for job in request["jobs"]:
@@ -399,7 +373,8 @@ class NativeTransport:
                         raise JobError("unavailable_capability",
                                        f"Claude model {requested} cannot preserve effort {effort}")
                 models[job["job_id"]] = matches[0]
-            if runtime == "pi" and requested_model is not None and requested_effort is not None:
+            if (runtime == "pi" and requested_model is not None and requested_effort is not None
+                    and job.get("local_lane") is not True):
                 provider, model = models[job["job_id"]].split("/", 1)
                 efforts = self.pi_model_efforts(provider, model)
                 effort = requested_effort
@@ -437,6 +412,18 @@ class NativeTransport:
             raise JobError("unavailable_capability", "Pi model effort discovery returned invalid metadata")
         return result["efforts"]
 
+    def validate_independent(self, job):
+        """Run the coordinator-declared local-lane validator without a shell."""
+        validator = job["spec"]["independent_validator"]
+        output_dir = str(Path(job["host_output"]).absolute())
+        argv = [output_dir if argument == "{output_dir}" else argument
+                for argument in validator["argv"]]
+        code, output, error_output = command(argv, self.deadline, cwd=job["spec"]["cwd"])
+        stdout = _safe_cli_text(output)
+        stderr = _safe_cli_text(error_output)
+        evidence = f"exit={code}; stdout={stdout or '<empty>'}; stderr={stderr or '<empty>'}"
+        return {"exit_code": code, "evidence": evidence[:4096]}
+
     def check_export(self):
         export = self.binding["jail_export"]
         if export is None:
@@ -453,6 +440,11 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        local_environment = None
+        if spec.get("local_lane") is True and action in ("start", "prompt"):
+            local_environment = local_lane_environment(pane_id=pane)
+        if spec.get("local_lane") is True and contains_secret_material(prompt):
+            raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
         validate_provider_harness(spec["route"]["runtime"], spec.get("provider"))
         if action == "retry_setup":
             profile = fields(job.get("retry_profile"), ["agent_dir", "session_dir", "settings_sha256"],
@@ -483,7 +475,12 @@ class NativeTransport:
                 if job["resolved_model"] is not None:
                     runtime_args += ["--model", _native_model("pi", job["resolved_model"], spec.get("provider"))]
                 effort = (spec.get("override") or {}).get("effort")
-                runtime_args += effort_arguments("pi", effort)
+                if spec.get("local_lane") is not True:
+                    runtime_args += effort_arguments("pi", effort)
+                else:
+                    # The local server pins medium reasoning; forwarding Pi's
+                    # CLI effort would depend on unadvertised provider metadata.
+                    runtime_args += ["--approve"]
                 if runtime_args:
                     argv += ["--", *runtime_args]
             else:
@@ -564,7 +561,11 @@ class NativeTransport:
                 raise EffectUnknown(str(error) or "prompt start could not be verified; inspect before retrying") from error
         try:
             if action in ("start", "prompt"):
-                code, output, error_output = command(argv, self.deadline)
+                if local_environment is None:
+                    code, output, error_output = command(argv, self.deadline)
+                else:
+                    code, output, error_output = command(argv, self.deadline,
+                                                          env=local_environment)
                 rate_limit = rate_limit_from_output(
                     (error_output + b"\n" + output).decode("utf-8", "replace"),
                     source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
@@ -582,6 +583,13 @@ class NativeTransport:
             if action == "move":
                 moved = at(result, ["result", "move_result"])
                 pane_id = text(at(result, ["result", "move_result", "pane", "pane_id"]), "moved pane ID", 200)
+                if spec.get("local_lane") is True:
+                    local_environment = local_lane_environment(pane_id=pane_id)
+                    sanitize_pane_environment(
+                        pane_id, local_environment, herdr=self.herdr,
+                        run_command=lambda command_argv, *, env=None: command(
+                            command_argv, self.deadline, env=env),
+                    )
                 workspace = moved.get("workspace") if isinstance(moved, dict) else None
                 if not isinstance(workspace, dict):
                     workspace = moved.get("created_workspace") if isinstance(moved, dict) else None
@@ -695,9 +703,7 @@ class NativeTransport:
 
     @staticmethod
     def has_active_turn_status(output):
-        clean = ANSI_ESCAPE.sub("", output)
-        lines = [line.strip() for line in clean.splitlines() if line.strip()]
-        return bool(lines and ACTIVE_TURN_STATUS.fullmatch(lines[-1]))
+        return has_active_turn_status(output)
 
     @classmethod
     def prompt_landed(cls, job, state, output):

@@ -18,6 +18,11 @@ or a failed lower-level approach. Level 8 is the ceiling for the hardest
 reasoning when evidence justifies it. This is selection guidance, not a model
 benchmark or an automatic classifier.
 
+Keep level 1 as the default for bounded work. Trial level 2 for sign-sensitive
+derivations and technical-paper audits, and require an independent
+recomputation before relying on the result. The trial is a task-class
+comparison, not an automatic route change.
+
 An explicit user model, effort, provider, or harness remains pinned. Record it
 in `override` with the user's instruction. Those fields take precedence over
 `model_level` and bypass ladder model/effort defaults. Missing runtime uses the
@@ -41,15 +46,35 @@ The returned argv contains only model/provider/effort arguments. It is not
 launch authorization or capability validation. A direct launcher must apply
 the same native catalog/config/effort checks as managed preflight and reserve
 shared provider admission before creating a pane. Preserve the existing host
-binding, startup verification, isolated worktree, and jail requirements.
+binding, startup verification, isolated worktree, and route-specific isolation;
+the explicit local lane uses a host worktree and no jail. Direct local Pi starts
+must use `scripts/local-lane.py start`, which applies the same
+`task_class`/`local_lane_scope` validator as managed jobs. Do not start the
+local model through a raw `herdr agent start --approve` command.
+The managed local lane requires an allowlisted `task_class` (`triage`,
+`summary`, `contract_artifact`, `bounded_code_edit`, `inventory`, or
+`local_file_analysis`) and refuses missing or unsupported classes before
+launch. Keep its work trivial, self-contained, validator-checkable, and
+limited to supplied local inputs. Exclude networked, credentialed, destructive,
+and review-verdict tasks; never include secrets in the prompt or inspect them
+in the process environment. Both direct and managed launches replace the pane
+shell with an `env -i` allowlist containing `HOME`, `PATH`, `TERM`, `LANG`,
+Herdr pane integration values, and Pi agent/session directory values when set;
+API keys and tokens are not passed to Pi. Each request declares `local_lane_scope` with
+`network_access`, `credential_access`, `credentials_in_environment`, and
+`destructive_actions` all false; configured MCP tools and extensions stay
+available under the user's settings and must remain within this scope.
 
 Escalate at most one level per demonstrated failure, with at most two upward
 steps per assignment before rescoping with the coordinator. Record the previous
 level, failure/check evidence, next level, and expected improvement. Reuse the
 existing investigation, artifacts, and worktree. Reconcile the old worker's
-terminal state before retrying. Quality/difficulty calls for escalation, not
-quota fallback. Do not launch expensive parallel probes merely to guess which
-model might work; split only independently useful work that fits the budget.
+terminal state before retrying. For implementation work, raise a level only
+after a concrete reasoning failure. Inspect the full patch, run
+`git diff --check`, and run every acceptance test at every level. A failing
+check or a harder task label alone is not a reasoning failure. Do not launch
+expensive parallel probes merely to guess which model might work; split only
+independently useful work that fits the budget.
 Explicit user requests can select any level immediately and remain fixed.
 
 The user's approximate 2× cost increase per level is an ordering heuristic.
@@ -114,7 +139,27 @@ across provider aliases.
 Older alias-keyed leases migrate on read; colliding alias backoffs retain the
 later reset. Older policies with different caps for aliases use the stricter
 cap. Pool exhaustion blocks every model in that pool; model-specific rate limits
-continue to block only that model. Never treat switching harnesses as new quota.
+continue to block only that model. Never treat switching harnesses as new
+quota. Quota stalls never raise the ladder level: wait for reset/backoff or use
+only the evidenced same-level fallback.
+
+## Evidence and task telemetry
+
+Investigatory claims cite their source and label unknowns. Before saying
+something is absent, check both the host and jail namespaces; if either cannot
+be checked, report the absence as unknown. Apply this gate to worker briefs as
+well as coordinator summaries.
+
+The managed coordinator writes one `telemetry.json` per task attempt. Its
+versioned route record has `lane`, `level`, `choice`, `model`, `effort`,
+`harness`, and `provider`; the task record also has `started_at`, `ended_at`,
+`continuation_count`, `continuation_reasons`, `quota_signals`, a
+`coordinator_grade` slot that remains `pending`, and `independent_validation`.
+The actual coordinator grade lives in coordinator-owned `coordinator-grades.json`
+in the run directory. A non-pending grade in worker-writable telemetry is
+treated as tampering and ignored. Workers must not edit telemetry or claim the
+coordinator's grade. A quota retry records its signal/reset and continuation
+reason, and local-lane completion records the independent validator result.
 
 ## Native contracts and capability gaps
 

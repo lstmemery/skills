@@ -153,6 +153,7 @@ class CompatibilityTest(unittest.TestCase):
                         None,
                     )
                     legacy_engine.launch(legacy_engine.state["jobs"][0])
+                    legacy_engine.checkpoint()
                 return RunResult(state=legacy_engine.state, result=legacy_engine.result())
 
             reducer_adapter = NativeHerdrAdapter(
@@ -174,6 +175,11 @@ class CompatibilityTest(unittest.TestCase):
             self.assertEqual(normalized(legacy_engine.result(), legacy_run_dir), expected_result)
             self.assertEqual(normalized(legacy_engine.state, legacy_run_dir), expected_state)
             self.assertEqual(result.state["jobs"][0]["phase"], "submitted")
+            stored = json.loads((legacy_run_dir / "state.json").read_text())
+            self.assertNotIn("telemetry", stored["jobs"][0])
+            telemetry_path = Path(legacy_engine.state["jobs"][0]["host_output"]) / "telemetry.json"
+            telemetry = json.loads(telemetry_path.read_text())
+            self.assertEqual(telemetry["started_at"], FIXED_TIME)
 
 
 if __name__ == "__main__":

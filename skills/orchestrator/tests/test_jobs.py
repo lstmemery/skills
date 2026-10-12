@@ -18,6 +18,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
+from herdr_jobs.admission import AdmissionStore
 from support import isolate_admission_state
 from herdr_jobs.records import digest, encoded
 
@@ -68,6 +69,23 @@ class JobsTest(unittest.TestCase):
                 if effort is not None:
                     override["effort"] = effort
                 job["override"] = override
+                if (provider == "llama-local" and model == "qwen3.8-27b-uncensored"
+                        and effort == "medium"):
+                    acceptance = self.root / f"acceptance-{index}.py"
+                    acceptance.write_text("# Local lane acceptance fixture.\n")
+                    job.update(
+                        local_lane=True, writes_repository=True,
+                        task_class="summary",
+                        local_lane_scope={"network_access": False, "credential_access": False,
+                                          "credentials_in_environment": False,
+                                          "destructive_actions": False},
+                        repository_worktree={"schema_version": 1, "path": str(self.root),
+                                             "lease_id": f"lease-{index}", "lease_holder": "test-request",
+                                             "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
+                                             "base_commit": "a" * 40},
+                        acceptance_tests=[str(acceptance)],
+                        independent_validator={"argv": [sys.executable, "validate.py", "{output_dir}"]},
+                    )
             jobs.append(job)
         manifest = {"schema_version": 1, "request_id": "test-request", "jobs": jobs}
         if concurrency is not None:
@@ -75,15 +93,36 @@ class JobsTest(unittest.TestCase):
         self.manifest.write_text(json.dumps(manifest))
 
     def write_add_job(self, job_id="job-added", task_id="task-added", revision=1,
-                      runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high",
-                      retry_override=None):
+                      runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium",
+                      retry_override=None, local_lane=True):
         add_manifest = self.root / "add-manifest.json"
         job = {"job_id": job_id, "name": "Incremental fixture", "task_kind": "ordinary",
                "task_file": str(self.task), "cwd": str(self.root),
-               "output_expectation": "A fixture report.", "writes_repository": False,
+               "output_expectation": "A fixture report.", "writes_repository": bool(local_lane),
                "worker_result": {"task_id": task_id, "assignment_revision": revision},
-               "override": {"runtime": runtime, "provider": provider, "model": model,
-                            "effort": effort, "instruction": f"Use {runtime} with {model}."}}
+               "override": {"runtime": runtime, "instruction": f"Use {runtime} with {model}."}}
+        if provider is not None:
+            job["override"]["provider"] = provider
+        if model is not None:
+            job["override"]["model"] = model
+        if effort is not None:
+            job["override"]["effort"] = effort
+        if local_lane:
+            acceptance = self.root / f"{job_id}-acceptance.py"
+            acceptance.write_text("# Local lane acceptance fixture.\n")
+            job.update(
+                local_lane=True,
+                task_class="summary",
+                local_lane_scope={"network_access": False, "credential_access": False,
+                                  "credentials_in_environment": False,
+                                  "destructive_actions": False},
+                repository_worktree={"schema_version": 1, "path": str(self.root),
+                                     "lease_id": "lease-added", "lease_holder": "test-request",
+                                     "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
+                                     "base_commit": "a" * 40},
+                acceptance_tests=[str(acceptance)],
+                independent_validator={"argv": [sys.executable, "validate.py", "{output_dir}"]},
+            )
         manifest = {"schema_version": 1, "request_id": "test-request", "jobs": [job]}
         if retry_override is not None:
             manifest["retry_override"] = retry_override
@@ -247,6 +286,8 @@ class JobsTest(unittest.TestCase):
         state["jobs"][0]["resolved_model"] = "glm-5.3-flash"
         state["jobs"][0]["provider"] = "zai"
         state["jobs"][0]["admission_model"] = "glm-5.3-flash"
+        state["jobs"][0].pop("telemetry", None)
+        (Path(state["jobs"][0]["host_output"]) / "telemetry.json").unlink(missing_ok=True)
         state["request_digest"] = digest(encoded(state["request"]))
         (self.run / "state.json").write_bytes(encoded(state) + b"\n")
 
@@ -256,13 +297,33 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(legacy.state["jobs"][0]["provider"], "zai")
         self.assertEqual(legacy.state["jobs"][0]["resolved_model"], "glm-5.3-flash")
 
+    def test_legacy_embedded_telemetry_migrates_to_a_sidecar(self):
+        self.call()
+        state = self.state()
+        job = state["jobs"][0]
+        output = Path(job["host_output"])
+        telemetry = json.loads((output / "telemetry.json").read_text())
+        job["telemetry"] = telemetry
+        (output / "telemetry.json").unlink()
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        legacy = Engine(self.run, None, None, admission_store=AdmissionStore(self.admission_dir))
+        legacy.load()
+
+        self.assertNotIn("telemetry", legacy.result()["jobs"][0])
+        legacy.checkpoint()
+
+        self.assertNotIn("telemetry", self.state()["jobs"][0])
+        self.assertEqual(json.loads((output / "telemetry.json").read_text()), telemetry)
+
     def test_add_applies_the_run_pinned_retry_override_to_matching_workers(self):
         retry_override = {"pi": {"max_retries": 10, "max_agent_delay_ms": 120000}}
         global_agent = self.prepare_pi_retry_run(retry_override)
 
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
             self.call()
-            self.write_add_job(retry_override=retry_override)
+            self.write_add_job(runtime="pi", provider=None, model=None, effort=None,
+                               retry_override=retry_override, local_lane=False)
             code, result = self.call("add", wait_seconds=1)
 
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
@@ -281,7 +342,8 @@ class JobsTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
             self.call()
-            self.write_add_job(retry_override={"pi": {"max_retries": 9}})
+            self.write_add_job(runtime="pi", provider=None, model=None, effort=None,
+                               retry_override={"pi": {"max_retries": 9}}, local_lane=False)
             code, result = self.call("add")
 
         self.assertEqual((code, result["error"]), (3, "conflict"))
@@ -292,7 +354,8 @@ class JobsTest(unittest.TestCase):
 
     def test_add_rejects_a_retry_override_when_the_run_has_no_pin(self):
         self.call()
-        self.write_add_job(retry_override={"pi": {"max_retries": 10}})
+        self.write_add_job(runtime="pi", provider=None, model=None, effort=None,
+                           retry_override={"pi": {"max_retries": 10}}, local_lane=False)
 
         code, result = self.call("add")
 
@@ -344,6 +407,150 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["next_action"]["kind"], "review")
         self.assertIn("Validated each worker result.json schema", result["next_action"]["message"])
         self.assertNotIn("accept the work", result["next_action"]["message"].lower())
+
+    def test_local_lane_finish_records_telemetry_and_requires_independent_validation(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local",
+                        model="qwen3.8-27b-uncensored", effort="medium")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "task-local", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+
+        code, run_result = self.call()
+
+        self.assertEqual((code, run_result["batch_state"]), (0, "collected"))
+        job = self.state()["jobs"][0]
+        self.assertNotIn("telemetry", job)
+        self.assertNotIn("telemetry", run_result["jobs"][0])
+        output = Path(job["host_output"])
+        telemetry = json.loads((output / "telemetry.json").read_text())
+        self.assertEqual(telemetry["schema_version"], 1)
+        self.assertEqual(telemetry["route"], {
+            "lane": "local_lane", "level": None, "choice": "explicit_opt_in",
+            "model": "qwen3.8-27b-uncensored", "effort": "medium",
+            "harness": "pi", "provider": "llama-local"})
+        self.assertIsNotNone(telemetry["started_at"])
+        self.assertIsNotNone(telemetry["ended_at"])
+        self.assertEqual(telemetry["continuation_count"], 0)
+        self.assertEqual(telemetry["coordinator_grade"], "pending")
+        prompt = (self.root / "prompt-job0.txt").read_text()
+        self.assertIn("task_class: summary", prompt)
+        self.assertIn('"credentials_in_environment": false', prompt)
+        self.assertIn("trivial, self-contained, validator-checkable", prompt)
+        self.assertIn("Do not access network, credentials, secrets, auth files, or environment", prompt)
+        self.assertIn("Configured MCP tools and extensions remain available", prompt)
+
+        code, ungraded = self.call("finish")
+
+        self.assertEqual((code, ungraded["finish_complete"]), (10, False))
+        self.assertIn("requires --coordinator-grade", ungraded["finish"]["jobs"]["job0"]["issue"])
+        self.assertEqual(ungraded["finish"]["jobs"]["job0"]["independent_validation"], "passed")
+
+        code, result = self.call("finish", coordinator_grade="job0=accepted")
+
+        self.assertEqual((code, result["finish_complete"]), (0, True))
+        telemetry = json.loads((output / "telemetry.json").read_text())
+        self.assertEqual(telemetry["coordinator_grade"], "pending")
+        grade_record_path = self.run / "coordinator-grades.json"
+        self.assertTrue(grade_record_path.is_file())
+        self.assertNotEqual(grade_record_path.parent, output)
+        grade_record = json.loads(grade_record_path.read_text())
+        self.assertEqual(grade_record["grades"]["job0"]["grade"], "accepted")
+        self.assertNotIn("telemetry", self.state()["jobs"][0])
+        self.assertNotIn("coordinator_grade", self.state()["jobs"][0])
+        self.assertEqual(telemetry["independent_validation"]["status"], "passed")
+        self.assertEqual(telemetry["independent_validation"]["exit_code"], 0)
+        self.assertEqual(sum(event["action"] == "independent_validator"
+                             for event in self.events()), 2)
+
+    def test_worker_cannot_forge_coordinator_grade_in_writable_telemetry(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local",
+                        model="qwen3.8-27b-uncensored", effort="medium")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "telemetry-tamper", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.call()
+
+        job = self.state()["jobs"][0]
+        output = Path(job["host_output"])
+        telemetry_path = output / "telemetry.json"
+        telemetry = json.loads(telemetry_path.read_text())
+        telemetry["coordinator_grade"] = "accepted"
+        telemetry_path.write_text(json.dumps(telemetry))
+
+        code, result = self.call("finish")
+
+        outcome = result["finish"]["jobs"]["job0"]
+        self.assertEqual((code, result["finish_complete"]), (10, False))
+        self.assertIn("tamper", outcome["issue"].lower())
+        self.assertFalse(result["jobs"][0]["workspace_closed"])
+        sanitized = json.loads(telemetry_path.read_text())
+        self.assertEqual(sanitized["coordinator_grade"], "pending")
+        self.assertFalse((self.run / "coordinator-grades.json").exists())
+
+    def test_preexisting_quota_backoff_is_checkpointed_before_fake_host_launch(self):
+        model = "qwen3.8-27b-uncensored"
+        backoff = AdmissionStore(self.admission_dir).note_rate_limit(
+            "llama-local", model, 3600, "fixture")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model=model, effort="medium")
+
+        code, _ = self.call(wait_seconds=0.3)
+
+        self.assertEqual(code, 0)
+        self.assertFalse((self.root / "events.json").exists())
+        job = self.state()["jobs"][0]
+        self.assertEqual(job["admission_wait"]["retry_at"], backoff["retry_at"])
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
+        signals = telemetry["quota_signals"]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual((signals[0]["kind"], signals[0]["source"],
+                          signals[0]["provider"], signals[0]["retry_at"]),
+                         ("backoff", "admission", "llama-local", backoff["retry_at"]))
+        self.assertTrue(signals[0]["observed_at"])
+
+    def test_local_lane_cannot_be_accepted_when_independent_validator_fails(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local",
+                        model="qwen3.8-27b-uncensored", effort="medium")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "task-local", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(independent_validator_exit_code=9)
+        self.call()
+
+        code, result = self.call("finish", coordinator_grade="job0=accepted")
+
+        self.assertEqual((code, result["finish_complete"]), (10, False))
+        self.assertIn("cannot be accepted", result["finish"]["jobs"]["job0"]["issue"])
+        output = Path(self.state()["jobs"][0]["host_output"])
+        telemetry = json.loads((output / "telemetry.json").read_text())
+        self.assertEqual(telemetry["coordinator_grade"], "pending")
+        self.assertEqual(json.loads((self.run / "coordinator-grades.json").read_text())
+                         ["grades"]["job0"]["grade"], "accepted")
+        self.assertEqual(telemetry["independent_validation"]["status"], "failed")
+        self.assertEqual(telemetry["independent_validation"]["exit_code"], 9)
+
+    def test_local_lane_validator_budget_expiry_is_checkpointed_as_unverified(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local",
+                        model="qwen3.8-27b-uncensored", effort="medium")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {
+            "task_id": "task-local", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(independent_validator_timeout=True)
+        self.call()
+
+        code, result = self.call("finish", coordinator_grade="job0=accepted")
+
+        self.assertEqual((code, result["finish_complete"]), (10, False))
+        outcome = result["finish"]["jobs"]["job0"]
+        self.assertIn("exceeded the finish call budget", outcome["issue"])
+        self.assertFalse(result["jobs"][0]["workspace_closed"])
+        job = self.state()["jobs"][0]
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
+        self.assertEqual(telemetry["independent_validation"]["status"], "failed")
+        self.assertEqual(telemetry["independent_validation"]["exit_code"], None)
 
     def prepare_worker_outcome(self, outcome):
         manifest = json.loads(self.manifest.read_text())
@@ -480,7 +687,7 @@ class JobsTest(unittest.TestCase):
 
     def test_non_codex_startup_dialog_is_detected_before_sending_the_task_prompt(self):
         # P2: keep this custom Pi fixture a complete explicit tuple.
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         self.configure(jobs={"job0": "blocked"})
 
         code, result = self.call()
@@ -494,9 +701,9 @@ class JobsTest(unittest.TestCase):
 
         code, result = self.call(real=True, preview=True)
 
-        # P2: an unresolved partial custom route is unavailable, and remains fail-closed.
-        self.assertEqual((code, result["error"]), (4, "unavailable_capability"))
-        self.assertIn("partial explicit route has no compatible validated model ladder tuple", result["message"])
+        # A local provider without the explicit local-lane marker is rejected.
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("explicit local_lane opt-in", result["message"])
         self.assertFalse(self.run.exists())
 
     def test_runtime_without_effort_support_is_rejected_before_launch(self):
@@ -607,7 +814,7 @@ class JobsTest(unittest.TestCase):
 
     def test_rate_limited_assignment_retries_after_backoff_without_losing_lease_or_artifacts(self):
         # P2: retry scenarios use a complete explicit custom Pi tuple.
-        self.write_jobs(2, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
+        self.write_jobs(2, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         manifest = json.loads(self.manifest.read_text())
         manifest["jobs"][0]["cwd"] = str(self.root)
         manifest["jobs"][0]["writes_repository"] = True
@@ -634,13 +841,17 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(job["spec"]["repository_worktree"], lease)
         self.assertTrue(job["settled"])
         self.assertTrue(state["jobs"][1]["settled"])
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
+        self.assertEqual(telemetry["continuation_count"], 1)
+        self.assertEqual(telemetry["continuation_reasons"][0]["reason"], "rate_limit_backoff")
+        self.assertEqual(telemetry["quota_signals"][0]["kind"], "rate_limit")
         second_job_splits = [event for event in self.events()
                              if event["job_id"] == "job1" and event["action"] == "split"]
         self.assertTrue(second_job_splits)
         self.assertGreaterEqual(second_job_splits[0]["at"], retry["retry_at"])
 
     def test_explicit_start_rate_limit_retries_even_without_a_registered_worker(self):
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         self.configure(jobs={"job0": "rate_limited_start_once"})
 
         code, result = self.call(wait_seconds=1.2)
@@ -657,7 +868,7 @@ class JobsTest(unittest.TestCase):
         self.assertNotEqual(retry["attempt_id"], job["attempt_id"])
 
     def test_managed_rate_limit_uses_bounded_default_when_metadata_is_absent(self):
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         self.configure(jobs={"job0": "rate_limited_without_metadata_once"})
 
         before = time.time()
@@ -674,7 +885,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
 
     def test_managed_rate_limit_stops_after_one_recovery_attempt(self):
-        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         self.configure(jobs={"job0": "rate_limited_always"})
 
         code, result = self.call(wait_seconds=1.2)
@@ -755,6 +966,9 @@ class JobsTest(unittest.TestCase):
         self.assertIn("token-allowlist.txt", prompt)
         self.assertIn(str(self.context_test), prompt)
         self.assertIn("retry at most 2 times", prompt)
+        self.assertIn("check both the host and jail namespaces", prompt)
+        self.assertIn("claims cite their source and label unknowns", prompt)
+        self.assertIn("telemetry.json", prompt)
 
     def test_jail_worker_brief_uses_exported_container_paths_for_required_context(self):
         manifest = json.loads(self.manifest.read_text())

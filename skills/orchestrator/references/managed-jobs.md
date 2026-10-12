@@ -28,6 +28,14 @@ and every declared artifact file, records dispositions, releases leases, and
 closes settled workspaces. A successful cleanup returns `next_action.kind`
 `review`; it does not accept the work, and `acceptance` remains pending.
 
+For an opted-in `local_lane` job, `finish` also runs the declared independent
+validator against the collected output directory. Record coordinator review
+with `--coordinator-grade JOB_ID=accepted|rework|rejected`; acceptance is
+refused until the validator passes. The final result records both the grade
+and validator status. A failed validator keeps an accepted or rework job open;
+the coordinator can reject it to close the attempt while preserving the failed
+validation evidence.
+
 The coordinator can explicitly change a worker disposition for a specific job
 with the repeatable `--coordinator-disposition-override JOB_ID=DISPOSITION`
 flag and a non-empty `--coordinator-override-reason`. The reason is recorded in
@@ -63,7 +71,7 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator`, `local_lane_scope` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
@@ -77,6 +85,46 @@ refused on jail routes. Explicit tuple overrides win and cannot silently
 fallback. Preview includes effective provider, effort, and the pinned route;
 live preflight validates exact native model/provider/effort capabilities before
 any pane or worker is created.
+
+The `local_lane` flag is a deliberate opt-in for an ordinary host job outside
+the integer ladder. It requires the complete override tuple
+`runtime: pi`, `provider: llama-local`, `model: qwen3.8-27b-uncensored`, and
+`effort: medium`; do not include `model_level`, fallback, or escalation fields.
+It also requires `task_class` from the policy allowlist: `triage`, `summary`,
+`contract_artifact`, `bounded_code_edit`, `inventory`, or
+`local_file_analysis`. A missing or unsupported class is refused during
+request preparation, before host preflight or launch. These classes are for
+trivial, self-contained, validator-checkable work with supplied local inputs;
+networked, credentialed, destructive, and review-verdict tasks are excluded.
+Each request must also declare `local_lane_scope` with `network_access`,
+`credential_access`, `credentials_in_environment`, and `destructive_actions`
+all set to `false`; any missing or true field is refused during preparation.
+Do not put credentials or secrets in task files or override instructions. The
+final prompt is checked for common secret-value patterns before launch. The
+worker instructions prohibit reading the process environment or secret files;
+the launcher adds no credential values to the worker prompt. Before a local Pi
+start, the launcher replaces the moved pane's shell with an `env -i` shell and
+runs its Herdr CLI calls with the same allowlist: `HOME`, `PATH`, `TERM`,
+`LANG`, Herdr pane integration variables, and Pi agent/session directory
+variables when present. API keys and tokens from the coordinator environment
+are not passed to the worker.
+The job must set `writes_repository: true`, use its recorded throwaway linked
+worktree for `cwd`, declare acceptance tests, and provide
+`independent_validator: {"argv": ["...", "{output_dir}"]}`. The command is
+run without a shell at `finish`. Admission caps `llama-local` at one active
+lease across managed and direct launches. Preflight also requires the active
+`llama-server.service` user unit and at least 2048 MiB free GPU memory. The
+service is expected to pin `reasoning_effort=medium`; the route records medium
+but does not send Pi's unsupported `--thinking` value. The route never uses the
+jail.
+
+Pi starts with its normal `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), so its
+configured MCP servers and extensions remain available. The local route does
+not add `--no-mcp` or `--no-extensions`, replace the agent directory, or edit
+live Pi configuration. Configured tools remain available, but their use must
+stay within the declared bounded class and must not disclose credential
+material. Read-only setup inspection and any future config changes belong in
+the task's `live-config-proposal.md`.
 
 For a jailed Codex job, optional `task_class` selects the per-run provider
 stream idle timeout from `launch-policy.json`: `short_routine` uses 300000 ms
@@ -148,6 +196,19 @@ If retry tuning is needed and no supported run override exists, leave shared
 settings alone. Record the proposed settings change, affected run and worker,
 and exact staged command in the run's decision record; wait for authorization
 before applying it or retrying work under a new shared setting.
+
+The coordinator writes launcher-owned `telemetry.json` (schema version 1) as a
+sidecar in each task output directory. This keeps the schema-v1 `state.json`
+checkpoint and public engine result byte-compatible. Older checkpoints that
+embedded telemetry in job records remain loadable; the next checkpoint moves
+that data to the sidecar. The sidecar records the selected route (`lane`,
+`level`, `choice`, `model`, `effort`, `harness`, `provider`), start/end times,
+continuation count and reasons, quota signals, a `coordinator_grade` slot that
+must remain `pending`, and independent-validation status. A non-pending grade in
+worker-writable telemetry is treated as tampering and ignored. `finish` stores
+the actual grade in coordinator-owned `coordinator-grades.json` in the run
+directory. A local-lane `finish` requires a coordinator grade; an `accepted`
+grade additionally requires a passing independent validator.
 
 Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–32 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
 

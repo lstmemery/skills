@@ -1,6 +1,25 @@
 """Submit one Herdr prompt and verify that its worker turn actually started."""
 
+import re
 import time
+
+from .security import ANSI_ESCAPE
+
+
+ACTIVE_TURN_STATUS = re.compile(
+    r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
+    r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
+    re.IGNORECASE,
+)
+
+
+def has_active_turn_status(output):
+    """Return whether the last visible line is Herdr's active-turn marker."""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", "replace")
+    clean = ANSI_ESCAPE.sub("", str(output))
+    lines = [line.strip() for line in clean.splitlines() if line.strip()]
+    return bool(lines and ACTIVE_TURN_STATUS.fullmatch(lines[-1]))
 
 
 class PromptNotStarted(RuntimeError):

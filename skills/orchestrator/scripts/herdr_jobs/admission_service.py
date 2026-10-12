@@ -18,13 +18,22 @@ class AdmissionService:
     def __init__(self, store: AdmissionStore | None = None):
         self.store = store or AdmissionStore()
 
-    def acquire(self, job: Mapping[str, Any], cap: int, request_id: str, *, bypass: bool = False) -> dict[str, Any]:
+    def acquire(self, job: Mapping[str, Any], cap: int, request_id: str, *, bypass: bool = False,
+                pending_effect: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        options = {"bypass_admission": bypass}
+        if pending_effect is not None:
+            options["pending_effect"] = pending_effect
         return self.store.acquire(job["provider"], job.get("admission_model", "default"),
                                   job["admission_lease_id"], cap, request_id,
-                                  bypass_admission=bypass)
+                                  **options)
 
-    def release(self, job: Mapping[str, Any]) -> dict[str, Any]:
-        return self.store.release(job["admission_lease_id"])
+    def release(self, job: Mapping[str, Any], *, reconciliation_evidence: str | None = None) -> dict[str, Any]:
+        if reconciliation_evidence is None:
+            return self.store.release(job["admission_lease_id"])
+        return self.store.release(job["admission_lease_id"], reconciliation_evidence=reconciliation_evidence)
+
+    def record_unknown_effect(self, job: Mapping[str, Any], effect: Mapping[str, Any]) -> dict[str, Any]:
+        return self.store.record_unknown_effect(job["admission_lease_id"], effect)
 
     def rate_limit(self, job: Mapping[str, Any], signal: Mapping[str, Any], default_seconds: int = 60) -> dict[str, Any]:
         delay = signal.get("retry_after_seconds")

@@ -138,6 +138,106 @@ the runtime's active-turn status line in the owned pane. A generic occurrence of
 leave the attempt unresolved and inspect the pane before retrying when the
 status line is absent.
 
+## Opt-in local Pi route
+
+The local Qwen route is an explicit ordinary host route outside the numbered
+ladder. It requires a throwaway repository worktree, active user service
+`llama-server.service`, at least 2048 MiB free GPU memory, one shared
+`llama-local` admission lease, an allowlisted `task_class`, an explicit safe
+`local_lane_scope`, and an independent output validator. The direct launcher
+and managed jobs use the same task-class and scope validator. Do not start Pi
+directly with `herdr agent start --approve`; the direct launcher must validate
+the request before starting the worker. Check the service and GPU before a
+direct start:
+
+```sh
+python3 scripts/local-lane.py preflight
+```
+
+The `start` command writes a pending-effect marker atomically with acquiring
+the shared one-slot `llama-local` lease. It releases the lease with
+reconciliation evidence when the start command was never issued or when the
+worker reaches a verified terminal state. An unsuccessful or missing start
+response, including an interrupted wait, keeps the lease and its pending
+effect. Inspect the exact agent and pane/process before retrying; release the
+retained lease only after reconciliation proves no worker started.
+`python3 scripts/herdr-admission.py status --provider
+llama-local` shows the retained lease and pending effect. After inspection
+proves the worker did not start, release that exact lease and record the
+observation:
+
+```sh
+python3 scripts/herdr-admission.py release --lease-id <lease-id> \
+  --reconciliation-evidence "<pane/process observation>"
+```
+
+The admission CLI refuses to release a lease with a pending effect unless
+reconciliation evidence is supplied. In the owned worktree, create and move a
+pane, then use the shared local-lane launcher with a bounded task class, four
+false scope declarations, and a brief file:
+
+```sh
+herdr pane split --current --direction right --cwd <worktree> --no-focus
+herdr pane move <returned-pane-id> --new-workspace --label <task-name> --no-focus
+python3 scripts/local-lane.py start --pane <moved-pane-id> --name <unique-name> \
+  --task-class summary \
+  --local-lane-scope-json '{"network_access":false,"credential_access":false,"credentials_in_environment":false,"destructive_actions":false}' \
+  --prompt-file <brief-file> \
+  --telemetry-file <task-output-dir>/telemetry.json
+```
+
+The launcher reruns service/GPU preflight, checks the shared class/scope gate,
+creates a task telemetry file using the managed route's schema, acquires
+admission with the pending-effect marker, replaces the pane shell with an
+`env -i` shell, starts Pi, submits the brief through the verified submit
+helper, and waits for the worker to finish before releasing admission. The
+telemetry records route, model, effort, harness, start/end times, continuation
+count and reasons, quota signals, a coordinator-grade slot that remains pending,
+and independent-validation status. The actual coordinator grade is stored in
+coordinator-owned `coordinator-grades.json` in the run directory. It records the
+start time before issuing the Herdr start command and
+the end time only after the worker reaches `done`. The telemetry path must be
+new; the launcher refuses to overwrite an existing record.
+Its environment is limited to `HOME`, `PATH`, `TERM`, `LANG`, Herdr's pane
+integration variables, and Pi's agent/session directory variables when set; it
+does not pass API keys or tokens. Herdr `agent start` starts its canonical
+executable in the existing pane shell and passes arguments after `--` to that
+executable; it does not use the launcher's environment as the worker
+environment. See Herdr's [agent automation](https://herdr.dev/docs/agent-automation/)
+and [CLI reference](https://herdr.dev/docs/cli-reference/). The launcher
+verifies the owned pane and visible active-turn status, waits for the worker to
+reach `done`, then releases admission. Run the declared independent validator
+against its output directory after the launcher returns. A pre-start failure
+releases admission; an ambiguous start or later unverified state retains the
+lease and emits an unresolved effect for reconciliation. This route does not
+enter the jail. Pi uses its normal
+`PI_CODING_AGENT_DIR` (default `~/.pi/agent`), preserving configured MCP
+servers and extensions. The local server pins `reasoning_effort=medium`; Pi's
+local model metadata does not advertise an effort list, so this route omits
+Pi's `--thinking` argument and relies on the server pin. Pi documents MCP
+server configuration in
+[MCP Servers](https://pi.dev/docs/latest/mcp), extension loading in
+[Extensions](https://pi.dev/docs/latest/extensions), and configuration
+locations in [Configuration](https://pi.dev/docs/latest/configuration). Do not
+disable these resources for the local route.
+
+The managed equivalent is an ordinary job with `local_lane: true`, the exact
+Pi/`llama-local`/Qwen/medium tuple, a repository worktree, named acceptance
+tests, an allowlisted `task_class` (`triage`, `summary`, `contract_artifact`,
+`bounded_code_edit`, `inventory`, or `local_file_analysis`), and
+`independent_validator.argv` containing `{output_dir}`. Refuse missing or
+unsupported classes before launch. The class scope is trivial, self-contained,
+validator-checkable work on supplied local inputs; do not use the route for
+networked, credentialed, destructive, or review-verdict tasks. Do not place
+credentials or secrets in the task prompt or inspect them in the process
+environment. Each request declares `local_lane_scope` with
+`network_access`, `credential_access`, `credentials_in_environment`, and
+`destructive_actions` all false; the helper refuses any omitted or enabled
+scope. The configured MCP and extension resources remain available and must
+stay within the declared class. Its preflight, single-slot admission, telemetry,
+and finish-time validation use the same policy as direct launches; see
+[managed jobs](managed-jobs.md).
+
 When a direct worker reports HTTP 429 or a rate-limit response, record its
 Retry-After or reset metadata before another start, then release the completed
 attempt's admission lease:
