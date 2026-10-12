@@ -8,16 +8,15 @@ from the first prompt (`/clear`) instead of the /orchestrator invocation
 found later in the session. This script makes those guarantees
 mechanical, so the next corpus build cannot repeat them quietly:
 
-- Digests must cover through the session end timestamp; truncation
-  (timeline or span ending before the listed session end) fails loudly.
+- Digests must cover through the final transcript record, represented by the
+  index end timestamp; an earlier timeline or span end fails loudly.
 - Every listed session must have a digest and every digest a non-zero
   timeline; a listed session without a digest fails verify unless
   `--allow-missing-digests` is passed for intentionally digest-less
   builds, and empty digests are flagged in the report and, with
   `--write`, in index.md itself.
-- Role is inferred from the /orchestrator invocation in the session's
-  user turns rather than the first prompt; index.md coordinator rows
-  must match that inference (`--write` corrects them).
+- Role labels come from the invocation metadata supplied to the corpus build
+  and recorded in the index. Digest content is not role evidence.
 
 Inputs are the corpus artifacts themselves: `index.md` (the triage
 table every build already writes) and the per-session digests under
@@ -26,12 +25,11 @@ transcripts, this script verifies what it shipped.
 
 Usage:
   retro_prep_digest.py verify --corpus DIR [--write] [--allow-missing-digests]
-      [--grace-minutes N] [--report PATH]
-  retro_prep_digest.py derive-role [--text TEXT]   # text on stdin
+      [--report PATH]
 
 Exit codes: 0 all checks passed, 1 fatal usage/parse error, 2 check
 failures found (truncated or empty digest, listed session without a
-digest, coordinator role mismatch, span clip).
+digest, span clip).
 """
 
 import argparse
@@ -42,30 +40,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-VERSION = 2
-
-DEFAULT_GRACE_MINUTES = 2
-
-# Role inference: user turns are scanned for orchestrator invocation and
-# worker-dispatch patterns, not just the first prompt. Ordered; the
-# first matching group wins. Coordinator is checked first because a
-# coordinator session also dispatches workers.
-ROLE_PATTERNS = (
-    ("coordinator", "orchestrator-invocation", re.compile(
-        r"you are (the|an) /?orchestrator\b", re.IGNORECASE)),
-    ("worker", "worker-dispatch", re.compile(
-        r"you are (?:a|an|the) (?:worker|code reviewer|read-only reviewer)\b"
-        r"|parent-dispatched worker task"
-        r"|read and execute (?:your brief|/)"
-        r"|work autonomously to completion", re.IGNORECASE)),
-)
+VERSION = 3
 
 ENTRY_TIME_RE = re.compile(r"^###\s+(\d{1,2}):(\d{2}):(\d{2})")
 DATETIME_RE = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s*([A-Za-z0-9+\-:/]+))?")
 SPAN_LINE_RE = re.compile(r"^\s*-\s*Session span:\s*(.+)$", re.MULTILINE)
 SPAN_TO_RE = re.compile(r"\s+to\s+")
-USER_TURN_TITLE_RE = re.compile(r"^###\s+\S+\s+.*user turn", re.IGNORECASE)
 
 
 def norm_role(cell):
@@ -96,7 +77,6 @@ class Digest:
     span_start: datetime = None
     span_end: datetime = None
     entries: list = field(default_factory=list)      # [(seconds, title)]
-    user_turn_bodies: list = field(default_factory=list)
 
 
 @dataclass
@@ -107,9 +87,7 @@ class SessionCheck:
     last_entry: str = None
     coverage_gap_minutes: float = None
     span_end: str = None
-    role_index: str = None
-    role_derived: str = None
-    role_basis: str = None
+    role_invocation: str = None
     status: str = "OK"
     problems: list = field(default_factory=list)
 
@@ -195,7 +173,7 @@ def parse_index(path):
 
 
 def parse_digest(path):
-    """Parse span header, timeline entries, and user-turn bodies."""
+    """Parse span header and timeline entries from a built digest."""
     text = path.read_text(encoding="utf-8")
     digest = Digest(path=path)
     span = SPAN_LINE_RE.search(text)
@@ -205,12 +183,10 @@ def parse_digest(path):
             digest.span_start = parse_naive(parts[0])
             digest.span_end = parse_naive(parts[1])
     lines = text.splitlines()
-    in_timeline, in_user_turn, in_user_body = False, False, False
-    body, fence_depth = [], 0
+    in_timeline = False
     for line in lines:
         if line.startswith("## "):
             in_timeline = line.strip().lower() == "## timeline"
-            in_user_turn = in_user_body = False
             continue
         if line.startswith("### "):
             if in_timeline:
@@ -218,42 +194,7 @@ def parse_digest(path):
                 if time_match:
                     h, m, s = (int(time_match.group(i)) for i in range(1, 4))
                     digest.entries.append((h * 3600 + m * 60 + s, line.lstrip("# ").strip()))
-            in_user_turn = bool(USER_TURN_TITLE_RE.match(line))
-            if in_user_turn:
-                body = []
-            in_user_body = False
-            continue
-        if in_user_turn:
-            if line.startswith("```"):
-                # A closing fence never carries an info string, so a
-                # ```lang line inside a verbatim prompt opens a nested
-                # block rather than ending the capture.
-                info = line[3:].strip()
-                if not in_user_body:
-                    in_user_body = True
-                    fence_depth = 0
-                elif info:
-                    fence_depth += 1
-                elif fence_depth:
-                    fence_depth -= 1
-                else:
-                    digest.user_turn_bodies.append("\n".join(body))
-                    in_user_turn = in_user_body = False
-                continue
-            if in_user_body:
-                body.append(line)
     return digest
-
-
-def derive_role(texts):
-    """Infer role from any user-turn text; returns (role, basis)."""
-    for role, basis, pattern in ROLE_PATTERNS:
-        for text in texts:
-            if pattern.search(text):
-                return role, basis
-    if texts:
-        return "interactive", "no-invocation-in-user-turns"
-    return "interactive", "no-user-turns-in-digest"
 
 
 def find_digest(sessions_dir, row):
@@ -281,9 +222,20 @@ def last_entry_datetime(digest, session_end):
                     session_end.day) + timedelta(seconds=seconds)
 
 
-def check_session(row, sessions_dir, grace, allow_missing_digests):
+def format_gap(seconds):
+    """Format a timestamp gap without rounding sub-minute clips to zero."""
+    seconds = round(abs(seconds))
+    if seconds < 60:
+        unit = "second" if seconds == 1 else "seconds"
+        return f"{seconds} {unit}"
+    minutes = round(seconds / 60)
+    unit = "min" if minutes == 1 else "min"
+    return f"{minutes} {unit}"
+
+
+def check_session(row, sessions_dir, allow_missing_digests):
     check = SessionCheck(row=row)
-    check.role_index = row.role
+    check.role_invocation = norm_role(row.role)
     path = find_digest(sessions_dir, row)
     if path is None:
         check.status = "NO-DIGEST"
@@ -293,15 +245,13 @@ def check_session(row, sessions_dir, grace, allow_missing_digests):
     check.digest_path = str(path)
     digest = parse_digest(path)
     check.entries = len(digest.entries)
-    if digest.user_turn_bodies:
-        check.role_derived, check.role_basis = derive_role(digest.user_turn_bodies)
 
     if digest.span_end is not None:
         check.span_end = digest.span_end.strftime("%Y-%m-%d %H:%M:%S")
-        if digest.span_end + grace < row.end:
-            gap = (row.end - digest.span_end).total_seconds() / 60
+        if digest.span_end < row.end:
+            gap = (row.end - digest.span_end).total_seconds()
             check.problems.append(
-                f"span header ends {gap:.0f} min before listed session end (span clip)")
+                f"span header ends {format_gap(gap)} before listed session end (span clip)")
     else:
         check.problems.append("digest has no 'Session span: X to Y' header line")
 
@@ -314,26 +264,15 @@ def check_session(row, sessions_dir, grace, allow_missing_digests):
                        f"{digest.entries[-1][0] % 60:02d}"
     resolved = last_entry_datetime(digest, row.end)
     gap = (row.end - resolved).total_seconds() / 60
-    check.coverage_gap_minutes = round(gap, 1)
-    if gap > grace.total_seconds() / 60:
+    check.coverage_gap_minutes = round(gap, 3)
+    if gap > 0:
         check.problems.append(
-            f"last timeline entry {check.last_entry} is {gap:.0f} min before "
+            f"last timeline entry {check.last_entry} is {format_gap(gap * 60)} before "
             f"listed session end (truncated)")
-    elif gap < -grace.total_seconds() / 60:
+    elif gap < 0:
         check.problems.append(
-            f"last timeline entry {check.last_entry} is {-gap:.0f} min after "
-            f"listed session end (beyond grace; clock or date mismatch)")
-
-    if check.role_derived and \
-            "coordinator" in (norm_role(check.role_index), check.role_derived) and \
-            norm_role(check.role_index) != check.role_derived:
-        check.problems.append(
-            f"index role {check.role_index!r} does not match orchestrator-invocation "
-            f"inference {check.role_derived!r} (basis: {check.role_basis})")
-    elif check.role_derived == "worker" and \
-            norm_role(check.role_index) not in ("worker", "coordinator"):
-        check.problems.append(
-            f"note: worker dispatch found but index role is {check.role_index!r}")
+            f"last timeline entry {check.last_entry} is {format_gap(gap * 60)} after "
+            f"listed session end (clock or date mismatch)")
 
     if check.problems and check.status != "EMPTY":
         hard = [p for p in check.problems if not p.startswith("note:")]
@@ -342,11 +281,10 @@ def check_session(row, sessions_dir, grace, allow_missing_digests):
 
 
 def annotate_index(path, checks):
-    """Rewrite index.md: fix coordinator role rows, flag empty digests.
+    """Rewrite index.md to flag empty digests, preserving invocation roles.
 
-    The Role cell is resolved from the header row by name, matching
-    parse_index, so tables with any column after Role are annotated in
-    the right cell.
+    The Role column is not inferred or rewritten from digest content. The
+    empty-digest annotation is added in place without changing that role.
     """
     by_line = {c.row.line_no: c for c in checks}
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -359,41 +297,28 @@ def annotate_index(path, checks):
     if role_col is None:
         raise ValueError(f"{path}: no index table header containing Session ID and Role")
     for line_no, check in by_line.items():
-        if check.status == "OK" and check.role_derived == check.role_index:
-            continue
         cells = split_row(lines[line_no - 1].strip().strip("|"))
         role_cell = cells[role_col]
-        if check.status == "EMPTY":
+        if check.status == "EMPTY" and "[empty-digest]" not in role_cell:
             role_cell = f"{role_cell} [empty-digest]".strip()
-        role_fixable = (check.role_derived
-                        and norm_role(check.role_index) != check.role_derived
-                        and check.entries not in (None, 0)
-                        and "coordinator" in (norm_role(check.role_index),
-                                              check.role_derived))
-        if role_fixable:
-            role_cell = f"{check.role_derived} (was: {check.role_index})"
         cells[role_col] = role_cell
         lines[line_no - 1] = "| " + " | ".join(cells) + " |"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return sum(1 for c in checks
-               if c.status == "EMPTY" or
-               ("coordinator" in (c.role_index or "", c.role_derived or "")
-                and c.role_index != c.role_derived))
+    return sum(1 for c in checks if c.status == "EMPTY")
 
 
 def render_report(checks):
     header = ("| Session | Status | Entries | Last entry | Gap to end (min) | "
-              "Role (index) | Role (derived) | Problems |")
-    lines = [header, "|---|---|---:|---|---:|---|---|---|"]
+              "Role (invocation) | Problems |")
+    lines = [header, "|---|---|---:|---|---:|---|---|"]
     for check in checks:
-        lines.append("| `{}` | {} | {} | {} | {} | {} | {} | {} |".format(
+        lines.append("| `{}` | {} | {} | {} | {} | {} | {} |".format(
             check.row.session_id[:12],
             check.status,
             check.entries if check.entries is not None else "n/a",
             check.last_entry or "n/a",
             check.coverage_gap_minutes if check.coverage_gap_minutes is not None else "n/a",
-            check.role_index or "n/a",
-            check.role_derived or "n/a",
+            check.role_invocation or "n/a",
             "; ".join(check.problems) or "—",
         ))
     failed = sum(1 for c in checks if c.status in ("FAILED", "EMPTY"))
@@ -409,8 +334,7 @@ def cmd_verify(args):
     index_path = corpus / "index.md"
     sessions_dir = corpus / "sessions"
     rows = parse_index(index_path)
-    grace = timedelta(minutes=args.grace_minutes)
-    checks = [check_session(row, sessions_dir, grace, args.allow_missing_digests)
+    checks = [check_session(row, sessions_dir, args.allow_missing_digests)
               for row in rows]
     report_text, failed = render_report(checks)
     missing = sum(1 for c in checks if c.status == "NO-DIGEST" and c.problems)
@@ -418,7 +342,6 @@ def cmd_verify(args):
     if args.report:
         payload = {
             "version": VERSION,
-            "grace_minutes": args.grace_minutes,
             "allow_missing_digests": args.allow_missing_digests,
             "sessions": [{
                 "session_id": c.row.session_id,
@@ -429,9 +352,7 @@ def cmd_verify(args):
                 "last_entry": c.last_entry,
                 "coverage_gap_minutes": c.coverage_gap_minutes,
                 "span_end": c.span_end,
-                "role_index": c.role_index,
-                "role_derived": c.role_derived,
-                "role_basis": c.role_basis,
+                "role_invocation": c.role_invocation,
                 "status": c.status,
                 "problems": c.problems,
             } for c in checks],
@@ -443,19 +364,12 @@ def cmd_verify(args):
         print(f"index.md updated: {changed} row(s) annotated")
     if failed or missing:
         print(f"VERIFY FAILED: {failed} session(s) with truncated or empty digests "
-              f"or coordinator role mismatches"
+              f"or span clips"
               + (f"; {missing} listed session(s) without a digest "
                  f"(pass --allow-missing-digests for digest-less builds)"
                  if missing else ""),
               file=sys.stderr)
         return 2
-    return 0
-
-
-def cmd_derive_role(args):
-    text = args.text if args.text is not None else sys.stdin.read()
-    role, basis = derive_role([text] if text.strip() else [])
-    print(f"{role}\t{basis}")
     return 0
 
 
@@ -465,20 +379,13 @@ def main(argv=None):
 
     verify = sub.add_parser("verify", help="check a built corpus against the digest guarantees")
     verify.add_argument("--corpus", required=True, help="corpus directory containing index.md and sessions/")
-    verify.add_argument("--grace-minutes", type=int, default=DEFAULT_GRACE_MINUTES,
-                        help=f"tolerated gap between last timeline entry and session end "
-                             f"(default {DEFAULT_GRACE_MINUTES})")
     verify.add_argument("--allow-missing-digests", action="store_true",
                         help="report listed sessions without digests instead of failing "
                              "(default: every listed session needs a digest)")
     verify.add_argument("--report", help="write JSON coverage report to this path")
     verify.add_argument("--write", action="store_true",
-                        help="annotate index.md: correct coordinator roles, flag empty digests")
+                        help="annotate index.md: preserve invocation roles, flag empty digests")
     verify.set_defaults(func=cmd_verify)
-
-    role = sub.add_parser("derive-role", help="classify one user prompt read from stdin or --text")
-    role.add_argument("--text", help="prompt text (default: stdin)")
-    role.set_defaults(func=cmd_derive_role)
 
     args = parser.parse_args(argv)
     try:
