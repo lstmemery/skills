@@ -1,620 +1,28 @@
 #!/usr/bin/env python3
 """Capture immutable review inputs, refuse secret-looking payloads, and check drift."""
 import argparse
-import hashlib
 import json
-import math
 import os
 from pathlib import Path
-import re
 import shutil
-import stat
 import subprocess
 import sys
-import tempfile
-from collections import Counter
 
-VERSION = 1
-MAX_FILE = 8 * 1024 * 1024
-MAX_TOTAL = 256 * 1024 * 1024
-MAX_FILES = 20000
-FINGERPRINT_ENV = 'CODE_REVIEW_SECRET_FINGERPRINTS'
-SECRETS_SCANNER_ENV = 'CODE_REVIEW_SECRETS_SCANNER'
-GITLEAKS_EXIT = 7
-GITLEAKS_TIMEOUT = 600
-GITLEAKS_MAX_TARGET_MB = 512
-MAX_FINDINGS = 20
-
-# Prefix rules are written with character classes so this source file never
-# contains a scannable secret shape of its own.
-SECRET_TOKEN_RULES = tuple((name, re.compile(pattern)) for name, pattern in (
-    ('github-token', r'(?<![A-Za-z0-9])gh[posur]_[A-Za-z0-9]{20,}'),
-    ('github-fine-grained-token', r'(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}'),
-    ('openai-token', r'(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}'),
-    ('slack-token', r'(?<![A-Za-z0-9])xox[abprse]-[A-Za-z0-9-]{10,}'),
-    ('aws-access-key', r'(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}'),
-    ('gitlab-token', r'(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}'),
-    ('ntfy-token', r'(?<![A-Za-z0-9])tk_[A-Za-z0-9]{15,}'),
-))
-# Assembled from fragments so neither literal alone forms a key block.
-PRIVATE_KEY_BLOCK = re.compile('-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' + r'[\s\S]{0,8000}?' + '-----END [A-Z0-9 ]*PRIVATE KEY-----')
-SECRET_ASSIGNMENT = re.compile(
-    r'(?i)(?<![A-Za-z0-9_])'
-    r'(?P<name>[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)'
-    r'["\']?\s*(?::=|[:=])\s*["\']?'
-    r'(?P<value>[^\s"\'`<>{}()]{16,})'
-    r'(?P<runtime_call>[ \t]*\()?')
-PLACEHOLDER_VALUES = frozenset((
-    'changeme', 'change_me', 'example', 'fixme', 'n/a', 'nil', 'none', 'not_set',
-    'notset', 'null', 'passwd', 'password', 'placeholder', 'redacted', 'sample',
-    'secret', 'setme', 'todo', 'token', 'unset', 'xxx', 'xxxx', 'xxxxx'))
-PLACEHOLDER_PREFIXES = ('xxx', 'your', 'example', 'sample', 'dummy', 'fake',
-                        'insert', 'replace', 'placeholder', 'test', 'changeme')
-HEX_SHAPE = re.compile(r'[0-9a-fA-F]{16,}')
-
-
-class Failure(ValueError):
-    def __init__(self, outcome, message, **details):
-        super().__init__(message)
-        self.result = {'outcome': outcome, 'message': message, **details}
-
-
-def digest(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def encoded(value):
-    return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
-
-
-def invalid(message, **details):
-    raise Failure('invalid_input', message, **details)
-
-
-def bounded_file(path, limit=MAX_FILE):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise Failure('unsupported', 'Not a regular file', path=str(path))
-        if info.st_size > limit:
-            raise Failure('unsupported', 'File exceeds capture bound', path=str(path), limit=limit)
-        data = stream.read(limit + 1)
-        if len(data) > limit:
-            raise Failure('conflict', 'File grew beyond capture bound', path=str(path))
-        after = os.fstat(stream.fileno())
-        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns):
-            raise Failure('conflict', 'File changed while reading', path=str(path))
-        return data
-
-
-def is_text(data):
-    if b'\x00' in data:
-        return False
-    try:
-        data.decode('utf-8')
-        return True
-    except UnicodeDecodeError:
-        return False
-
-
-class Git:
-    def __init__(self, repo):
-        self.repo = repo
-        self.commands = []
-        self.environment = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
-        self.environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
-                                GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', LC_ALL='C')
-
-    def call(self, *args, allowed=(0,)):
-        argv = ['git', '--no-pager', '-c', 'core.fsmonitor=false', '-C', str(self.repo), *args]
-        self.commands.append(argv)
-        result = subprocess.run(argv, env=self.environment, capture_output=True, timeout=30)
-        if result.returncode not in allowed:
-            raise Failure('git_error', 'Git command failed', argv=argv, exit_code=result.returncode,
-                          stderr=os.fsdecode(result.stderr[:4000]))
-        if len(result.stdout) > MAX_TOTAL:
-            raise Failure('unsupported', 'Git output exceeds capture bound', argv=argv, limit=MAX_TOTAL)
-        return result.stdout
-
-    def ignored(self, path):
-        result = self.call('check-ignore', '--no-index', '--', path, allowed=(0, 1))
-        return bool(result)
-
-    def resolve(self, ref):
-        if not ref or '\x00' in ref:
-            invalid('A nonempty ref is required')
-        return self.call('rev-parse', '--verify', '--end-of-options', ref + '^{commit}').strip().decode('ascii')
-
-
-class Collector:
-    def __init__(self):
-        self.blobs = {}
-        self.total = 0
-
-    def blob(self, data):
-        sha = digest(data)
-        if sha not in self.blobs:
-            self.total += len(data)
-            if self.total > MAX_TOTAL:
-                raise Failure('unsupported', 'Capture exceeds total byte bound', limit=MAX_TOTAL)
-            self.blobs[sha] = data
-        return sha
-
-    def entry(self, mode, data=None, **fields):
-        result = {'mode': mode, **fields}
-        if data is not None:
-            result.update(sha256=self.blob(data), size=len(data), text=is_text(data))
-        return result
-
-
-def tree(git, oid, collector):
-    entries = {}
-    rows = git.call('ls-tree', '-rz', '--full-tree', oid).split(b'\x00')
-    if len(rows) > MAX_FILES + 1:
-        raise Failure('unsupported', 'Tree exceeds file count bound')
-    for row in rows:
-        if not row:
-            continue
-        metadata, filename = row.split(b'\t', 1)
-        mode, kind, object_id = metadata.decode('ascii').split()
-        name = os.fsdecode(filename)
-        if kind == 'commit':
-            entries[name] = collector.entry(mode, object_id=object_id, gap='submodule contents not captured')
-            continue
-        size = int(git.call('cat-file', '-s', object_id))
-        if size > MAX_FILE:
-            entries[name] = collector.entry(mode, object_id=object_id, size=size, gap='file exceeds capture bound')
-            continue
-        data = git.call('cat-file', 'blob', object_id)
-        entry = collector.entry(mode, data, object_id=object_id)
-        if mode == '120000':
-            entry['gap'] = 'symlink target recorded; target not followed'
-        elif not entry['text']:
-            entry['gap'] = 'binary content captured; requires a suitable reviewer'
-        entries[name] = entry
-    return entries
-
-
-def path_inside(repo, name):
-    path = Path(name)
-    if path.is_absolute() or '..' in path.parts or not path.parts:
-        invalid('Invalid repository path', path=name)
-    current = repo
-    for part in path.parts[:-1]:
-        current /= part
-        if current.is_symlink():
-            raise Failure('unsupported', 'Ancestor is a symlink', path=name)
-    return repo / path
-
-
-def work_entry(repo, name, collector, previous=None):
-    try:
-        path = path_inside(repo, name)
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            return collector.entry('120000', os.fsencode(os.readlink(path)), gap='symlink target recorded; target not followed')
-        if stat.S_ISDIR(info.st_mode):
-            return collector.entry('160000' if previous and previous['mode'] == '160000' else 'directory',
-                                   gap='directory/submodule contents not captured')
-        if not stat.S_ISREG(info.st_mode):
-            return collector.entry('special', gap='nonregular content not captured')
-        mode = '100755' if info.st_mode & stat.S_IXUSR else '100644'
-        data = bounded_file(path)
-        entry = collector.entry(mode, data)
-        if not entry['text']:
-            entry['gap'] = 'binary content captured; requires a suitable reviewer'
-        return entry
-    except FileNotFoundError:
-        return None
-    except PermissionError:
-        return collector.entry('unreadable', gap='permission denied')
-    except Failure as error:
-        if error.result['outcome'] != 'unsupported':
-            raise
-        return collector.entry('unsupported', gap=error.result['message'])
-
-
-def untracked_paths(repo, git, tracked):
-    """Find untracked filesystem entries Git's regular-file listing omits."""
-    found = set(os.fsdecode(name) for name in git.call(
-        'ls-files', '--others', '--exclude-standard', '-z').split(b'\x00') if name)
-    stack = [repo]
-    visited = 0
-    while stack:
-        directory = stack.pop()
-        try:
-            entries = list(os.scandir(directory))
-        except OSError as error:
-            raise Failure('unsupported', 'Cannot inspect repository entry', path=str(directory), detail=str(error)) from error
-        for entry in entries:
-            if entry.name == '.git' and directory == repo:
-                continue
-            visited += 1
-            if visited > MAX_FILES * 4:
-                raise Failure('unsupported', 'Repository filesystem exceeds entry bound')
-            relative = os.fsdecode(Path(entry.path).relative_to(repo))
-            if entry.is_dir(follow_symlinks=False):
-                stack.append(Path(entry.path))
-                continue
-            if relative in tracked or git.ignored(relative):
-                continue
-            found.add(relative)
-    return sorted(found)
-
-
-def content_identity(entry):
-    if entry is None:
-        return None
-    return {key: entry[key] for key in ('mode', 'sha256', 'size', 'gap', 'object_id') if key in entry and
-            (key != 'object_id' or 'sha256' not in entry)}
-
-
-def authority_records(paths, collector):
-    result = []
-    for path in paths:
-        absolute = path.absolute()
-        try:
-            if absolute.is_symlink() or any(parent.is_symlink() for parent in absolute.parents):
-                raise Failure('unsupported', 'Authority symlinks are not followed')
-            data = bounded_file(absolute)
-            entry = collector.entry('authority', data, path=str(absolute))
-            if not entry['text']:
-                entry['gap'] = 'authority is not UTF-8 text'
-        except (OSError, Failure) as error:
-            message = error.result['message'] if isinstance(error, Failure) else str(error)
-            entry = {'path': str(absolute), 'gap': message}
-        result.append(entry)
-    return result
-
-
-def entropy(text):
-    total = len(text)
-    return -sum((count / total) * math.log2(count / total) for count in Counter(text).values())
-
-
-def character_classes(value):
-    return sum(bool(re.search(pattern, value)) for pattern in (r'[a-z]', r'[A-Z]', r'[0-9]', r'[^A-Za-z0-9]'))
-
-
-def finding(label, line, rule, value=None):
-    row = {'file': label, 'line': line, 'rule': rule}
-    if value is not None:
-        row.update(length=len(value), sha256_prefix=digest(value.encode('latin-1'))[:16])
-    return row
-
-
-def hex_shaped(text, within=False):
-    """Hex digest shape — digests, UUIDs, commit SHAs, the sweep's false-positive class.
-
-    `within` asks whether the text contains a hex run; gitleaks match spans
-    include the assignment's left-hand side, while the built-in rules see the
-    exact value, so the two call sites legitimately ask different questions of
-    the same shared shape definition.
-    """
-    normalized = text.replace('-', '').replace('_', '')
-    match = HEX_SHAPE.search(normalized) if within else HEX_SHAPE.fullmatch(normalized)
-    return bool(match)
-
-
-def assignment_value_is_secret(value):
-    lowered = value.lower()
-    if lowered in PLACEHOLDER_VALUES or lowered.startswith(PLACEHOLDER_PREFIXES):
-        return False
-    if value[0] in '$%' or '${' in value or '{{' in value:
-        return False
-    if hex_shaped(value):
-        return False
-    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+', value):
-        return False  # attribute chains, not values
-    if value.startswith(('/', './', '../')):
-        return False  # filesystem paths, not values
-    classes = character_classes(value)
-    if classes < 2:
-        return False
-    return entropy(value) >= (3.5 if classes == 2 else 3.0)
-
-
-def load_fingerprint_prefixes():
-    location = os.environ.get(FINGERPRINT_ENV)
-    if not location:
-        return ()
-    try:
-        raw = bounded_file(Path(location)).decode('utf-8')
-    except Failure as error:
-        invalid('Fingerprint denylist cannot be read', path=location, detail=error.result['message'])
-    except (OSError, UnicodeError) as error:
-        invalid('Fingerprint denylist cannot be read', path=location, detail=str(error))
-    prefixes = set()
-    for number, line in enumerate(raw.splitlines(), 1):
-        entry = line.strip()
-        if not entry or entry.startswith('#'):
-            continue
-        if not re.fullmatch(r'[0-9a-fA-F]{8,64}', entry):
-            invalid('Invalid fingerprint denylist entry (want 8-64 hex characters per line)', path=location, line=number)
-        prefixes.add(entry.lower())
-    return tuple(sorted(prefixes))
-
-
-def line_at(text, offset):
-    return text.count('\n', 0, offset) + 1
-
-
-def load_secret_allowlist(payloads):
-    """Load exact-value SHA-256 exceptions from the captured repository tree."""
-    entry = next((data for label, _, data in payloads
-                  if label == 'after:.code-review-secrets-allow'), None)
-    if entry is None:
-        return frozenset()
-    fingerprints = set()
-    try:
-        rows = entry.decode('utf-8').splitlines()
-    except UnicodeError:
-        invalid('Secret allowlist must be UTF-8 text', path='.code-review-secrets-allow')
-    for number, row in enumerate(rows, 1):
-        if not row.strip() or row.lstrip().startswith('#'):
-            continue
-        parts = row.split('\t', 1)
-        if len(parts) != 2 or not re.fullmatch(r'[0-9a-fA-F]{64}', parts[0]) or not parts[1].strip():
-            invalid('Invalid secret allowlist entry (want full SHA-256, tab, and reason)',
-                    path='.code-review-secrets-allow', line=number)
-        fingerprints.add(parts[0].lower())
-    return frozenset(fingerprints)
-
-
-def is_allowed_fingerprint(value, allowed_fingerprints):
-    return digest(value) in allowed_fingerprints
-
-
-def rule_findings(label, text, allowed_fingerprints=frozenset()):
-    findings = []
-    for name, pattern in SECRET_TOKEN_RULES:
-        for match in pattern.finditer(text):
-            value = match.group(0)
-            if not is_allowed_fingerprint(value.encode('latin-1'), allowed_fingerprints):
-                findings.append(finding(label, line_at(text, match.start()), name, value))
-    for match in PRIVATE_KEY_BLOCK.finditer(text):
-        value = match.group(0)
-        if not is_allowed_fingerprint(value.encode('latin-1'), allowed_fingerprints):
-            findings.append(finding(label, line_at(text, match.start()), 'private-key-block', value))
-    for match in SECRET_ASSIGNMENT.finditer(text):
-        value = match.group('value')
-        # A callable name is source code describing how the value is fetched,
-        # not the credential value being assigned.
-        if match.group('runtime_call'):
-            continue
-        if assignment_value_is_secret(value) and not is_allowed_fingerprint(
-                value.encode('latin-1'), allowed_fingerprints):
-            findings.append(finding(label, line_at(text, match.start()), 'high-entropy-assignment', value))
-    return findings
-
-
-def denylist_findings(label, text, prefixes):
-    if not prefixes:
-        return []
-    findings = []
-    for match in re.finditer(r'\S{8,}', text):
-        chunk = match.group(0)
-        candidates = [chunk.strip('\'"()[]{},;:')]
-        for separator in ('=', ':'):
-            if separator in chunk:
-                candidates.append(chunk.split(separator, 1)[1].strip('\'"()[]{},;:'))
-        for candidate in candidates:
-            if len(candidate) < 8:
-                continue
-            fingerprint = digest(candidate.encode('latin-1'))
-            if any(fingerprint.startswith(prefix) for prefix in prefixes):
-                findings.append(finding(label, line_at(text, match.start()), 'fingerprint-denylist', candidate))
-                break
-    return findings
-
-
-def payload_inventory(manifest, blobs, diff, history):
-    """Every byte about to be written, labelled for reporting."""
-    labels = {}
-    for side in ('after', 'before'):
-        for name in sorted(manifest[side]):
-            sha = manifest[side][name].get('sha256')
-            if sha in blobs:
-                labels.setdefault(sha, f'{side}:{name}')
-    for row in manifest['authorities']:
-        sha = row.get('sha256')
-        if sha in blobs:
-            labels.setdefault(sha, f"authority:{row['path']}")
-    payloads = [(labels.get(sha, f'blob:{sha[:16]}'), f'blobs/{sha}', data) for sha, data in sorted(blobs.items())]
-    payloads.append(('diff.patch', 'diff.patch', diff))
-    payloads.append(('commits.txt', 'commits.txt', history))
-    payloads.append(('manifest.json', 'manifest.json', encoded(manifest) + b'\n'))
-    return payloads
-
-
-def reported_match_span(staging, relative, report_row):
-    """Return exact scanner-matched bytes, or None for invalid staged coordinates."""
-    start_line = report_row['StartLine']
-    end_line = report_row['EndLine']
-    start_column = report_row['StartColumn']
-    end_column = report_row['EndColumn']
-    try:
-        raw = (staging / relative).read_bytes()
-    except OSError:
-        return None
-    lines = raw.splitlines(keepends=True)
-    if not lines or start_line > len(lines) or end_line > len(lines):
-        return None
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
-    start_bytes = lines[start_line - 1].rstrip(b'\r\n')
-    end_bytes = lines[end_line - 1]
-    if start_column > len(start_bytes) or end_column > len(end_bytes) + 1:
-        return None
-    if start_line == end_line and end_column < start_column:
-        return None
-    start = offsets[start_line - 1] + start_column - 1
-    end = offsets[end_line - 1] + end_column
-    return raw[start:end] if end > start else None
-
-
-def gitleaks_scan(staging, labels, allowed_fingerprints=frozenset()):
-    """Redacted directory-mode scan of staged payloads; report operational failures."""
-    scanner_mode = os.environ.get(SECRETS_SCANNER_ENV)
-    if scanner_mode not in (None, 'stdlib-only'):
-        invalid(f'Unsupported {SECRETS_SCANNER_ENV} value')
-    if scanner_mode == 'stdlib-only':
-        return [], 'stdlib-only'
-    binary = shutil.which('gitleaks')
-    if not binary:
-        return [], 'unavailable'
-    environment = {key: value for key, value in os.environ.items() if not key.startswith('GITLEAKS_')}
-    argv = [binary, 'dir', str(staging), '--report-format', 'json', '--report-path', '-',
-            '--redact', '--exit-code', str(GITLEAKS_EXIT), '--no-banner', '--no-color', '-l', 'error',
-            '--max-target-megabytes', str(GITLEAKS_MAX_TARGET_MB), '--gitleaks-ignore-path', str(staging)]
-    try:
-        result = subprocess.run(argv, env=environment, capture_output=True, timeout=GITLEAKS_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):
-        return [], 'failed'
-    if result.returncode not in (0, GITLEAKS_EXIT) or len(result.stdout) > MAX_TOTAL:
-        return [], 'failed'
-    try:
-        rows = json.loads(result.stdout.decode('utf-8'))
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise ValueError('report is not a list of findings')
-        if result.returncode == GITLEAKS_EXIT and not rows:
-            raise ValueError('finding exit status has no findings')
-        required_fields = ('File', 'RuleID', 'StartLine', 'EndLine', 'StartColumn', 'EndColumn')
-        if any(any(field not in row for field in required_fields) or
-               not isinstance(row['File'], str) or not row['File'] or
-               not isinstance(row['RuleID'], str) or not row['RuleID'] or
-               any(type(row[field]) is not int or row[field] <= 0 or row[field] > MAX_FILE
-                   for field in required_fields[2:]) or
-               row['EndLine'] < row['StartLine'] or
-               (row['EndLine'] == row['StartLine'] and row['EndColumn'] < row['StartColumn'])
-               for row in rows):
-            raise ValueError('malformed finding')
-    except (UnicodeError, ValueError, TypeError):
-        return [], 'failed'
-    findings = []
-    for row in rows:
-        reported = Path(row['File'])
-        try:
-            relative = reported.relative_to(staging)
-        except ValueError:
-            relative = reported if not reported.is_absolute() else Path(*reported.parts[-3:])
-        key = '/'.join(relative.parts)
-        span = reported_match_span(staging, relative, row)
-        if span is None:
-            return [], 'failed'
-        if is_allowed_fingerprint(span, allowed_fingerprints):
-            continue
-        if row['RuleID'] == 'generic-api-key' and hex_shaped(span.decode('latin-1'), within=True):
-            continue
-        findings.append(finding(labels.get(key, key or str(reported)), row['StartLine'],
-                                f"gitleaks:{row['RuleID']}"))
-    return findings, 'used'
-
-
-def secrets_gate(payloads):
-    """Fail closed, before any payload file is written, on secret-shaped content."""
-    prefixes = load_fingerprint_prefixes()
-    allowed_fingerprints = load_secret_allowlist(payloads)
-    findings = []
-    for label, _, data in payloads:
-        text = data.decode('latin-1')
-        findings.extend(rule_findings(label, text, allowed_fingerprints))
-        findings.extend(denylist_findings(label, text, prefixes))
-    scan_state = 'unavailable'
-    with tempfile.TemporaryDirectory(prefix='review-secret-scan-') as area:
-        staging = Path(area)
-        for _, relative, data in payloads:
-            target = staging / relative
-            target.parent.mkdir(exist_ok=True)
-            target.write_bytes(data)
-        staged, scan_state = gitleaks_scan(
-            staging, {relative: label for label, relative, _ in payloads}, allowed_fingerprints)
-        findings.extend(staged)
-    if scan_state == 'failed':
-        raise Failure('secret_detected', 'Capture refused: secrets scanner failed',
-                      secret_scan={'gitleaks': scan_state})
-    if not findings:
-        return {'gitleaks': scan_state}
-    ordered = sorted(findings, key=lambda row: (row['file'], row['line'], row['rule']))
-    raise Failure('secret_detected',
-                  'Capture refused: a payload matches a secret rule; remove the value or replace it with a fake and capture again',
-                  findings=ordered[:MAX_FINDINGS], total_findings=len(ordered),
-                  secret_scan={'gitleaks': scan_state})
+# File-loader consumers and isolated Python execution also need these siblings.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from capture_common import Failure, MAX_FILE, MAX_FILES, MAX_TOTAL, VERSION, bounded_file, digest, invalid
+from capture_payloads import PayloadInventory
+from capture_secrets import (
+    FINGERPRINT_ENV, GITLEAKS_TIMEOUT, SECRETS_SCANNER_ENV,
+    GitleaksAdapter, SecretGate,
+)
+from capture_source import CaptureScope, Collector, Git, work_entry
+from capture_store import CaptureStore
 
 
 def observe(repo, mode, base, authorities):
-    git = Git(repo)
-    top = Path(os.fsdecode(git.call('rev-parse', '--show-toplevel')).strip()).resolve()
-    if top != repo:
-        invalid('--repo must name the repository root', root=str(top))
-    head = git.resolve('HEAD')
-    base_oid = git.resolve(base) if mode in ('branch', 'since') else head
-    effective = base_oid
-    if mode == 'branch':
-        bases = git.call('merge-base', '--all', base_oid, head).splitlines()
-        if len(bases) != 1:
-            raise Failure('unsupported', 'Branch review requires one merge base')
-        effective = bases[0].decode('ascii')
-    collector = Collector()
-    before = tree(git, effective, collector)
-    after = tree(git, head, collector)
-    untracked = []
-    index_digest = None
-    status = os.fsdecode(git.call('status', '--porcelain=v1', '-z', '--untracked-files=all'))
-    if mode == 'wip':
-        index = git.call('ls-files', '--stage', '-z')
-        index_digest = digest(index)
-        names = set(after)
-        for row in index.split(b'\x00'):
-            if not row:
-                continue
-            metadata, name = row.split(b'\t', 1)
-            if metadata.split()[2] != b'0':
-                raise Failure('unsupported', 'Resolve unmerged index entries before WIP capture')
-            names.add(os.fsdecode(name))
-        untracked = untracked_paths(repo, git, set(after))
-        names.update(untracked)
-        if len(names) > MAX_FILES:
-            raise Failure('unsupported', 'WIP exceeds file count bound')
-        working = {}
-        for name in sorted(names):
-            entry = work_entry(repo, name, collector, after.get(name))
-            if entry is not None:
-                working[name] = entry
-        after = working
-    changed = [name for name in sorted(set(before) | set(after))
-               if content_identity(before.get(name)) != content_identity(after.get(name))]
-    # Index-only changes can be meaningful even when the net working tree equals HEAD.
-    diff_args = ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--full-index', '--no-color']
-    if mode == 'wip':
-        diff = git.call(*diff_args, head, '--')
-    else:
-        diff = git.call(*diff_args, effective, head, '--')
-    if len(diff) > MAX_TOTAL:
-        raise Failure('unsupported', 'Diff exceeds capture bound')
-    history = git.call('log', '--format=%H %s', f'{base_oid}..{head}', '--') if mode != 'wip' else b''
-    gaps = []
-    for name in sorted(set(changed) | set(untracked)):
-        for side, entries in [('before', before), ('after', after)]:
-            entry = entries.get(name)
-            if entry and 'gap' in entry:
-                gaps.append({'path': name, 'side': side, 'reason': entry['gap']})
-    authority = authority_records(authorities, collector)
-    gaps.extend({'path': row['path'], 'side': 'authority', 'reason': row['gap']} for row in authority if 'gap' in row)
-    manifest = {'version': VERSION, 'repo': str(repo), 'mode': mode, 'requested_base': base,
-                'head': head, 'base': base_oid, 'effective_base': effective,
-                'before': before, 'after': after, 'untracked': sorted(untracked),
-                'changed': changed, 'index_digest': index_digest,
-                'authorities': authority, 'gaps': gaps,
-                'coverage': 'incomplete' if gaps else 'complete',
-                'empty': not changed and not untracked and not diff,
-                'diff_sha256': digest(diff), 'history_sha256': digest(history)}
-    fingerprint = digest(encoded(manifest))
-    manifest.update(capture_id=fingerprint, commands=git.commands,
-                    worktree_notice='; '.join(filter(None, status.split('\0'))) if mode != 'wip' else None)
-    return manifest, collector.blobs, diff, history
+    return Git(repo).observe(CaptureScope(mode, base, tuple(authorities)))
 
 
 def verified_observation(repo, mode, base, authorities):
@@ -625,68 +33,31 @@ def verified_observation(repo, mode, base, authorities):
     return second
 
 
+def payload_inventory(manifest, blobs, diff, history):
+    return list(PayloadInventory.from_observation(manifest, blobs, diff, history).payloads)
+
+
+def gitleaks_scan(staging, labels, allowed_fingerprints=frozenset()):
+    return GitleaksAdapter(timeout=GITLEAKS_TIMEOUT, max_report=MAX_TOTAL).scan(
+        staging, labels, allowed_fingerprints)
+
+
+def secrets_gate(payloads):
+    return SecretGate(GitleaksAdapter(timeout=GITLEAKS_TIMEOUT, max_report=MAX_TOTAL)).check(
+        PayloadInventory(tuple(payloads)))
+
+
 def write_capture(out, manifest, blobs, diff, history):
-    out = out.absolute()
-    if out.exists() or out.is_symlink():
-        raise Failure('conflict', 'Capture destination already exists', path=str(out))
-    if not out.parent.is_dir() or any(parent.is_symlink() for parent in [out.parent, *out.parent.parents]):
-        invalid('Capture parent must be an existing directory without symlinks')
-    # One enumeration feeds both the secrets gate and the writer, so every
-    # written byte is scanned and the two lists cannot drift apart.
-    payloads = payload_inventory(manifest, blobs, diff, history)
-    secret_scan = secrets_gate(payloads)
-    stage = Path(tempfile.mkdtemp(prefix='.review-', dir=out.parent))
-    try:
-        for _, relative, data in payloads:
-            target = stage / relative
-            target.parent.mkdir(exist_ok=True)
-            target.write_bytes(data)
-        # Reserve destination without replacing another caller's capture.
-        out.mkdir()
-        for _, relative, _ in payloads:
-            target = out / relative
-            target.parent.mkdir(exist_ok=True)
-            os.replace(stage / relative, target)
-        (out / 'COMPLETE').write_text(manifest['capture_id'] + '\n')
-    finally:
-        shutil.rmtree(stage)
+    store = CaptureStore(out)
+    # Freeze one inventory. The gate and writer receive this same instance,
+    # including manifest bytes; neither may enumerate or reread the source.
+    inventory = PayloadInventory.from_observation(manifest, blobs, diff, history)
+    secret_scan = SecretGate(GitleaksAdapter(timeout=GITLEAKS_TIMEOUT, max_report=MAX_TOTAL)).check(inventory)
+    store.write(inventory)
     return secret_scan
 
 
-def validate_capture(directory):
-    if directory.is_symlink():
-        invalid('Capture directory must not be a symlink')
-    try:
-        manifest = json.loads(bounded_file(directory / 'manifest.json', MAX_TOTAL))
-    except (ValueError, UnicodeError) as error:
-        invalid('Invalid capture manifest', detail=str(error))
-    required = {'version', 'repo', 'mode', 'requested_base', 'head', 'base', 'effective_base', 'before', 'after',
-                'untracked', 'changed', 'index_digest', 'authorities', 'gaps', 'coverage', 'empty',
-                'diff_sha256', 'history_sha256', 'capture_id', 'commands', 'worktree_notice'}
-    if not isinstance(manifest, dict) or set(manifest) != required or manifest['version'] != VERSION:
-        invalid('Unsupported capture manifest')
-    core = {key: value for key, value in manifest.items() if key not in ('capture_id', 'commands', 'worktree_notice')}
-    if digest(encoded(core)) != manifest['capture_id']:
-        raise Failure('corrupt', 'Capture manifest digest mismatch')
-    if bounded_file(directory / 'COMPLETE', 100).decode().strip() != manifest['capture_id']:
-        raise Failure('corrupt', 'Capture completion marker mismatch')
-    if not all(isinstance(manifest[key], dict) for key in ('before', 'after')) or not isinstance(manifest['authorities'], list):
-        invalid('Invalid source inventory')
-    if (directory / 'blobs').is_symlink():
-        invalid('Capture blob directory is a symlink')
-    for entry in [*manifest['before'].values(), *manifest['after'].values(), *manifest['authorities']]:
-        if not isinstance(entry, dict):
-            invalid('Invalid source entry')
-        if 'sha256' in entry:
-            sha = entry['sha256']
-            if not isinstance(sha, str) or len(sha) != 64 or any(c not in '0123456789abcdef' for c in sha):
-                invalid('Invalid source digest')
-            if digest(bounded_file(directory / 'blobs' / sha)) != sha:
-                raise Failure('corrupt', 'Captured source digest mismatch', sha256=sha)
-    for name, field in [('diff.patch', 'diff_sha256'), ('commits.txt', 'history_sha256')]:
-        if digest(bounded_file(directory / name, MAX_TOTAL)) != manifest[field]:
-            raise Failure('corrupt', 'Capture artifact digest mismatch', path=name)
-    return manifest
+validate_capture = CaptureStore.validate
 
 
 def run(args):
@@ -697,13 +68,7 @@ def run(args):
         if args.command == 'verify':
             return {'outcome': 'verified', 'capture_id': manifest['capture_id'], 'coverage': manifest['coverage'], 'gaps': manifest['gaps']}
         if args.command == 'read':
-            if args.path is None or args.path not in manifest[args.side]:
-                invalid('Path is not present on selected side of capture')
-            entry = manifest[args.side][args.path]
-            if 'sha256' not in entry or not entry.get('text'):
-                raise Failure('unsupported', 'Use an appropriate reader for this capture entry', entry=entry)
-            return {'outcome': 'content', 'capture_id': manifest['capture_id'], 'side': args.side,
-                    'path': args.path, 'text': bounded_file(args.capture / 'blobs' / entry['sha256']).decode('utf-8')}
+            return CaptureStore.read(args.capture, manifest, args.side, args.path)
         observation = verified_observation(Path(manifest['repo']), manifest['mode'], manifest['requested_base'],
                                             [Path(row['path']) for row in manifest['authorities']])[0]
         scope_drift = observation['capture_id'] != manifest['capture_id']
@@ -724,15 +89,8 @@ def run(args):
     if out == repo or repo in out.parents:
         invalid('Capture output must be outside the repository to avoid becoming WIP input')
     if args.preview:
-        git = Git(repo)
-        head = git.resolve('HEAD')
-        base = git.resolve(args.base) if args.base else head
-        untracked = [os.fsdecode(name) for name in git.call('ls-files', '--others', '--exclude-standard', '-z').split(b'\x00') if name] if args.mode == 'wip' else []
-        paths = git.call('diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z',
-                         *( [base + '...' + head] if args.mode == 'branch' else [base, head] if args.mode == 'since' else [head]), '--')
-        return {'outcome': 'preview', 'mode': args.mode, 'head': head, 'base': base,
-                'changed': [os.fsdecode(p) for p in paths.split(b'\x00') if p], 'untracked': untracked,
-                'authorities': [str(p.absolute()) for p in args.authority], 'out': str(out), 'effects': 'none'}
+        preview = Git(repo).preview(CaptureScope(args.mode, args.base, tuple(args.authority)))
+        return {**preview, 'out': str(out), 'effects': 'none'}
     manifest, blobs, diff, history = verified_observation(repo, args.mode, args.base, args.authority)
     secret_scan = write_capture(out, manifest, blobs, diff, history)
     return {'outcome': 'captured', 'capture': str(out), 'capture_id': manifest['capture_id'],
