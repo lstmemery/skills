@@ -197,6 +197,9 @@ class Engine:
         if (not job["rate_limit_seen"] or receipt_valid
                 or lifecycle not in ("idle", "done", "exited")):
             return False
+        if job["rate_limit_recoveries"] >= 1:
+            job["issue"] = "provider usage limit persisted after the single bounded recovery; coordinator review required"
+            return False
         previous = {"attempt_id": job["attempt_id"], "agent_name": job["agent_name"],
                     "host_output": job["host_output"], "worker_output": job["worker_output"],
                     "exit_record": job["exit_record"], "pane_id": job["pane_id"]}
@@ -212,6 +215,7 @@ class Engine:
         save(Path(previous["host_output"]) / "telemetry.json", job["telemetry"])
         job["history"].append({"action": "rate_limit_retry", **previous,
                                "retry_at": job["rate_limit_until"], "observed_at": now()})
+        job["rate_limit_recoveries"] += 1
 
         attempt = uuid.uuid4().hex
         output_name = f"{job['spec']['job_id']}-{attempt}"
@@ -290,7 +294,7 @@ class Engine:
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
                     "worker_disposition", "worker_disposition_override", "admission_wait", "start_diagnostic",
-                    "telemetry"],
+                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -306,6 +310,15 @@ class Engine:
             job.setdefault("admission_acquired", False)
             job.setdefault("rate_limit_seen", False)
             job.setdefault("rate_limit_until", None)
+            job.setdefault("rate_limit_exhausted", False)
+            if "rate_limit_recoveries" not in job:
+                history = job.get("history")
+                job["rate_limit_recoveries"] = int(
+                    isinstance(history, list)
+                    and any(isinstance(entry, dict) and entry.get("action") == "rate_limit_retry"
+                            for entry in history)
+                )
+            integer(job["rate_limit_recoveries"], "stored rate-limit recoveries", 0, 1)
             job.setdefault("workspace_id", None)
             job.setdefault("workspace_closed", False)
             job.setdefault("worker_disposition", None)
@@ -326,6 +339,8 @@ class Engine:
                         raise JobError("conflict", f"managed start diagnostic {stream} is invalid")
             if type(job["admission_acquired"]) is not bool or type(job["rate_limit_seen"]) is not bool:
                 raise JobError("conflict", "stored admission flags must be booleans")
+            if type(job["rate_limit_exhausted"]) is not bool:
+                raise JobError("conflict", "stored rate_limit_exhausted must be a boolean")
             if type(job["workspace_closed"]) is not bool:
                 raise JobError("conflict", "stored workspace_closed must be a boolean")
             if job["workspace_id"] is not None:
@@ -460,6 +475,7 @@ class Engine:
                 "admission_model": (resolved_model or "default").casefold(),
                 "admission_lease_id": self.admission_lease_id(request["request_id"], spec["job_id"], attempt),
                 "admission_acquired": False, "rate_limit_seen": False, "rate_limit_until": None,
+                "rate_limit_recoveries": 0,
                 "retry_override": retry_override, "retry_profile": retry_profile,
                 "phase": "pending", "pane_id": None, "previous_pane_ids": [], "workspace_id": None,
                 "workspace_closed": False, "worker_disposition": None,
@@ -1092,6 +1108,9 @@ class Engine:
             return
         if job["settled"] and job["telemetry"]["ended_at"] is None:
             job["telemetry"]["ended_at"] = now()
+        if rate_limit is not None and job["rate_limit_recoveries"] >= 1:
+            job["issue"] = "provider usage limit persisted after the single bounded recovery; coordinator review required"
+            return
         if job["pending_effect"]:
             if codex_start and lifecycle == "blocked":
                 job["issue"] = observation.get("launch_issue", "Codex startup is blocked; effect delivery remains unproven")

@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -195,6 +196,50 @@ def task_file(run_dir: Path, relative: str, name: str) -> Path | None:
     return None
 
 
+def task_continuation(run_dir: Path, relative: str) -> tuple[dict, str] | None:
+    task = run_dir / relative
+    current = run_dir
+    for part in Path(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise WatchError("continuation task path must not use symbolic links")
+    if not task.is_dir():
+        return None
+    path = task / "quota-continuation.json"
+    if path.is_symlink():
+        raise WatchError("quota-continuation.json must not be a symbolic link")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise WatchError("quota-continuation.json is unavailable") from error
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or details.st_size > 65536:
+            raise WatchError("quota-continuation.json must be a regular file no larger than 64 KiB")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            content = stream.read(65537)
+    except OSError as error:
+        raise WatchError("quota-continuation.json is unavailable") from error
+    finally:
+        os.close(descriptor)
+    try:
+        record = json.loads(content)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise WatchError("quota-continuation.json is invalid") from error
+    if (not isinstance(record, dict) or set(record) != {"task", "pane", "reset_at", "attempt"}
+            or record.get("task") != Path(relative).name
+            or not isinstance(record.get("pane"), str) or not record["pane"].strip()
+            or "\0" in record["pane"]
+            or type(record.get("reset_at")) not in (int, float)
+            or not math.isfinite(record["reset_at"]) or record["reset_at"] < 0
+            or not isinstance(record.get("attempt"), str) or not record["attempt"].strip()
+            or "\0" in record["attempt"]):
+        raise WatchError("quota-continuation.json has an invalid shape")
+    return record, hashlib.sha256(content).hexdigest()
+
+
 def recorded(events: Path) -> set[tuple[str, str]]:
     known = set()
     if not events.exists():
@@ -207,6 +252,22 @@ def recorded(events: Path) -> set[tuple[str, str]]:
         if isinstance(item, dict) and item.get("event") == "worker-result":
             if isinstance(item.get("task_dir"), str) and isinstance(item.get("result_sha256"), str):
                 known.add((item["task_dir"], item["result_sha256"]))
+    return known
+
+
+def recorded_continuations(events: Path) -> set[tuple[str, str]]:
+    known = set()
+    if not events.exists():
+        return known
+    for line in events.read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(item, dict) and item.get("event") == "worker-continuation-due"
+                and isinstance(item.get("task_dir"), str)
+                and isinstance(item.get("continuation_sha256"), str)):
+            known.add((item["task_dir"], item["continuation_sha256"]))
     return known
 
 
@@ -232,13 +293,17 @@ def publish(event: dict, config: dict) -> None:
         print("durable-watch: ntfy route unavailable; event is recorded", file=sys.stderr)
         return
     try:
-        payload = f"{event['task_dir']} wrote result.json in {event['run_dir']}"
+        continuation = event.get("event") == "worker-continuation-due"
+        payload = (f"{event['task_dir']} has a quota reset ready in {event['run_dir']}; "
+                   f"coordinator review required for pane {event['pane']} attempt {event['attempt']}"
+                   if continuation else f"{event['task_dir']} wrote result.json in {event['run_dir']}")
         request = urllib.request.Request(
             url,
             data=payload.encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {token}",
-                "Title": config.get("notification_title", "Orchestrator worker result"),
+                "Title": ("Orchestrator quota reset ready" if continuation else
+                          config.get("notification_title", "Orchestrator worker result")),
                 "Priority": "3",
                 "Content-Type": "text/plain; charset=utf-8",
             },
@@ -281,6 +346,7 @@ def reconcile_once(run_dir: Path) -> dict:
         events = run_dir / EVENTS
         events.parent.mkdir(parents=True, exist_ok=True)
         seen = recorded(events)
+        seen_continuations = recorded_continuations(events)
         new_events = []
         for relative in config["tasks"]:
             result = task_file(run_dir, relative, "result.json")
@@ -307,9 +373,40 @@ def reconcile_once(run_dir: Path) -> dict:
             seen.add(key)
             new_events.append(event)
             publish(event, config)
+        continuations = []
+        current_time = time.time()
+        for relative in config["tasks"]:
+            continuation = task_continuation(run_dir, relative)
+            if continuation is None:
+                continue
+            record, record_digest = continuation
+            key = (relative, record_digest)
+            due = record["reset_at"] <= current_time
+            announced = key in seen_continuations
+            item = {"task_dir": relative, **record, "due": due, "announced": announced}
+            continuations.append(item)
+            if not due or announced:
+                continue
+            event = {
+                "event": "worker-continuation-due",
+                "task_dir": relative,
+                "continuation_sha256": record_digest,
+                **record,
+                "run_dir": run_dir.name,
+                "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            with events.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+                file.flush()
+                os.fsync(file.fileno())
+            seen_continuations.add(key)
+            new_events.append(event)
+            item["announced"] = True
+            publish(event, config)
         settled = [task for task in config["tasks"] if task_file(run_dir, task, "disposition.json")]
         return {
             "new_events": new_events,
+            "continuations": continuations,
             "complete": len(settled) == len(config["tasks"]),
             "settled": settled,
             "tasks": config["tasks"],
@@ -485,6 +582,21 @@ def command_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def task_status(run_dir: Path, task: str) -> dict:
+    continuation = task_continuation(run_dir, task)
+    details = None
+    if continuation is not None:
+        record, record_digest = continuation
+        details = {**record, "due": record["reset_at"] <= time.time(),
+                   "announced": (task, record_digest) in recorded_continuations(run_dir / EVENTS)}
+    return {
+        "task_dir": task,
+        "result": task_file(run_dir, task, "result.json") is not None,
+        "disposition": task_file(run_dir, task, "disposition.json") is not None,
+        "continuation": details,
+    }
+
+
 def command_status(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).resolve(strict=True)
     base = unit_base(run_dir)
@@ -498,11 +610,7 @@ def command_status(args: argparse.Namespace) -> int:
         "timer_load": systemd_property(base + ".timer", "LoadState"),
         "timer_state": systemd_property(base + ".timer", "ActiveState"),
         "service_state": systemd_property(base + ".service", "ActiveState"),
-        "tasks": [{
-            "task_dir": task,
-            "result": task_file(run_dir, task, "result.json") is not None,
-            "disposition": task_file(run_dir, task, "disposition.json") is not None,
-        } for task in tasks],
+        "tasks": [task_status(run_dir, task) for task in tasks],
     }, sort_keys=True, separators=(",", ":")))
     return 0
 

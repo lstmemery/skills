@@ -2,7 +2,7 @@
 
 import argparse
 import contextlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import fcntl
 import json
@@ -11,8 +11,10 @@ import os
 from pathlib import Path
 import re
 import time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .records import JobError, encoded, fields, integer, load_json, policy_record, save, text, version
+from .records import (JobError, atomic_bytes, encoded, fields, identifier, integer,
+                      load_json, policy_record, save, text, version)
 from .model_ladder import billing_pool
 
 
@@ -77,12 +79,122 @@ def _reset_delay(value, now):
         return _retry_after(value, now)
 
 
+def _duration_seconds(value):
+    value = value.strip().rstrip(" .,!;")
+    pattern = re.compile(r"(?i)(\d+(?:\.\d+)?)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)")
+    matches = list(pattern.finditer(value))
+    if not matches:
+        return None
+    cursor = 0
+    seconds = 0.0
+    for match in matches:
+        if value[cursor:match.start()].strip(" ,"):
+            return None
+        amount = float(match.group(1))
+        unit = match.group(2).casefold()[0]
+        seconds += amount * {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+        cursor = match.end()
+    if value[cursor:].strip(" ,") or not math.isfinite(seconds):
+        return None
+    return seconds
+
+
+def _reset_timezone(label, now):
+    if not label:
+        configured = os.environ.get("TZ", "").removeprefix(":")
+        if configured:
+            try:
+                return ZoneInfo(configured)
+            except (ValueError, ZoneInfoNotFoundError):
+                pass
+        try:
+            zoneinfo_root = Path("/usr/share/zoneinfo").resolve()
+            localtime = Path("/etc/localtime").resolve()
+            return ZoneInfo(localtime.relative_to(zoneinfo_root).as_posix())
+        except (OSError, ValueError, ZoneInfoNotFoundError):
+            return datetime.fromtimestamp(now).astimezone().tzinfo or timezone.utc
+    normalized = label.strip().strip("()")
+    aliases = {"UTC": timezone.utc, "GMT": timezone.utc, "Z": timezone.utc,
+               "PST": timezone(timedelta(hours=-8)), "PDT": timezone(timedelta(hours=-7)),
+               "MST": timezone(timedelta(hours=-7)), "MDT": timezone(timedelta(hours=-6)),
+               "CST": timezone(timedelta(hours=-6)), "CDT": timezone(timedelta(hours=-5)),
+               "EST": timezone(timedelta(hours=-5)), "EDT": timezone(timedelta(hours=-4))}
+    if normalized.upper() in aliases:
+        return aliases[normalized.upper()]
+    offset = re.fullmatch(r"(?i)(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?", normalized)
+    if offset:
+        hours = int(offset.group(2))
+        minutes = int(offset.group(3) or 0)
+        if hours > 23 or minutes > 59:
+            return None
+        seconds = (hours * 60 + minutes) * 60 * (1 if offset.group(1) == "+" else -1)
+        return timezone(timedelta(seconds=seconds))
+    try:
+        return ZoneInfo(normalized)
+    except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+def _clock_reset_delay(value, now):
+    value = value.strip().rstrip(" .,!;")
+    match = re.fullmatch(
+        r"(?i)(\d{1,2}(?::\d{2}(?::\d{2})?)?\s*(?:am|pm)?)(?:\s+([^\s]+))?", value)
+    if not match:
+        return None
+    clock_text, zone_text = match.groups()
+    formats = ("%I:%M:%S %p", "%I:%M %p", "%I %p") if re.search(r"(?i)\b(?:am|pm)\b", clock_text) else (
+        "%H:%M:%S", "%H:%M", "%H")
+    reset_time = None
+    for format_string in formats:
+        try:
+            reset_time = datetime.strptime(clock_text.upper(), format_string).time()
+            break
+        except ValueError:
+            continue
+    if reset_time is None:
+        return None
+    zone = _reset_timezone(zone_text, now)
+    if zone is None:
+        return None
+    current = datetime.fromtimestamp(now, timezone.utc).astimezone(zone)
+    for offset in (0, 1):
+        reset_date = current.date() + timedelta(days=offset)
+        local_time = datetime.combine(reset_date, reset_time)
+        candidates = []
+        for fold in (0, 1):
+            candidate = local_time.replace(tzinfo=zone, fold=fold)
+            if candidate.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) != local_time:
+                continue
+            timestamp = candidate.timestamp()
+            if timestamp >= now:
+                candidates.append(timestamp)
+        if candidates:
+            return min(candidates) - now
+    return None
+
+
+def _natural_reset_delay(output, now):
+    match = re.search(r"(?i)\b(?:resets?|try again)\s+(at|in)\s+([^\r\n]+)", output)
+    if match is None:
+        return None
+    mode, value = match.groups()
+    if mode.casefold() == "in":
+        return _duration_seconds(value)
+    return _clock_reset_delay(value, now)
+
+
 def backoff_delay(retry_after=None, reset_at=None, default_seconds=60, now=None):
     now = time.time() if now is None else now
     delay = _retry_after(retry_after, now)
     if delay is not None:
         return delay, "retry-after"
     delay = _reset_delay(reset_at, now)
+    if delay is None and reset_at is not None:
+        delay = _clock_reset_delay(str(reset_at), now)
+    if delay is None and reset_at is not None:
+        delay = _duration_seconds(str(reset_at))
+    if delay is None and reset_at is not None:
+        delay = _natural_reset_delay(str(reset_at), now)
     if delay is not None:
         return delay, "reset"
     integer(default_seconds, "default_backoff_seconds", 1, 3600)
@@ -120,11 +232,16 @@ def _codex_rate_limit_banner(output):
             r"(?im)^\s*(?:⚠\s*)?API Error:\s*(?:Rate limit reached|429(?:\s+Too Many Requests)?|Too Many Requests)(?:\b|$)",
             output,
         )
-        or re.search(
-            r"(?im)^\s*(?:⚠\s*)?You(?:'ve| have) hit your (?:ChatGPT )?usage limit(?:\b|[.!])",
-            output,
-        )
     )
+
+
+def _usage_limit_banner(output):
+    """Recognize terminal quota banners from supported interactive runtimes."""
+    return bool(re.search(
+        r"(?im)^\s*(?:⚠\s*)?(?:you(?:'ve| have) hit your (?:chatgpt )?(?:usage )?limit|"
+        r"usage limit reached|quota exceeded)(?:\b|[.!·])",
+        output,
+    ))
 
 
 def _http_429_status_line(output):
@@ -138,22 +255,26 @@ def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exi
         explicit_error = exit_code not in (None, 0) and (
             _http_429_status_line(output)
             or _pi_provider_error(output)
-            or (runtime == "codex" and _codex_rate_limit_banner(output))
+            or (runtime in ("codex", "claude", "claude-code") and
+                (_codex_rate_limit_banner(output) or _usage_limit_banner(output)))
         )
     elif source == "pane" and runtime == "pi":
         explicit_error = _pi_provider_error(output)
     elif source == "pane" and runtime == "codex":
-        explicit_error = _codex_rate_limit_banner(output)
+        explicit_error = _codex_rate_limit_banner(output) or _usage_limit_banner(output)
+    elif source == "pane" and runtime in ("claude", "claude-code"):
+        explicit_error = _usage_limit_banner(output)
     else:
         explicit_error = False
     if not explicit_error:
         return None
 
+    current_time = time.time() if now is None else now
     retry_match = re.search(r"(?im)^\s*retry[-_ ]after\s*[:=]\s*([^\r\n]+)", output)
     if retry_match is None:
         retry_match = re.search(r"(?i)[\"']retry[-_ ]after[\"']\s*:\s*[\"']?([^\"',}\s]+)", output)
     reset_match = re.search(
-        r"(?im)^\s*(?:x-)?rate[-_ ]?limit[-_ ]?reset(?:[-_ ](?:requests|tokens))?\s*[:=]\s*([^\r\n,;]+)",
+        r"(?im)^\s*(?:(?:x-)?rate[-_ ]?limit[-_ ]?reset(?:[-_ ](?:requests|tokens))?|reset[-_ ]at)\s*[:=]\s*([^\r\n,;]+)",
         output,
     )
     if reset_match is None:
@@ -166,14 +287,42 @@ def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exi
     delay = None
     source = None
     if retry_after is not None:
-        delay = _retry_after(retry_after, time.time() if now is None else now)
+        delay = _retry_after(retry_after, current_time)
         if delay is not None:
             source = "retry-after"
     if delay is None and reset_at is not None:
-        delay = _reset_delay(reset_at, time.time() if now is None else now)
+        delay = _reset_delay(reset_at, current_time)
+        if delay is None:
+            delay = _clock_reset_delay(reset_at, current_time)
+        if delay is not None:
+            source = "reset"
+    if delay is None:
+        delay = _natural_reset_delay(output, current_time)
         if delay is not None:
             source = "reset"
     return {"retry_after_seconds": delay, "source": source}
+
+
+def write_continuation_record(path, task_id, pane_id, reset_at, attempt_id):
+    """Persist a direct-worker reset for the coordinator's existing watcher."""
+    target = Path(text(str(path), "continuation record path", 4096)).absolute()
+    if target.is_symlink():
+        raise JobError("invalid_input", "continuation record must not be a symlink")
+    if type(reset_at) not in (int, float) or not math.isfinite(reset_at) or reset_at < 0:
+        raise JobError("invalid_input", "continuation reset_at must be a finite nonnegative timestamp")
+    record = {"task": identifier(task_id, "continuation task id"),
+              "pane": text(pane_id, "continuation pane id", 512),
+              "reset_at": float(reset_at),
+              "attempt": text(attempt_id, "continuation attempt id", 512)}
+    if target.exists():
+        try:
+            if load_json(target, 65536) == record:
+                return record
+        except (JobError, OSError):
+            pass
+        raise JobError("conflict", "continuation record already exists with different contents")
+    atomic_bytes(target, encoded(record) + b"\n")
+    return record
 
 
 class AdmissionStore:
@@ -415,8 +564,12 @@ def parser():
     rate_limit.add_argument("--model", required=True, help="exact model, or '*' for observed billing-pool exhaustion")
     choice = rate_limit.add_mutually_exclusive_group()
     choice.add_argument("--retry-after", help="Retry-After delta seconds or HTTP date")
-    choice.add_argument("--reset-at", help="provider reset timestamp or delay in seconds")
+    choice.add_argument("--reset-at", help="provider reset timestamp, clock time, or relative duration")
     rate_limit.add_argument("--policy", default=str(POLICY_PATH))
+    rate_limit.add_argument("--continuation-record", help="task-scoped JSON record for a direct worker continuation")
+    rate_limit.add_argument("--task-id", help="task identity for the continuation record")
+    rate_limit.add_argument("--pane-id", help="exact existing worker pane for the continuation")
+    rate_limit.add_argument("--attempt-id", help="current attempt identity for the continuation")
     return result
 
 
@@ -435,10 +588,18 @@ def main(argv=None):
         elif args.operation == "status":
             result = store.status(args.provider, args.model)
         else:
+            continuation_values = (args.continuation_record, args.task_id, args.pane_id, args.attempt_id)
+            if any(value is not None for value in continuation_values) and not all(
+                    value is not None for value in continuation_values):
+                raise JobError("invalid_input", "continuation record requires --continuation-record, --task-id, --pane-id, and --attempt-id")
             config = policy_admission(args.policy)
             delay, source = backoff_delay(args.retry_after, args.reset_at,
                                           config["default_backoff_seconds"])
             result = store.note_rate_limit(args.provider, args.model, delay, source)
+            if args.continuation_record is not None:
+                write_continuation_record(args.continuation_record, args.task_id, args.pane_id,
+                                          result["retry_at"], args.attempt_id)
+                result["continuation_record"] = str(Path(args.continuation_record).absolute())
         print(encoded(result).decode())
         return 0
     except JobError as error:

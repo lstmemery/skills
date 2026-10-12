@@ -826,6 +826,40 @@ class JobsTest(unittest.TestCase):
         self.assertLessEqual(retry["retry_at"] - before, 61)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 1)
 
+    def test_managed_rate_limit_stops_after_one_recovery_attempt(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="high")
+        self.configure(jobs={"job0": "rate_limited_always"})
+
+        code, result = self.call(wait_seconds=1.2)
+        job = self.state()["jobs"][0]
+        retries = [item for item in job["history"] if item["action"] == "rate_limit_retry"]
+        prompts = [event for event in self.events() if event["action"] == "prompt"]
+
+        self.assertIn(code, (0, 10))
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(job["rate_limit_recoveries"], 1)
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("single bounded recovery", job["issue"])
+
+    def test_legacy_retry_history_consumes_recovery_budget_after_upgrade(self):
+        self.call()
+        state = self.state()
+        job = state["jobs"][0]
+        job.pop("rate_limit_recoveries")
+        job["rate_limit_seen"] = True
+        job["rate_limit_until"] = time.time() + 60
+        job["history"].append({"action": "rate_limit_retry", "attempt_id": "a" * 32})
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        engine = Engine(self.run, None, None)
+        engine.load()
+        migrated = engine.state["jobs"][0]
+
+        self.assertEqual(migrated["rate_limit_recoveries"], 1)
+        self.assertFalse(engine.retry_rate_limited_attempt(migrated, "done", receipt_valid=False))
+        self.assertEqual(len([entry for entry in migrated["history"]
+                             if entry["action"] == "rate_limit_retry"]), 1)
+
     def test_repeat_and_resume_do_not_relaunch(self):
         self.call()
         self.call()
