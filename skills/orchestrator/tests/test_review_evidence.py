@@ -3,12 +3,15 @@
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
 PREFLIGHT_CLI = PACKAGE / "scripts" / "integration-preflight.py"
 sys.path.insert(0, str(PACKAGE / "scripts"))
+sys.path.insert(0, str(PACKAGE.parents[1] / "tests"))
+from compatibility.builders import review_bundle, write_json
 
 from herdr_jobs import records
 from herdr_jobs import review_dispositions
@@ -92,25 +95,28 @@ class ReviewEvidenceContractTest(unittest.TestCase):
 
     def test_sync_and_gate_agree_on_every_case(self):
         for name, candidate in CASES:
-            with self.subTest(case=name):
-                expected = review_evidence.finding_evidence_error(
-                    candidate, "review", 1
-                )
-                self.assertEqual(
-                    review_evidence.finding_evidence_error(candidate, "review", 2),
-                    expected,
-                    "metadata-bearing findings must validate identically under v1 and v2",
-                )
-                if expected is None:
-                    review_dispositions._validate_finding_evidence(
-                        candidate, "review", 1
-                    )
-                else:
-                    with self.assertRaises(records.JobError) as raised:
-                        review_dispositions._validate_finding_evidence(
-                            candidate, "review", 1
-                        )
-                    self.assertEqual(str(raised.exception), expected)
+            for version in (1, 2):
+                with self.subTest(case=name, version=version), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    review, evidence = review_bundle(root, "v2-reproducer")
+                    evidence["schema_version"] = version
+                    evidence["axes"]["standards"]["findings"] = [
+                        {**candidate, "reason": "Added the guard."}
+                    ]
+                    write_json(review / "review-evidence.json", evidence)
+                    if name.startswith("valid-"):
+                        self.assertEqual(review_dispositions.sync_dispositions(review.parent), 0)
+                        result, diagnostics = PREFLIGHT.review_records(
+                            review.parent, "task-1", root / "workers.txt")
+                        self.assertEqual(len(result), 1)
+                        self.assertEqual(diagnostics, [])
+                    else:
+                        with self.assertRaises(records.JobError):
+                            review_dispositions.sync_dispositions(review.parent)
+                        result, diagnostics = PREFLIGHT.review_records(
+                            review.parent, "task-1", root / "workers.txt")
+                        self.assertEqual(result, [])
+                        self.assertTrue(diagnostics)
 
     def test_schema_2_requires_metadata_while_v1_does_not(self):
         bare = {"id": "S1", "disposition": "fixed"}

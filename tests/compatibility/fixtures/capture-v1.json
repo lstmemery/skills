@@ -1,0 +1,259 @@
+{
+  "manifest": {
+    "after": {
+      "context.txt": {
+        "mode": "100644",
+        "object_id": "5002e1d3dacdf4c82cda99369404a0dbd0400b7f",
+        "sha256": "3fa882f0606693b0275ee3205b1a953dc6a3992919de4465537d16415b9fc309",
+        "size": 18,
+        "text": true
+      },
+      "file.txt": {
+        "mode": "100644",
+        "object_id": "e019be006cf33489e2d0177a3837a2384eddebc5",
+        "sha256": "480c2336b410f1ad5f8bf1b28944490255804b65350c527787e74ebdd511e3a4",
+        "size": 7,
+        "text": true
+      }
+    },
+    "authorities": [],
+    "base": "098857deb0bca3771eaeeab162849b9efddb7135",
+    "before": {
+      "context.txt": {
+        "mode": "100644",
+        "object_id": "5002e1d3dacdf4c82cda99369404a0dbd0400b7f",
+        "sha256": "3fa882f0606693b0275ee3205b1a953dc6a3992919de4465537d16415b9fc309",
+        "size": 18,
+        "text": true
+      },
+      "file.txt": {
+        "mode": "100644",
+        "object_id": "9c59e24b8393179a5d712de4f990178df5734d99",
+        "sha256": "b640e840b19d378660b32fb51ae18d67dccb4a8596a29e7bd72c1b2ae5928f41",
+        "size": 6,
+        "text": true
+      }
+    },
+    "capture_id": "3f4c43a32c918849fbd2c93dc21ef35a2817332b5bf99324b2cf91bf41fb1c94",
+    "changed": [
+      "file.txt"
+    ],
+    "commands": [
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "rev-parse",
+        "--show-toplevel"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "HEAD^{commit}"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "098857deb0bca3771eaeeab162849b9efddb7135^{commit}"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        "098857deb0bca3771eaeeab162849b9efddb7135"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "-s",
+        "5002e1d3dacdf4c82cda99369404a0dbd0400b7f"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "blob",
+        "5002e1d3dacdf4c82cda99369404a0dbd0400b7f"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "-s",
+        "9c59e24b8393179a5d712de4f990178df5734d99"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "blob",
+        "9c59e24b8393179a5d712de4f990178df5734d99"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        "a1ad929515584cfc33a771259cb06d58757eced8"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "-s",
+        "5002e1d3dacdf4c82cda99369404a0dbd0400b7f"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "blob",
+        "5002e1d3dacdf4c82cda99369404a0dbd0400b7f"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "-s",
+        "e019be006cf33489e2d0177a3837a2384eddebc5"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "cat-file",
+        "blob",
+        "e019be006cf33489e2d0177a3837a2384eddebc5"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--full-index",
+        "--no-color",
+        "098857deb0bca3771eaeeab162849b9efddb7135",
+        "a1ad929515584cfc33a771259cb06d58757eced8",
+        "--"
+      ],
+      [
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        "fixture/repository",
+        "log",
+        "--format=%H %s",
+        "098857deb0bca3771eaeeab162849b9efddb7135..a1ad929515584cfc33a771259cb06d58757eced8",
+        "--"
+      ]
+    ],
+    "coverage": "complete",
+    "diff_sha256": "aa38b9524736967e73c1574100dc461c17bad1fdae02b56ffd09cba45c401e9c",
+    "effective_base": "098857deb0bca3771eaeeab162849b9efddb7135",
+    "empty": false,
+    "gaps": [],
+    "head": "a1ad929515584cfc33a771259cb06d58757eced8",
+    "history_sha256": "226d5f373ba9a9391aea9e2e6938ab80edd76d0e885217120190fa17717a04d9",
+    "index_digest": null,
+    "mode": "since",
+    "repo": "fixture/repository",
+    "requested_base": "098857deb0bca3771eaeeab162849b9efddb7135",
+    "untracked": [],
+    "version": 1,
+    "worktree_notice": ""
+  },
+  "files": {
+    "COMPLETE": "3f4c43a32c918849fbd2c93dc21ef35a2817332b5bf99324b2cf91bf41fb1c94\n",
+    "blobs/3fa882f0606693b0275ee3205b1a953dc6a3992919de4465537d16415b9fc309": "unchanged context\n",
+    "blobs/480c2336b410f1ad5f8bf1b28944490255804b65350c527787e74ebdd511e3a4": "second\n",
+    "blobs/b640e840b19d378660b32fb51ae18d67dccb4a8596a29e7bd72c1b2ae5928f41": "first\n",
+    "commits.txt": "a1ad929515584cfc33a771259cb06d58757eced8 candidate\n",
+    "diff.patch": "diff --git a/file.txt b/file.txt\nindex 9c59e24b8393179a5d712de4f990178df5734d99..e019be006cf33489e2d0177a3837a2384eddebc5 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-first\n+second\n"
+  },
+  "verification": {
+    "outcome": "verified",
+    "capture_id": "3f4c43a32c918849fbd2c93dc21ef35a2817332b5bf99324b2cf91bf41fb1c94",
+    "coverage": "complete",
+    "gaps": []
+  }
+}
