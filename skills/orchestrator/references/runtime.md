@@ -154,14 +154,14 @@ direct start:
 python3 scripts/local-lane.py preflight
 ```
 
-The `start` command acquires the shared one-slot `llama-local` lease itself and
-refuses to launch while that slot is held. It releases the lease for failures
-before `herdr agent start` is issued and after the worker reaches a verified
-terminal state. An unsuccessful or missing start response is unresolved: the
-launcher records the pending effect with the lease, pane, agent, and latest
-observation, then keeps the lease. Inspect the exact agent and pane/process
-before retrying; release the retained lease only after reconciliation proves no
-worker started. `python3 scripts/herdr-admission.py status --provider
+The `start` command writes a pending-effect marker atomically with acquiring
+the shared one-slot `llama-local` lease. It releases the lease with
+reconciliation evidence when the start command was never issued or when the
+worker reaches a verified terminal state. An unsuccessful or missing start
+response, including an interrupted wait, keeps the lease and its pending
+effect. Inspect the exact agent and pane/process before retrying; release the
+retained lease only after reconciliation proves no worker started.
+`python3 scripts/herdr-admission.py status --provider
 llama-local` shows the retained lease and pending effect. After inspection
 proves the worker did not start, release that exact lease and record the
 observation:
@@ -182,13 +182,20 @@ herdr pane move <returned-pane-id> --new-workspace --label <task-name> --no-focu
 python3 scripts/local-lane.py start --pane <moved-pane-id> --name <unique-name> \
   --task-class summary \
   --local-lane-scope-json '{"network_access":false,"credential_access":false,"credentials_in_environment":false,"destructive_actions":false}' \
-  --prompt-file <brief-file>
+  --prompt-file <brief-file> \
+  --telemetry-file <task-output-dir>/telemetry.json
 ```
 
 The launcher reruns service/GPU preflight, checks the shared class/scope gate,
-acquires admission, replaces the pane shell with an `env -i` shell, starts Pi,
-submits the brief through the verified submit helper, and waits for the worker
-to finish before releasing admission.
+creates a task telemetry file using the managed route's schema, acquires
+admission with the pending-effect marker, replaces the pane shell with an
+`env -i` shell, starts Pi, submits the brief through the verified submit
+helper, and waits for the worker to finish before releasing admission. The
+telemetry records route, model, effort, harness, start/end times, continuation
+count and reasons, quota signals, coordinator grade, and independent-validation
+status. It records the start time before issuing the Herdr start command and
+the end time only after the worker reaches `done`. The telemetry path must be
+new; the launcher refuses to overwrite an existing record.
 Its environment is limited to `HOME`, `PATH`, `TERM`, `LANG`, Herdr's pane
 integration variables, and Pi's agent/session directory variables when set; it
 does not pass API keys or tokens. Herdr `agent start` starts its canonical

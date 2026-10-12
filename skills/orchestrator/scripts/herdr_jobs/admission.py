@@ -441,12 +441,15 @@ class AdmissionStore:
         state["backoffs"] = retained
         return changed
 
-    def acquire(self, provider, model, lease_id, cap, run_id=None, bypass_admission=False):
+    def acquire(self, provider, model, lease_id, cap, run_id=None, bypass_admission=False,
+                pending_effect=None):
         provider_key = normalize_provider(provider)
         model_key = normalize_model(model)
         lease_id = text(lease_id, "lease_id", 512)
         cap = integer(cap, "cap", 1, 64)
         run_id = lease_id if run_id in (None, "") else text(run_id, "run_id", 1024)
+        if pending_effect is not None:
+            pending_effect = self._validate_pending_effect(pending_effect)
         with self._locked():
             state = self._load()
             now = self.clock()
@@ -455,17 +458,19 @@ class AdmissionStore:
             if existing:
                 if (existing["provider"].casefold(), existing["model"].casefold()) != (provider_key, model_key):
                     raise JobError("conflict", "lease_id already belongs to a different provider or model")
+                if pending_effect is not None:
+                    self._update_pending_effect(existing, pending_effect, now)
                 backoff = max((item for item in state["backoffs"]
                                 if item["provider"].casefold() == provider_key
                                 and item["model"].casefold() in (model_key, "*") and item["until"] > now),
                               key=lambda item: item["until"], default=None)
                 if backoff and not bypass_admission:
-                    if pruned:
+                    if pruned or pending_effect is not None:
                         self._save(state)
                     return self._admission_result(state, provider_key, model_key, cap, admitted=False,
                                                   reason="backoff", retry_at=backoff["until"],
                                                   lease_id=lease_id, lease_held=True)
-                if pruned:
+                if pruned or pending_effect is not None:
                     self._save(state)
                 return self._admission_result(state, provider_key, model_key, cap, admitted=True, lease_id=lease_id)
 
@@ -488,9 +493,12 @@ class AdmissionStore:
                     self._save(state)
                 return result
 
-            state["leases"].append({"lease_id": lease_id, "provider": provider_key,
-                                    "model": model_key, "run_id": run_id,
-                                    "acquired_at": now, "cap": cap})
+            lease = {"lease_id": lease_id, "provider": provider_key,
+                     "model": model_key, "run_id": run_id,
+                     "acquired_at": now, "cap": cap}
+            if pending_effect is not None:
+                lease["pending_effect"] = {**pending_effect, "recorded_at": now}
+            state["leases"].append(lease)
             self._save(state)
             return self._admission_result(state, provider_key, model_key, cap,
                                           admitted=True, lease_id=lease_id)
@@ -537,12 +545,25 @@ class AdmissionStore:
             lease = next((item for item in state["leases"] if item["lease_id"] == lease_id), None)
             if lease is None:
                 raise JobError("conflict", "cannot record an unknown effect without its admission lease")
-            current = lease.get("pending_effect")
-            if current is not None and current != recorded:
-                raise JobError("conflict", "admission lease already has a different unresolved effect")
-            lease["pending_effect"] = recorded
+            recorded = self._update_pending_effect(lease, effect, recorded["recorded_at"])
             self._save(state)
         return {"recorded": True, "lease_id": lease_id, "pending_effect": recorded}
+
+    @classmethod
+    def _update_pending_effect(cls, lease, effect, recorded_at):
+        current = lease.get("pending_effect")
+        if current is None:
+            recorded = {**effect, "recorded_at": recorded_at}
+        else:
+            if (current["pane_id"] != effect["pane_id"]
+                    or current["agent_name"] != effect["agent_name"]):
+                raise JobError("conflict", "admission lease already has a different unresolved effect")
+            actions = ("start", "prompt", "execution")
+            if actions.index(effect["action"]) < actions.index(current["action"]):
+                raise JobError("conflict", "pending effect action cannot move backwards")
+            recorded = {**effect, "recorded_at": current["recorded_at"]}
+        lease["pending_effect"] = cls._validate_pending_effect(recorded, recorded=True)
+        return lease["pending_effect"]
 
     def note_rate_limit(self, provider, model, delay_seconds, source="metadata"):
         provider_key = normalize_provider(provider)

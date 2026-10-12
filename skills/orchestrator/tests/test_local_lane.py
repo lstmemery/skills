@@ -63,6 +63,7 @@ class LocalLaneTest(unittest.TestCase):
                 "--local-lane-scope-json", request,
                 "--pane", "pane:1", "--name", "bounded-task",
                 "--prompt-file", "/unread/for-rejected-scope.md",
+                "--telemetry-file", "/tmp/local-lane-rejected/telemetry.json",
             ])
 
         self.assertEqual(code, 2)
@@ -101,6 +102,7 @@ class LocalLaneTest(unittest.TestCase):
                 code = main([
                     "start", "--task-class", "summary", "--local-lane-scope-json", scope,
                     "--pane", "moved:1", "--name", "bounded-task", "--prompt-file", str(prompt_file),
+                    "--telemetry-file", str(Path(input_dir) / "telemetry.json"),
                 ])
 
         self.assertEqual(code, 4)
@@ -133,6 +135,7 @@ class LocalLaneTest(unittest.TestCase):
                     local_lane.start_direct_local_lane(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        telemetry_path=Path(admission_dir) / "telemetry.json",
                         source_env={"HOME": "/home/fixture", "PATH": "/bin"},
                         run_command=fake_host,
                     )
@@ -183,17 +186,35 @@ class LocalLaneTest(unittest.TestCase):
             return 0, b'{"result":{}}', b""
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            telemetry_path = Path(admission_dir) / "telemetry.json"
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
                 result = start_direct(
                     config, task_class="summary", local_lane_scope=scope,
                     pane="moved:1", name="bounded-task", prompt="Summarize the supplied fixture.",
                     source_env=source_env, herdr="herdr", run_command=fake_host,
+                    telemetry_path=telemetry_path,
                 )
                 self.assertEqual(AdmissionStore(admission_dir).status("llama-local")["active_count"], 0)
+            telemetry = json.loads(telemetry_path.read_text(encoding="utf-8"))
 
         self.assertTrue(active_counts)
         self.assertEqual(set(active_counts), {1})
         self.assertEqual(result["outcome"], "ready")
+        self.assertEqual(telemetry, result["telemetry"])
+        self.assertEqual(result["telemetry_file"], str(telemetry_path))
+        self.assertEqual(telemetry["schema_version"], 1)
+        self.assertEqual(telemetry["route"], {
+            "lane": "local_lane", "level": None, "choice": "explicit_opt_in",
+            "model": config["model"], "effort": config["effort"],
+            "harness": "pi", "provider": config["provider"],
+        })
+        self.assertTrue(telemetry["started_at"])
+        self.assertTrue(telemetry["ended_at"])
+        self.assertEqual(telemetry["continuation_count"], 0)
+        self.assertEqual(telemetry["continuation_reasons"], [])
+        self.assertEqual(telemetry["quota_signals"], [])
+        self.assertEqual(telemetry["coordinator_grade"], "pending")
+        self.assertEqual(telemetry["independent_validation"]["status"], "pending")
         self.assertEqual([call[0][1:3] for call in calls], [
             ["pane", "run"], ["pane", "wait-output"], ["agent", "start"], ["agent", "get"],
             ["agent", "prompt"], ["agent", "get"], ["pane", "read"], ["agent", "get"],
@@ -247,6 +268,7 @@ class LocalLaneTest(unittest.TestCase):
                     local_lane.start_direct_local_lane(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        telemetry_path=Path(admission_dir) / "telemetry.json",
                         source_env={"HOME": "/home/fixture", "PATH": "/bin"},
                         run_command=fake_host,
                     )
@@ -272,6 +294,62 @@ class LocalLaneTest(unittest.TestCase):
         self.assertEqual(held["pending_effect"]["status"], "unknown")
         self.assertEqual(held["pending_effect"]["observation"]["state"], "working")
 
+    def test_direct_worker_wait_interrupt_leaves_a_reconcilable_pending_effect(self):
+        config = policy_record(load_json(local_lane.POLICY_PATH))["local_lane"]
+        scope = {
+            "network_access": False,
+            "credential_access": False,
+            "credentials_in_environment": False,
+            "destructive_actions": False,
+        }
+        agent_state = {"value": "idle"}
+        agent_gets = {"count": 0}
+        observed_effects = []
+
+        def fake_host(argv, *, env=None):
+            if argv[:3] == ["herdr", "agent", "get"]:
+                leases = AdmissionStore(admission_dir).status("llama-local")["leases"]
+                observed_effects.append(leases[0].get("pending_effect"))
+                agent_gets["count"] += 1
+                if agent_gets["count"] == 3:
+                    raise KeyboardInterrupt
+                agent = {"agent_status": agent_state["value"], "pane_id": "moved:1",
+                         "agent": "pi", "name": "bounded-task"}
+                return 0, json.dumps({"result": {"agent": agent}}).encode(), b""
+            if argv[:3] == ["herdr", "agent", "prompt"]:
+                agent_state["value"] = "working"
+            if argv[:3] == ["herdr", "pane", "read"]:
+                return 0, b"Working\n", b""
+            return 0, b'{"result":{}}', b""
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            telemetry_path = Path(admission_dir) / "telemetry.json"
+            with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
+                with self.assertRaises(KeyboardInterrupt):
+                    local_lane.start_direct_local_lane(
+                        config, task_class="summary", local_lane_scope=scope,
+                        pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        telemetry_path=telemetry_path,
+                        source_env={"HOME": "/home/fixture", "PATH": "/bin"},
+                        run_command=fake_host,
+                    )
+
+            leases = AdmissionStore(admission_dir).status("llama-local")["leases"]
+            telemetry = json.loads(telemetry_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(leases), 1)
+        self.assertTrue(observed_effects)
+        self.assertTrue(all(effect is not None for effect in observed_effects))
+        effect = leases[0]["pending_effect"]
+        self.assertEqual(effect["action"], "start")
+        self.assertEqual(effect["status"], "unknown")
+        self.assertEqual(effect["pane_id"], "moved:1")
+        self.assertEqual(effect["agent_name"], "bounded-task")
+        self.assertEqual(effect["observation"]["state"], "unknown")
+        self.assertIsInstance(effect["recorded_at"], (int, float))
+        self.assertTrue(telemetry["started_at"])
+        self.assertIsNone(telemetry["ended_at"])
+
     def test_direct_start_releases_shared_admission_when_failure_proves_start_not_attempted(self):
         config = policy_record(load_json(local_lane.POLICY_PATH))["local_lane"]
         scope = {
@@ -292,6 +370,7 @@ class LocalLaneTest(unittest.TestCase):
                     local_lane.start_direct_local_lane(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        telemetry_path=Path(admission_dir) / "telemetry.json",
                         source_env={"HOME": "/home/fixture", "PATH": "/bin"},
                         run_command=fake_host,
                     )
@@ -317,6 +396,7 @@ class LocalLaneTest(unittest.TestCase):
                 local_lane.start_direct_local_lane(
                     config, task_class="summary", local_lane_scope=scope,
                     pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                    telemetry_path=Path(__file__).parent / "unused-telemetry.json",
                     source_env={"HOME": "/home/fixture", "PATH": "/bin"},
                     run_command=fake_host,
                 )

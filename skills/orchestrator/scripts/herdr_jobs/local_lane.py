@@ -12,9 +12,10 @@ import time
 import uuid
 
 from .records import (JobError, encoded, ensure_local_lane_admitted, load_json,
-                      parse_json, policy_record, text)
+                      now, parse_json, policy_record, save, text)
 from .prompt import PromptNotStarted, has_active_turn_status, submit_and_verify
 from .security import contains_secret_material
+from .telemetry import task_telemetry, validate_task_telemetry
 
 
 POLICY_PATH = Path(__file__).resolve().parents[2] / "launch-policy.json"
@@ -55,6 +56,28 @@ def _run_host_command(argv, *, env=None):
     except (OSError, subprocess.TimeoutExpired) as error:
         raise JobError("unavailable_capability", f"local lane host command failed: {argv[0]}") from error
     return result.returncode, result.stdout, result.stderr
+
+
+def _create_telemetry_file(path, telemetry):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(encoded(telemetry) + b"\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _direct_local_lane_telemetry(local_config):
+    spec = {
+        "local_lane": True,
+        "model_route": {"lane": "local_lane", "level": None,
+                        "choice": "explicit_opt_in", "effort": local_config["effort"]},
+        "override": {"effort": local_config["effort"]},
+        "model": local_config["model"],
+        "route": {"runtime": "pi"},
+    }
+    telemetry = task_telemetry(spec, local_config["model"], local_config["provider"])
+    return validate_task_telemetry(telemetry, telemetry["route"])
 
 
 def local_lane_environment(source_env=None, pane_id=None):
@@ -113,6 +136,7 @@ def sanitize_pane_environment(pane_id, environment, *, herdr="herdr", run_comman
 
 
 def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane, name, prompt,
+                            telemetry_path,
                             source_env=None, herdr="herdr", run_command=_run_host_command,
                             policy=None, admission_service=None):
     """Validate and start the explicitly scoped direct Herdr local-lane route."""
@@ -127,6 +151,16 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
                          + "\n\n" + prompt, "local-lane prompt", 100000)
     if contains_secret_material(worker_prompt):
         raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
+    if telemetry_path is None:
+        raise JobError("invalid_input", "direct local-lane start requires a telemetry file")
+    telemetry_path = Path(text(str(telemetry_path), "telemetry file path", 4096)).absolute()
+    if telemetry_path.exists() or telemetry_path.is_symlink():
+        raise JobError("conflict", "direct local-lane telemetry file already exists")
+    telemetry = _direct_local_lane_telemetry(local_config)
+    try:
+        _create_telemetry_file(telemetry_path, telemetry)
+    except FileExistsError as error:
+        raise JobError("conflict", "direct local-lane telemetry file already exists") from error
 
     environment = local_lane_environment(source_env, pane_id)
     policy = policy or policy_record(load_json(POLICY_PATH))
@@ -139,14 +173,6 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
         "admission_model": local_config["model"],
         "admission_lease_id": lease_id,
     }
-    admission = admission_service.acquire(
-        admission_job,
-        admission_service.provider_cap(policy, local_config["provider"]),
-        lease_id,
-    )
-    if not admission["admitted"]:
-        raise JobError("unavailable_capability",
-                       f"direct local-lane admission denied: {admission['reason']}")
     effect_context = {
         "attempted": False,
         "completed": False,
@@ -154,11 +180,30 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
         "observation": {"state": "unknown", "identity_verified": False,
                         "prompt_verified": False},
     }
+    pending_effect = {
+        "action": effect_context["action"],
+        "status": "unknown",
+        "pane_id": pane_id,
+        "agent_name": agent_name,
+        "observation": effect_context["observation"],
+    }
+    admission = admission_service.acquire(
+        admission_job,
+        admission_service.provider_cap(policy, local_config["provider"]),
+        lease_id,
+        pending_effect=pending_effect,
+    )
+    if not admission["admitted"]:
+        raise JobError("unavailable_capability",
+                       f"direct local-lane admission denied: {admission['reason']}")
     try:
-        return _launch_direct_local_lane(
+        result = _launch_direct_local_lane(
             local_config, task_class, pane_id, agent_name, worker_prompt, environment,
-            herdr, run_command, effect_context,
+            herdr, run_command, effect_context, telemetry, telemetry_path,
         )
+        result["telemetry"] = telemetry
+        result["telemetry_file"] = str(telemetry_path)
+        return result
     except Exception as error:
         if effect_context["attempted"]:
             effect = {
@@ -175,7 +220,7 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
                 effect["lease_id"] = lease_id
                 effect["recorded"] = True
             except Exception as record_error:
-                effect["recorded"] = False
+                effect["recorded"] = True
                 effect["record_error"] = str(record_error)[:1000]
             message = (
                 f"direct local-lane {effect['action']} effect is unresolved; inspect pane {pane_id} "
@@ -185,17 +230,31 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
                 "the observed absence recorded via 'herdr-admission release --lease-id "
                 f"{lease_id} --reconciliation-evidence <observation>'."
             )
-            if not effect["recorded"]:
-                message += " The unresolved effect marker could not be saved; the admission lease remains held."
+            if "record_error" in effect:
+                message += " The latest observation could not be saved; the original pending effect marker and admission lease remain."
             raise UnknownDirectLocalLaneEffect(message, effect) from error
         raise
     finally:
-        if not effect_context["attempted"] or effect_context["completed"]:
-            admission_service.release(admission_job)
+        if not effect_context["attempted"]:
+            admission_service.release(
+                admission_job,
+                reconciliation_evidence=("launcher confirmed Herdr agent start was not issued; "
+                                         "the direct worker was absent by construction"),
+            )
+        elif effect_context["completed"]:
+            observation = effect_context["observation"]
+            admission_service.release(
+                admission_job,
+                reconciliation_evidence=(
+                    f"Herdr verified direct worker {agent_name} on pane {pane_id} reached "
+                    f"state={observation['state']} with identity_verified=true after prompt verification"
+                ),
+            )
 
 
 def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, worker_prompt,
-                              environment, herdr, run_command, effect_context):
+                              environment, herdr, run_command, effect_context,
+                              telemetry, telemetry_path):
     sanitize_pane_environment(pane_id, environment, herdr=herdr, run_command=run_command)
     start = [herdr, "agent", "start", agent_name, "--kind", "pi", "--pane", pane_id,
              "--", "--provider", local_config["provider"], "--model", local_config["model"], "--approve"]
@@ -230,6 +289,8 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
             observation["prompt_verified"] = code == 0 and has_active_turn_status(terminal)
         return observation
 
+    telemetry["started_at"] = now()
+    save(telemetry_path, validate_task_telemetry(telemetry, telemetry["route"]))
     effect_context["attempted"] = True
     try:
         code, output, _ = run_command(start, env=environment)
@@ -274,8 +335,11 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
             raise JobError("unavailable_capability",
                            "direct local-lane worker did not reach a verified terminal state; inspect before retrying")
         time.sleep(0.2)
+    telemetry["ended_at"] = now()
+    save(telemetry_path, validate_task_telemetry(telemetry, telemetry["route"]))
     effect_context["completed"] = True
-    return {"outcome": "ready", "task_class": task_class, "pane_id": pane_id, "agent_name": agent_name}
+    return {"outcome": "ready", "task_class": task_class, "pane_id": pane_id,
+            "agent_name": agent_name}
 
 
 def _require_herdr_result(output, operation):
@@ -318,6 +382,7 @@ def main(argv=None):
     parser.add_argument("--pane")
     parser.add_argument("--name")
     parser.add_argument("--prompt-file", type=Path)
+    parser.add_argument("--telemetry-file", type=Path)
     parser.add_argument("--herdr", default=shutil.which("herdr") or "herdr")
     args = parser.parse_args(argv)
     try:
@@ -327,8 +392,9 @@ def main(argv=None):
             raise JobError("unavailable_capability", "local lane is not configured by launch policy")
         if args.command == "start":
             if (args.task_class is None or args.local_lane_scope_json is None
-                    or args.pane is None or args.name is None or args.prompt_file is None):
-                raise JobError("invalid_input", "direct local-lane start requires task class, scope, pane, name, and prompt file")
+                    or args.pane is None or args.name is None or args.prompt_file is None
+                    or args.telemetry_file is None):
+                raise JobError("invalid_input", "direct local-lane start requires task class, scope, pane, name, prompt file, and telemetry file")
             scope = parse_json(args.local_lane_scope_json.encode())
             ensure_local_lane_admitted(config, args.task_class, scope, "direct")
             check_preconditions(config)
@@ -336,7 +402,7 @@ def main(argv=None):
             result = start_direct_local_lane(config, task_class=args.task_class,
                                              local_lane_scope=scope, pane=args.pane,
                                              name=args.name, prompt=prompt, herdr=args.herdr,
-                                             policy=policy)
+                                             telemetry_path=args.telemetry_file, policy=policy)
             print(encoded(result).decode())
             return 0
         result = check_preconditions(config)
