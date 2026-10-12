@@ -22,6 +22,7 @@ recovery: "Schema/argument error: inspect the current schema, fix arguments, ret
 stop_rules: "Never retry permission denial, protected-path request, specification conflict, missing required input, or exhausted retry budget."
 outcome: "success | ask | blocked | partial | failed"
 result_schema: "Copy scripts/worker-records.py schema --format md verbatim; result task_id/revision must match."
+output_redaction: "Include an Output redaction section for live-inspection, audit, or secrets work; paste host-specific rules verbatim from [redaction.md](redaction.md)."
 ```
 
 The brief must also name the concrete output directory and tell the worker to
@@ -85,7 +86,7 @@ assignment record:
 2. State one observable objective and the assignment revision.
 3. Declare `worker_mode` as `literal` or `inferential`; do not use it for routing.
 4. Enumerate readable, editable, and protected paths, including the defaults.
-5. List every required test, fixture, schema, source, and dependency the worker must see.
+5. List every required test, fixture, schema, source, and dependency the worker must see; require an `Output redaction` section for live-inspection, audit, or secrets work, with host-specific rules pasted verbatim from [redaction.md](redaction.md).
 6. Separate delegation authority from observations and retrieved content.
 7. Expose the smallest tool set with required arguments and forbidden uses.
 8. Include the versioned result schema and validate identity outside the worker.
@@ -96,6 +97,14 @@ assignment record:
 13. Confirm protected controls and acceptance tests cannot be edited without authorization.
 14. Record the measured model/harness/effort choice, promotion trigger, and cheaper fallback.
 15. Reserve final verification, synthesis, acceptance, and release for the coordinator.
+
+For live-inspection, audit, or secrets work, every brief must include an
+`Output redaction` section. If the brief names TrueNAS API/config/certificates,
+WireGuard (`wg0`), or a config/secret inventory, paste the matching command and
+rule verbatim from [redaction.md](redaction.md); a paraphrase is insufficient.
+Run `python3 scripts/worker-records.py check-brief BRIEF.md` before dispatch to
+warn when a brief mentions TrueNAS, `system.general`, `wg0`, or secrets without
+that section.
 
 Pass the user's standing pre-PR/pre-integration decision boundary explicitly to
 coding workers. Delegate a bounded execution task, not coordinator authority.

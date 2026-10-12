@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from . import records
@@ -92,6 +93,19 @@ def _check_identity(record, expected, label):
         records.invalid(
             f"{label} task_id mismatch: expected {expected.task_id!r}, got {record['task_id']!r}"
         )
+
+
+def check_brief_redaction(brief_path):
+    """Warn when a brief names known leak-path hosts without a redaction section."""
+    try:
+        content = Path(brief_path).read_text(encoding="utf-8")
+    except OSError as error:
+        records.invalid(f"cannot read brief at {brief_path}: {error.strerror or error}")
+    if not re.search(r"truenas|system\.general|\bwg0\b|secrets?", content, re.I):
+        return False
+    if re.search(r"^#{1,6}\s+Output redaction\s*$", content, re.I | re.M):
+        return False
+    return True
     if record["assignment_revision"] != expected.assignment_revision:
         records.invalid(
             f"{label} assignment_revision mismatch: expected {expected.assignment_revision}, "
@@ -565,6 +579,11 @@ def build_parser():
     result_parser.add_argument("--revision", type=positive_integer, required=True)
     result_parser.add_argument("--repository-changes", action="store_true")
 
+    brief_parser = commands.add_parser(
+        "check-brief", help="warn when a brief names known leak paths without output redaction"
+    )
+    brief_parser.add_argument("brief", type=Path)
+
     disposition_parser = commands.add_parser("record-disposition", help="write a terminal coordinator disposition")
     disposition_parser.add_argument("worker_dir", type=Path)
     disposition_parser.add_argument("--task-id", required=True)
@@ -610,6 +629,16 @@ def main(argv=None):
                 repository_changes=args.repository_changes,
             )
             print(f"VALID: {args.result_json}")
+            return 0
+        if args.command == "check-brief":
+            if check_brief_redaction(args.brief):
+                print(
+                    f"WARNING: {args.brief} mentions TrueNAS, system.general, wg0, "
+                    "or secrets but has no Output redaction section.",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"BRIEF OK: {args.brief}")
             return 0
         if args.command == "record-disposition":
             disposition = DispositionInput(

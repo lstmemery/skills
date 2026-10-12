@@ -76,6 +76,33 @@ class WorkerRecordsTest(unittest.TestCase):
         )
         self.assertIn(expected_command, docs)
 
+    def test_check_brief_warns_for_known_leak_path_without_redaction_section(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Inspect TrueNAS system.general and wg0.\n")
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+        self.assertIn("Output redaction", process.stderr)
+
+    def test_check_brief_accepts_output_redaction_section(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Inspect the secrets inventory.\n\n## Output redaction\nUse named fields.\n")
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("BRIEF OK:", process.stdout)
+
+    def test_check_brief_ignores_briefs_without_known_leak_path_terms(self):
+        brief = self.root / "brief.md"
+        brief.write_text("Summarize the release notes.\n")
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+
     def test_normalize_result_repairs_known_legacy_shapes_and_reports_changes(self):
         source = self.root / "result.json"
         output = self.root / "normalized.json"
