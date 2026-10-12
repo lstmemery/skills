@@ -15,6 +15,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.admission import AdmissionStore, backoff_delay, rate_limit_from_output
+from herdr_jobs.records import JobError
 from herdr_jobs.admission_service import AdmissionService
 from support import isolate_admission_state
 
@@ -51,6 +52,35 @@ class AdmissionTest(unittest.TestCase):
         released = self.call_cli("release", "--lease-id", "direct-a")
         self.assertTrue(released["released"])
         self.assertEqual(self.call_cli("status", "--provider", "codex")["active_count"], 0)
+
+    def test_cli_release_requires_reconciliation_for_an_unknown_effect(self):
+        acquired = self.store.acquire("llama-local", "qwen3.8-27b-uncensored", "direct-unknown", cap=1)
+        effect = {
+            "action": "start",
+            "status": "unknown",
+            "pane_id": "moved:1",
+            "agent_name": "bounded-task",
+            "observation": {"state": "unknown", "identity_verified": False,
+                            "prompt_verified": False},
+        }
+        self.store.record_unknown_effect(acquired["lease_id"], effect)
+        with self.assertRaisesRegex(JobError, "reconciliation evidence"):
+            self.store.release(acquired["lease_id"])
+
+        rejected = subprocess.run(
+            [sys.executable, "-B", str(CLI), "release", "--lease-id", acquired["lease_id"]],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(rejected.returncode, 3)
+        self.assertEqual(json.loads(rejected.stdout)["error"], "conflict")
+        self.assertEqual(self.store.status("llama-local")["active_count"], 1)
+
+        released = self.call_cli(
+            "release", "--lease-id", acquired["lease_id"],
+            "--reconciliation-evidence", "herdr reports no owned worker; pane shows shell prompt",
+        )
+        self.assertTrue(released["released"])
+        self.assertEqual(self.store.status("llama-local")["active_count"], 0)
 
     def test_retry_after_blocks_only_that_provider_model_until_expiry(self):
         current_time = [1000.0]

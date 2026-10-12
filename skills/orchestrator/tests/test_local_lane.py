@@ -72,6 +72,43 @@ class LocalLaneTest(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
         preflight.assert_not_called()
 
+    def test_direct_start_cli_emits_the_unresolved_effect_record(self):
+        scope = json.dumps({
+            "network_access": False,
+            "credential_access": False,
+            "credentials_in_environment": False,
+            "destructive_actions": False,
+        })
+        effect = {
+            "action": "start",
+            "status": "unknown",
+            "pane_id": "moved:1",
+            "agent_name": "bounded-task",
+            "lease_id": "direct-local-fixture",
+            "observation": {"state": "unknown", "identity_verified": False,
+                            "prompt_verified": False},
+        }
+        unresolved = local_lane.UnknownDirectLocalLaneEffect("reconciliation required", effect)
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as input_dir:
+            prompt_file = Path(input_dir) / "prompt.md"
+            prompt_file.write_text("Summarize the fixture.", encoding="utf-8")
+            with redirect_stdout(stdout), redirect_stderr(stderr), \
+                    patch("herdr_jobs.local_lane.check_preconditions", return_value={}), \
+                    patch("herdr_jobs.local_lane.start_direct_local_lane", side_effect=unresolved):
+                code = main([
+                    "start", "--task-class", "summary", "--local-lane-scope-json", scope,
+                    "--pane", "moved:1", "--name", "bounded-task", "--prompt-file", str(prompt_file),
+                ])
+
+        self.assertEqual(code, 4)
+        self.assertEqual(stderr.getvalue(), "")
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["error"], "unresolved_effect")
+        self.assertEqual(result["pending_effect"], effect)
+
     def test_direct_start_refuses_when_shared_admission_slot_is_held(self):
         policy = policy_record(load_json(local_lane.POLICY_PATH))
         config = policy["local_lane"]
@@ -185,7 +222,7 @@ class LocalLaneTest(unittest.TestCase):
         self.assertIn("Do not access network, credentials, secrets, auth files, or environment", worker_prompt)
         self.assertIn("Summarize the supplied fixture.", worker_prompt)
 
-    def test_direct_start_releases_shared_admission_when_host_start_fails(self):
+    def test_direct_start_retains_shared_admission_after_ambiguous_host_start(self):
         policy = policy_record(load_json(local_lane.POLICY_PATH))
         config = policy["local_lane"]
         scope = {
@@ -198,11 +235,60 @@ class LocalLaneTest(unittest.TestCase):
         def fake_host(argv, *, env=None):
             if argv[:3] == ["herdr", "agent", "start"]:
                 return 1, b"", b"start failed"
+            if argv[:3] == ["herdr", "agent", "get"]:
+                agent = {"agent_status": "working", "pane_id": "moved:1",
+                         "agent": "pi", "name": "bounded-task"}
+                return 0, json.dumps({"result": {"agent": agent}}).encode(), b""
             return 0, b'{"result":{}}', b""
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
-                with self.assertRaisesRegex(JobError, "could not verify.*start"):
+                with self.assertRaises(local_lane.UnknownDirectLocalLaneEffect) as caught:
+                    local_lane.start_direct_local_lane(
+                        config, task_class="summary", local_lane_scope=scope,
+                        pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        source_env={"HOME": "/home/fixture", "PATH": "/bin"},
+                        run_command=fake_host,
+                    )
+
+            status = AdmissionStore(admission_dir).status("llama-local")
+            self.assertEqual(status["active_count"], 1)
+            held = status["leases"][0]
+            second = AdmissionStore(admission_dir).acquire(
+                "llama-local", config["model"], "direct-after-unknown", 1, "second-direct-run")
+            self.assertFalse(second["admitted"])
+            self.assertEqual(second["reason"], "capacity")
+
+        self.assertEqual(caught.exception.effect["action"], "start")
+        self.assertEqual(caught.exception.effect["status"], "unknown")
+        self.assertEqual(caught.exception.effect["pane_id"], "moved:1")
+        self.assertEqual(caught.exception.effect["agent_name"], "bounded-task")
+        self.assertTrue(caught.exception.effect["recorded"])
+        self.assertEqual(caught.exception.effect["observation"]["identity_verified"], True)
+        self.assertEqual(caught.exception.effect["observation"]["state"], "working")
+        self.assertIn("reconciliation", str(caught.exception).casefold())
+        self.assertEqual(held["lease_id"], caught.exception.effect["lease_id"])
+        self.assertEqual(held["pending_effect"]["action"], "start")
+        self.assertEqual(held["pending_effect"]["status"], "unknown")
+        self.assertEqual(held["pending_effect"]["observation"]["state"], "working")
+
+    def test_direct_start_releases_shared_admission_when_failure_proves_start_not_attempted(self):
+        config = policy_record(load_json(local_lane.POLICY_PATH))["local_lane"]
+        scope = {
+            "network_access": False,
+            "credential_access": False,
+            "credentials_in_environment": False,
+            "destructive_actions": False,
+        }
+
+        def fake_host(argv, *, env=None):
+            if argv[:3] == ["herdr", "pane", "run"]:
+                return 1, b"", b"pane run failed before agent start"
+            return 0, b'{"result":{}}', b""
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
+                with self.assertRaisesRegex(JobError, "reset the local-lane pane environment"):
                     local_lane.start_direct_local_lane(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",

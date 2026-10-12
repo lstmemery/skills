@@ -155,11 +155,26 @@ python3 scripts/local-lane.py preflight
 ```
 
 The `start` command acquires the shared one-slot `llama-local` lease itself and
-refuses to launch while that slot is held. It keeps the lease until the worker
-reaches a verified terminal state, then releases it on success or failure. In
-the owned worktree, create and move a pane, then use the shared local-lane
-launcher with a bounded task class, four false scope declarations, and a brief
-file:
+refuses to launch while that slot is held. It releases the lease for failures
+before `herdr agent start` is issued and after the worker reaches a verified
+terminal state. An unsuccessful or missing start response is unresolved: the
+launcher records the pending effect with the lease, pane, agent, and latest
+observation, then keeps the lease. Inspect the exact agent and pane/process
+before retrying; release the retained lease only after reconciliation proves no
+worker started. `python3 scripts/herdr-admission.py status --provider
+llama-local` shows the retained lease and pending effect. After inspection
+proves the worker did not start, release that exact lease and record the
+observation:
+
+```sh
+python3 scripts/herdr-admission.py release --lease-id <lease-id> \
+  --reconciliation-evidence "<pane/process observation>"
+```
+
+The admission CLI refuses to release a lease with a pending effect unless
+reconciliation evidence is supplied. In the owned worktree, create and move a
+pane, then use the shared local-lane launcher with a bounded task class, four
+false scope declarations, and a brief file:
 
 ```sh
 herdr pane split --current --direction right --cwd <worktree> --no-focus
@@ -183,9 +198,10 @@ environment. See Herdr's [agent automation](https://herdr.dev/docs/agent-automat
 and [CLI reference](https://herdr.dev/docs/cli-reference/). The launcher
 verifies the owned pane and visible active-turn status, waits for the worker to
 reach `done`, then releases admission. Run the declared independent validator
-against its output directory after the launcher returns. A blocked or
-unverified launch releases admission as the launcher exits; inspect the worker
-before retrying. This route does not enter the jail. Pi uses its normal
+against its output directory after the launcher returns. A pre-start failure
+releases admission; an ambiguous start or later unverified state retains the
+lease and emits an unresolved effect for reconciliation. This route does not
+enter the jail. Pi uses its normal
 `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), preserving configured MCP
 servers and extensions. The local server pins `reasoning_effort=medium`; Pi's
 local model metadata does not advertise an effort list, so this route omits

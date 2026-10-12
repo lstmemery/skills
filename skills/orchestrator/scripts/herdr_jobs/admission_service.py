@@ -26,6 +26,9 @@ class AdmissionService:
     def release(self, job: Mapping[str, Any]) -> dict[str, Any]:
         return self.store.release(job["admission_lease_id"])
 
+    def record_unknown_effect(self, job: Mapping[str, Any], effect: Mapping[str, Any]) -> dict[str, Any]:
+        return self.store.record_unknown_effect(job["admission_lease_id"], effect)
+
     def rate_limit(self, job: Mapping[str, Any], signal: Mapping[str, Any], default_seconds: int = 60) -> dict[str, Any]:
         delay = signal.get("retry_after_seconds")
         source = signal.get("source") or "metadata"

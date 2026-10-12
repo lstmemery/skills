@@ -360,13 +360,17 @@ class AdmissionStore:
         if not isinstance(state["leases"], list) or not isinstance(state["backoffs"], list):
             raise JobError("invalid_input", "admission state leases and backoffs must be arrays")
         for lease in state["leases"]:
-            fields(lease, ["lease_id", "provider", "model", "run_id", "acquired_at", "cap"], label="admission lease")
+            fields(lease, ["lease_id", "provider", "model", "run_id", "acquired_at", "cap"],
+                   ["pending_effect"], label="admission lease")
             text(lease["lease_id"], "lease_id", 512)
             lease["provider"] = normalize_provider(lease["provider"])
             lease["model"] = normalize_model(lease["model"])
             text(lease["run_id"], "run_id", 1024)
             integer(lease["cap"], "cap", 1, 64)
             self._timestamp(lease["acquired_at"], "acquired_at")
+            if "pending_effect" in lease:
+                lease["pending_effect"] = self._validate_pending_effect(
+                    lease["pending_effect"], recorded=True)
         original_backoff_keys = set()
         for backoff in state["backoffs"]:
             fields(backoff, ["provider", "model", "until", "recorded_at", "source"], label="provider backoff")
@@ -394,6 +398,30 @@ class AdmissionStore:
     def _timestamp(value, label):
         if type(value) not in (int, float) or not math.isfinite(value):
             raise JobError("invalid_input", f"{label} must be a finite timestamp")
+
+    @classmethod
+    def _validate_pending_effect(cls, effect, *, recorded=False):
+        required = ["action", "status", "pane_id", "agent_name", "observation"]
+        if recorded:
+            required.append("recorded_at")
+        effect = fields(effect, required, label="admission lease pending effect")
+        if effect["action"] not in ("start", "prompt", "execution") or effect["status"] != "unknown":
+            raise JobError("invalid_input", "admission lease pending effect is invalid")
+        text(effect["pane_id"], "pending effect pane_id", 200)
+        text(effect["agent_name"], "pending effect agent_name", 32)
+        observation = fields(effect["observation"],
+                             ["state", "identity_verified", "prompt_verified"], ["launch_issue"],
+                             label="admission lease effect observation")
+        if observation["state"] not in ("idle", "done", "working", "blocked", "unknown"):
+            raise JobError("invalid_input", "admission lease effect state is invalid")
+        if (type(observation["identity_verified"]) is not bool
+                or type(observation["prompt_verified"]) is not bool):
+            raise JobError("invalid_input", "admission lease effect verification flags must be booleans")
+        if "launch_issue" in observation:
+            text(observation["launch_issue"], "pending effect launch_issue", 1000)
+        if recorded:
+            cls._timestamp(effect["recorded_at"], "pending effect recorded_at")
+        return effect
 
     @staticmethod
     def _unique(state):
@@ -480,16 +508,41 @@ class AdmissionStore:
                 "cap": cap, "lease_id": lease_id, "reason": reason, "retry_at": retry_at,
                 "lease_held": lease_held}
 
-    def release(self, lease_id):
+    def release(self, lease_id, *, reconciliation_evidence=None):
         lease_id = text(lease_id, "lease_id", 512)
+        if reconciliation_evidence is not None:
+            reconciliation_evidence = text(reconciliation_evidence, "reconciliation evidence", 2000)
         with self._locked():
             state = self._load()
             self._prune_backoffs(state, self.clock())
+            lease = next((item for item in state["leases"] if item["lease_id"] == lease_id), None)
+            if lease is not None and lease.get("pending_effect") is not None and reconciliation_evidence is None:
+                raise JobError("conflict", "cannot release an unresolved-effect lease without reconciliation evidence")
             before = len(state["leases"])
             state["leases"] = [item for item in state["leases"] if item["lease_id"] != lease_id]
             self._save(state)
-            return {"released": len(state["leases"]) != before, "lease_id": lease_id,
-                    "active_leases": len(state["leases"])}
+            result = {"released": len(state["leases"]) != before, "lease_id": lease_id,
+                      "active_leases": len(state["leases"])}
+            if reconciliation_evidence is not None:
+                result["reconciliation_evidence"] = reconciliation_evidence
+            return result
+
+    def record_unknown_effect(self, lease_id, effect):
+        lease_id = text(lease_id, "lease_id", 512)
+        effect = self._validate_pending_effect(effect)
+        recorded = {**effect, "recorded_at": self.clock()}
+        self._validate_pending_effect(recorded, recorded=True)
+        with self._locked():
+            state = self._load()
+            lease = next((item for item in state["leases"] if item["lease_id"] == lease_id), None)
+            if lease is None:
+                raise JobError("conflict", "cannot record an unknown effect without its admission lease")
+            current = lease.get("pending_effect")
+            if current is not None and current != recorded:
+                raise JobError("conflict", "admission lease already has a different unresolved effect")
+            lease["pending_effect"] = recorded
+            self._save(state)
+        return {"recorded": True, "lease_id": lease_id, "pending_effect": recorded}
 
     def note_rate_limit(self, provider, model, delay_seconds, source="metadata"):
         provider_key = normalize_provider(provider)
@@ -556,6 +609,8 @@ def parser():
     acquire.add_argument("--policy", default=str(POLICY_PATH))
     release = commands.add_parser("release", help="release a terminal or unused provider slot")
     release.add_argument("--lease-id", required=True)
+    release.add_argument("--reconciliation-evidence",
+                         help="required for unresolved effects; summarize the pane/process observation")
     status = commands.add_parser("status", help="show provider counts and active backoffs")
     status.add_argument("--provider")
     status.add_argument("--model")
@@ -584,7 +639,8 @@ def main(argv=None):
             cap = config["provider_caps"].get(provider, config["default_provider_cap"])
             result = store.acquire(provider, args.model, args.lease_id, cap, args.run_id)
         elif args.operation == "release":
-            result = store.release(args.lease_id)
+            result = store.release(args.lease_id,
+                                   reconciliation_evidence=args.reconciliation_evidence)
         elif args.operation == "status":
             result = store.status(args.provider, args.model)
         else:

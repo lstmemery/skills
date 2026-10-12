@@ -31,6 +31,14 @@ class _PromptDeadline:
         return max(0, self.end - time.monotonic())
 
 
+class UnknownDirectLocalLaneEffect(JobError):
+    """A direct start or follow-up may have created a worker; keep its lease."""
+
+    def __init__(self, message, effect):
+        super().__init__("unresolved_effect", message)
+        self.effect = effect
+
+
 def _run_readonly(argv):
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
@@ -139,24 +147,58 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
     if not admission["admitted"]:
         raise JobError("unavailable_capability",
                        f"direct local-lane admission denied: {admission['reason']}")
+    effect_context = {
+        "attempted": False,
+        "completed": False,
+        "action": "start",
+        "observation": {"state": "unknown", "identity_verified": False,
+                        "prompt_verified": False},
+    }
     try:
         return _launch_direct_local_lane(
             local_config, task_class, pane_id, agent_name, worker_prompt, environment,
-            herdr, run_command,
+            herdr, run_command, effect_context,
         )
+    except Exception as error:
+        if effect_context["attempted"]:
+            effect = {
+                "action": effect_context["action"],
+                "status": "unknown",
+                "pane_id": pane_id,
+                "agent_name": agent_name,
+                "lease_id": lease_id,
+                "observation": effect_context["observation"],
+            }
+            try:
+                to_record = {key: value for key, value in effect.items() if key != "lease_id"}
+                effect = admission_service.record_unknown_effect(admission_job, to_record)["pending_effect"]
+                effect["lease_id"] = lease_id
+                effect["recorded"] = True
+            except Exception as record_error:
+                effect["recorded"] = False
+                effect["record_error"] = str(record_error)[:1000]
+            message = (
+                f"direct local-lane {effect['action']} effect is unresolved; inspect pane {pane_id} "
+                f"with 'herdr agent get {agent_name}' and 'herdr pane read {pane_id} "
+                "--source recent-unwrapped --lines 120'. Keep admission lease "
+                f"{lease_id} until reconciliation proves no worker started; release only with "
+                "the observed absence recorded via 'herdr-admission release --lease-id "
+                f"{lease_id} --reconciliation-evidence <observation>'."
+            )
+            if not effect["recorded"]:
+                message += " The unresolved effect marker could not be saved; the admission lease remains held."
+            raise UnknownDirectLocalLaneEffect(message, effect) from error
+        raise
     finally:
-        admission_service.release(admission_job)
+        if not effect_context["attempted"] or effect_context["completed"]:
+            admission_service.release(admission_job)
 
 
 def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, worker_prompt,
-                              environment, herdr, run_command):
+                              environment, herdr, run_command, effect_context):
     sanitize_pane_environment(pane_id, environment, herdr=herdr, run_command=run_command)
     start = [herdr, "agent", "start", agent_name, "--kind", "pi", "--pane", pane_id,
              "--", "--provider", local_config["provider"], "--model", local_config["model"], "--approve"]
-    code, output, _ = run_command(start, env=environment)
-    if code:
-        raise JobError("unavailable_capability", "Herdr could not verify the direct local-lane Pi start")
-    _require_herdr_result(output, "direct local-lane start")
 
     def observe():
         code, output, _ = run_command([herdr, "agent", "get", pane_id], env=environment)
@@ -188,6 +230,22 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
             observation["prompt_verified"] = code == 0 and has_active_turn_status(terminal)
         return observation
 
+    effect_context["attempted"] = True
+    try:
+        code, output, _ = run_command(start, env=environment)
+    except Exception as error:
+        effect_context["observation"] = observe()
+        raise JobError("unavailable_capability",
+                       "Herdr direct local-lane start response is unavailable") from error
+    if code:
+        effect_context["observation"] = observe()
+        raise JobError("unavailable_capability", "Herdr could not verify the direct local-lane Pi start")
+    try:
+        _require_herdr_result(output, "direct local-lane start")
+    except JobError:
+        effect_context["observation"] = observe()
+        raise
+
     def submit():
         code, output, _ = run_command(
             [herdr, "agent", "prompt", agent_name, worker_prompt], env=environment)
@@ -196,11 +254,14 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
         _require_herdr_result(output, "direct local-lane prompt")
 
     try:
+        effect_context["action"] = "prompt"
         submit_and_verify(submit, observe, deadline=_PromptDeadline(30))
     except PromptNotStarted as error:
         raise JobError("unavailable_capability", str(error)) from error
+    effect_context["action"] = "execution"
     while True:
         observation = observe()
+        effect_context["observation"] = observation
         if observation.get("identity_verified") is not True:
             raise JobError("unavailable_capability",
                            "direct local-lane worker identity could not be verified; inspect before retrying")
@@ -213,6 +274,7 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
             raise JobError("unavailable_capability",
                            "direct local-lane worker did not reach a verified terminal state; inspect before retrying")
         time.sleep(0.2)
+    effect_context["completed"] = True
     return {"outcome": "ready", "task_class": task_class, "pane_id": pane_id, "agent_name": agent_name}
 
 
@@ -281,8 +343,11 @@ def main(argv=None):
         print(encoded({"outcome": "ready", "checks": result}).decode())
         return 0
     except JobError as error:
-        print(encoded({"outcome": "blocked", "error": error.kind, "message": str(error)}).decode())
-        return 4 if error.kind == "unavailable_capability" else 2
+        blocked = {"outcome": "blocked", "error": error.kind, "message": str(error)}
+        if isinstance(error, UnknownDirectLocalLaneEffect):
+            blocked["pending_effect"] = error.effect
+        print(encoded(blocked).decode())
+        return 4 if error.kind in ("unavailable_capability", "unresolved_effect") else 2
     except OSError as error:
         print(encoded({"outcome": "blocked", "error": "io_error", "message": str(error)}).decode())
         return 7
