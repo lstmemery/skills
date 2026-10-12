@@ -4,12 +4,15 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SKILL_DIR.parents[1] / "tests"))
+from compatibility.builders import review_evidence
 CLI = SKILL_DIR / "scripts" / "integration-preflight.py"
 CAPTURE_CLI = SKILL_DIR.parent / "code-review" / "scripts" / "capture.py"
 PREFLIGHT_SPEC = importlib.util.spec_from_file_location("integration_preflight", CLI)
@@ -110,17 +113,10 @@ class IntegrationPreflightTests(unittest.TestCase):
             + spec_markdown
             + "\n"
         )
-        evidence = {
-            "schema_version": schema_version,
-            "task_id": "task-1",
-            "author_identity": "coder-1",
-            "reviewer_identity": reviewer,
-            "capture_id": capture_id,
-            "axes": {
-                "standards": {"status": "complete", "findings": standards_findings},
-                "spec": {"status": "complete", "findings": spec_findings},
-            },
-        }
+        evidence = review_evidence(
+            schema_version=schema_version, reviewer=reviewer, capture_id=capture_id,
+            standards=standards_findings, spec=spec_findings,
+        )
         (review_dir / "review-evidence.json").write_text(json.dumps(evidence) + "\n")
         dispositions = []
         for finding in [*standards_findings, *spec_findings]:
