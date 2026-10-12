@@ -2,14 +2,17 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import herdr_jobs.local_lane as local_lane
 from herdr_jobs.local_lane import check_preconditions, main
+from herdr_jobs.admission import AdmissionStore
 from herdr_jobs.records import JobError, policy_record, load_json
 
 
@@ -69,6 +72,37 @@ class LocalLaneTest(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
         preflight.assert_not_called()
 
+    def test_direct_start_refuses_when_shared_admission_slot_is_held(self):
+        policy = policy_record(load_json(local_lane.POLICY_PATH))
+        config = policy["local_lane"]
+        scope = {
+            "network_access": False,
+            "credential_access": False,
+            "credentials_in_environment": False,
+            "destructive_actions": False,
+        }
+        calls = []
+
+        def fake_host(argv, *, env=None):
+            calls.append(argv)
+            return 0, b'{"result":{}}', b""
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            store = AdmissionStore(admission_dir)
+            held = store.acquire("llama-local", config["model"], "managed-held", 1, "managed-run")
+            self.assertTrue(held["admitted"])
+            with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
+                with self.assertRaisesRegex(JobError, "admission"):
+                    local_lane.start_direct_local_lane(
+                        config, task_class="summary", local_lane_scope=scope,
+                        pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        source_env={"HOME": "/home/fixture", "PATH": "/bin"},
+                        run_command=fake_host,
+                    )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(store.status("llama-local")["active_count"], 1)
+
     def test_direct_start_sanitizes_pane_before_starting_and_prompting_pi(self):
         start_direct = getattr(local_lane, "start_direct_local_lane", None)
         self.assertIsNotNone(start_direct, "the direct route must use the shared local-lane launcher")
@@ -94,20 +128,38 @@ class LocalLaneTest(unittest.TestCase):
             "AWS_SECRET_ACCESS_KEY": "fixture-secret-key",
         }
         calls = []
+        agent_state = {"value": "idle"}
+        active_counts = []
 
         def fake_host(argv, *, env=None):
             calls.append((argv, env))
+            active_counts.append(AdmissionStore(admission_dir).status("llama-local")["active_count"])
+            if argv[:3] == ["herdr", "agent", "get"]:
+                agent = {"agent_status": agent_state["value"], "pane_id": "moved:1",
+                         "agent": "pi", "name": "bounded-task"}
+                return 0, json.dumps({"result": {"agent": agent}}).encode(), b""
+            if argv[:3] == ["herdr", "agent", "prompt"]:
+                agent_state["value"] = "working"
+            if argv[:3] == ["herdr", "pane", "read"]:
+                agent_state["value"] = "done"
+                return 0, b"Working\n", b""
             return 0, b'{"result":{}}', b""
 
-        result = start_direct(
-            config, task_class="summary", local_lane_scope=scope,
-            pane="moved:1", name="bounded-task", prompt="Summarize the supplied fixture.",
-            source_env=source_env, herdr="herdr", run_command=fake_host,
-        )
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
+                result = start_direct(
+                    config, task_class="summary", local_lane_scope=scope,
+                    pane="moved:1", name="bounded-task", prompt="Summarize the supplied fixture.",
+                    source_env=source_env, herdr="herdr", run_command=fake_host,
+                )
+                self.assertEqual(AdmissionStore(admission_dir).status("llama-local")["active_count"], 0)
 
+        self.assertTrue(active_counts)
+        self.assertEqual(set(active_counts), {1})
         self.assertEqual(result["outcome"], "ready")
         self.assertEqual([call[0][1:3] for call in calls], [
-            ["pane", "run"], ["pane", "wait-output"], ["agent", "start"], ["agent", "prompt"],
+            ["pane", "run"], ["pane", "wait-output"], ["agent", "start"], ["agent", "get"],
+            ["agent", "prompt"], ["agent", "get"], ["pane", "read"], ["agent", "get"],
         ])
         reset_command = calls[0][0][4]
         self.assertIn("env -i", reset_command)
@@ -124,11 +176,41 @@ class LocalLaneTest(unittest.TestCase):
             self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
         self.assertEqual(calls[2][0][-5:], ["--provider", "llama-local", "--model", config["model"],
                                            "--approve"])
-        worker_prompt = calls[3][0][4]
+        self.assertEqual(calls[4][0][3], "bounded-task")
+        self.assertNotIn("--wait", calls[4][0])
+        self.assertNotIn("--timeout", calls[4][0])
+        worker_prompt = calls[4][0][4]
         self.assertIn("task_class: summary", worker_prompt)
         self.assertIn('"credentials_in_environment": false', worker_prompt)
         self.assertIn("Do not access network, credentials, secrets, auth files, or environment", worker_prompt)
         self.assertIn("Summarize the supplied fixture.", worker_prompt)
+
+    def test_direct_start_releases_shared_admission_when_host_start_fails(self):
+        policy = policy_record(load_json(local_lane.POLICY_PATH))
+        config = policy["local_lane"]
+        scope = {
+            "network_access": False,
+            "credential_access": False,
+            "credentials_in_environment": False,
+            "destructive_actions": False,
+        }
+
+        def fake_host(argv, *, env=None):
+            if argv[:3] == ["herdr", "agent", "start"]:
+                return 1, b"", b"start failed"
+            return 0, b'{"result":{}}', b""
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
+            with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
+                with self.assertRaisesRegex(JobError, "could not verify.*start"):
+                    local_lane.start_direct_local_lane(
+                        config, task_class="summary", local_lane_scope=scope,
+                        pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
+                        source_env={"HOME": "/home/fixture", "PATH": "/bin"},
+                        run_command=fake_host,
+                    )
+
+            self.assertEqual(AdmissionStore(admission_dir).status("llama-local")["active_count"], 0)
 
     def test_direct_start_rejects_missing_or_unsafe_scope_before_host_calls(self):
         config = policy_record(load_json(local_lane.POLICY_PATH))["local_lane"]

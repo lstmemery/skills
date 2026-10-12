@@ -22,7 +22,8 @@ from .model_ladder import billing_pool, provider_arguments, validate_provider_ha
 from .security import ANSI_ESCAPE, contains_secret_material, safe_cli_text as _safe_cli_text
 from .local_lane import (check_preconditions as check_local_lane_preconditions,
                          local_lane_environment, sanitize_pane_environment)
-from .prompt import PromptNotStarted, pane_text_submit, submit_and_verify
+from .prompt import (PromptNotStarted, has_active_turn_status, pane_text_submit,
+                     submit_and_verify)
 
 
 class BudgetExpired(Exception):
@@ -39,13 +40,6 @@ class RateLimited(Exception):
     def __init__(self, signal):
         super().__init__("provider returned a rate-limit response")
         self.signal = signal
-
-
-ACTIVE_TURN_STATUS = re.compile(
-    r"^(?:[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*)?"
-    r"working(?:\.{1,3}|…)?(?:\s+\(esc to interrupt\))?$",
-    re.IGNORECASE,
-)
 
 
 def _cli_command_name(argv):
@@ -709,9 +703,7 @@ class NativeTransport:
 
     @staticmethod
     def has_active_turn_status(output):
-        clean = ANSI_ESCAPE.sub("", output)
-        lines = [line.strip() for line in clean.splitlines() if line.strip()]
-        return bool(lines and ACTIVE_TURN_STATUS.fullmatch(lines[-1]))
+        return has_active_turn_status(output)
 
     @classmethod
     def prompt_landed(cls, job, state, output):

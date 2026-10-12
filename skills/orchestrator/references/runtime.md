@@ -152,13 +152,14 @@ direct start:
 
 ```sh
 python3 scripts/local-lane.py preflight
-python3 scripts/herdr-admission.py acquire --provider llama-local \
-  --model qwen3.8-27b-uncensored --lease-id TASK_ATTEMPT --run-id TASK_ID
 ```
 
-Continue only when acquisition returns `"admitted":true`. In the owned
-worktree, create and move a pane, then use the shared local-lane launcher with
-a bounded task class, four false scope declarations, and a brief file:
+The `start` command acquires the shared one-slot `llama-local` lease itself and
+refuses to launch while that slot is held. It keeps the lease until the worker
+reaches a verified terminal state, then releases it on success or failure. In
+the owned worktree, create and move a pane, then use the shared local-lane
+launcher with a bounded task class, four false scope declarations, and a brief
+file:
 
 ```sh
 herdr pane split --current --direction right --cwd <worktree> --no-focus
@@ -170,18 +171,21 @@ python3 scripts/local-lane.py start --pane <moved-pane-id> --name <unique-name> 
 ```
 
 The launcher reruns service/GPU preflight, checks the shared class/scope gate,
-replaces the pane shell with an `env -i` shell, starts Pi, and submits the brief.
+acquires admission, replaces the pane shell with an `env -i` shell, starts Pi,
+submits the brief through the verified submit helper, and waits for the worker
+to finish before releasing admission.
 Its environment is limited to `HOME`, `PATH`, `TERM`, `LANG`, Herdr's pane
 integration variables, and Pi's agent/session directory variables when set; it
 does not pass API keys or tokens. Herdr `agent start` starts its canonical
 executable in the existing pane shell and passes arguments after `--` to that
 executable; it does not use the launcher's environment as the worker
 environment. See Herdr's [agent automation](https://herdr.dev/docs/agent-automation/)
-and [CLI reference](https://herdr.dev/docs/cli-reference/). Verify the owned
-pane and visible active-turn status before treating the prompt as delivered.
-Keep the lease while the worker is active, then run the declared independent
-validator against its output directory and release the lease when the worker
-is terminal. This route does not enter the jail. Pi uses its normal
+and [CLI reference](https://herdr.dev/docs/cli-reference/). The launcher
+verifies the owned pane and visible active-turn status, waits for the worker to
+reach `done`, then releases admission. Run the declared independent validator
+against its output directory after the launcher returns. A blocked or
+unverified launch releases admission as the launcher exits; inspect the worker
+before retrying. This route does not enter the jail. Pi uses its normal
 `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), preserving configured MCP
 servers and extensions. The local server pins `reasoning_effort=medium`; Pi's
 local model metadata does not advertise an effort list, so this route omits

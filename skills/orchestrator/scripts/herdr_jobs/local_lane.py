@@ -8,9 +8,12 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 
 from .records import (JobError, encoded, ensure_local_lane_admitted, load_json,
                       parse_json, policy_record, text)
+from .prompt import PromptNotStarted, has_active_turn_status, submit_and_verify
 from .security import contains_secret_material
 
 
@@ -18,6 +21,14 @@ POLICY_PATH = Path(__file__).resolve().parents[2] / "launch-policy.json"
 LOCAL_ENV_KEYS = ("HOME", "PATH", "TERM", "LANG")
 PI_ENV_KEYS = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR")
 HERDR_ENV_KEYS = ("HERDR_SESSION", "HERDR_BIN_PATH", "HERDR_SOCKET_PATH")
+
+
+class _PromptDeadline:
+    def __init__(self, seconds):
+        self.end = time.monotonic() + seconds
+
+    def remaining(self):
+        return max(0, self.end - time.monotonic())
 
 
 def _run_readonly(argv):
@@ -94,7 +105,8 @@ def sanitize_pane_environment(pane_id, environment, *, herdr="herdr", run_comman
 
 
 def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane, name, prompt,
-                            source_env=None, herdr="herdr", run_command=_run_host_command):
+                            source_env=None, herdr="herdr", run_command=_run_host_command,
+                            policy=None, admission_service=None):
     """Validate and start the explicitly scoped direct Herdr local-lane route."""
     task_class, local_lane_scope = ensure_local_lane_admitted(
         local_config, task_class, local_lane_scope, "direct")
@@ -109,6 +121,35 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
         raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
 
     environment = local_lane_environment(source_env, pane_id)
+    policy = policy or policy_record(load_json(POLICY_PATH))
+    from .admission_service import AdmissionService
+
+    admission_service = admission_service or AdmissionService()
+    lease_id = "direct-local-" + uuid.uuid4().hex
+    admission_job = {
+        "provider": local_config["provider"],
+        "admission_model": local_config["model"],
+        "admission_lease_id": lease_id,
+    }
+    admission = admission_service.acquire(
+        admission_job,
+        admission_service.provider_cap(policy, local_config["provider"]),
+        lease_id,
+    )
+    if not admission["admitted"]:
+        raise JobError("unavailable_capability",
+                       f"direct local-lane admission denied: {admission['reason']}")
+    try:
+        return _launch_direct_local_lane(
+            local_config, task_class, pane_id, agent_name, worker_prompt, environment,
+            herdr, run_command,
+        )
+    finally:
+        admission_service.release(admission_job)
+
+
+def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, worker_prompt,
+                              environment, herdr, run_command):
     sanitize_pane_environment(pane_id, environment, herdr=herdr, run_command=run_command)
     start = [herdr, "agent", "start", agent_name, "--kind", "pi", "--pane", pane_id,
              "--", "--provider", local_config["provider"], "--model", local_config["model"], "--approve"]
@@ -116,12 +157,62 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
     if code:
         raise JobError("unavailable_capability", "Herdr could not verify the direct local-lane Pi start")
     _require_herdr_result(output, "direct local-lane start")
-    prompt_argv = [herdr, "agent", "prompt", agent_name, worker_prompt,
-                   "--wait", "--timeout", "30000"]
-    code, output, _ = run_command(prompt_argv, env=environment)
-    if code:
-        raise JobError("unavailable_capability", "Herdr did not confirm delivery of the direct local-lane prompt")
-    _require_herdr_result(output, "direct local-lane prompt")
+
+    def observe():
+        code, output, _ = run_command([herdr, "agent", "get", pane_id], env=environment)
+        if code:
+            return {"state": "unknown", "identity_verified": False, "prompt_verified": False}
+        try:
+            response = parse_json(output)
+            agent = response.get("result", {}).get("agent")
+        except (AttributeError, JobError):
+            agent = None
+        identity_verified = (
+            isinstance(agent, dict)
+            and agent.get("pane_id") == pane_id
+            and agent.get("agent") == "pi"
+            and agent.get("name") == agent_name
+        )
+        if not identity_verified:
+            return {"state": "unknown", "identity_verified": False, "prompt_verified": False,
+                    "launch_issue": "observed direct local-lane worker identity differs"}
+        state = agent.get("agent_status")
+        observation = {"state": state if state in ("idle", "done", "working", "blocked") else "unknown",
+                       "identity_verified": True, "prompt_verified": False}
+        if state == "blocked":
+            observation["launch_issue"] = "direct local-lane worker is blocked; inspect the pane"
+        elif state == "working":
+            code, terminal, _ = run_command([
+                herdr, "pane", "read", pane_id, "--source", "visible", "--lines", "200",
+            ], env=environment)
+            observation["prompt_verified"] = code == 0 and has_active_turn_status(terminal)
+        return observation
+
+    def submit():
+        code, output, _ = run_command(
+            [herdr, "agent", "prompt", agent_name, worker_prompt], env=environment)
+        if code:
+            raise PromptNotStarted("Herdr did not confirm delivery of the direct local-lane prompt")
+        _require_herdr_result(output, "direct local-lane prompt")
+
+    try:
+        submit_and_verify(submit, observe, deadline=_PromptDeadline(30))
+    except PromptNotStarted as error:
+        raise JobError("unavailable_capability", str(error)) from error
+    while True:
+        observation = observe()
+        if observation.get("identity_verified") is not True:
+            raise JobError("unavailable_capability",
+                           "direct local-lane worker identity could not be verified; inspect before retrying")
+        if observation.get("state") == "done":
+            break
+        if observation.get("state") == "blocked":
+            raise JobError("unavailable_capability",
+                           observation.get("launch_issue") or "direct local-lane worker is blocked")
+        if observation.get("state") != "working":
+            raise JobError("unavailable_capability",
+                           "direct local-lane worker did not reach a verified terminal state; inspect before retrying")
+        time.sleep(0.2)
     return {"outcome": "ready", "task_class": task_class, "pane_id": pane_id, "agent_name": agent_name}
 
 
@@ -182,7 +273,8 @@ def main(argv=None):
             prompt = args.prompt_file.read_text(encoding="utf-8")
             result = start_direct_local_lane(config, task_class=args.task_class,
                                              local_lane_scope=scope, pane=args.pane,
-                                             name=args.name, prompt=prompt, herdr=args.herdr)
+                                             name=args.name, prompt=prompt, herdr=args.herdr,
+                                             policy=policy)
             print(encoded(result).decode())
             return 0
         result = check_preconditions(config)
