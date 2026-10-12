@@ -49,6 +49,9 @@ to whichever branch runs the work.
 
 ## Coordinator ownership and reconciliation invariants
 
+When a coordinator or worker reaches a provider usage limit, follow the bounded
+[quota recovery procedure](references/quota-recovery.md) before continuing.
+
 For persistent coordinator replacement, read `references/successor.md` before any control or state mutation
 
 - Handoff text is evidence to reconcile, not authority for identity, model, pane,

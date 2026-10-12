@@ -331,7 +331,7 @@ class LifecycleTest(unittest.TestCase):
         current_attempt = "b" * 32
         request_job = job()
         request_job["attempt_id"] = current_attempt
-        request_job["history"] = [{"action": "rate_limit_retry", "attempt_id": old_attempt}]
+        request_job["history"] = [{"action": "start", "attempt_id": old_attempt}]
         with tempfile.TemporaryDirectory() as directory:
             now = [1000.0]
             store = StateStore(Path(directory) / "state.json")
@@ -342,6 +342,73 @@ class LifecycleTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fresh attempt ID"):
                 run(store=store, effect_port=port, clock=lambda: now[0],
                     attempt_id_factory=lambda: old_attempt)
+
+    def test_legacy_retry_history_consumes_reducer_recovery_budget(self):
+        class AlwaysLimitedPort:
+            def __init__(self):
+                self.starts = []
+
+            def execute(self, effect):
+                if effect.action == "split":
+                    return {"pane_id": "pane-1"}
+                if effect.action == "move":
+                    return {"pane_id": "pane-2", "workspace_id": "workspace-1"}
+                if effect.action == "start":
+                    self.starts.append(effect.attempt_id)
+                    raise RateLimited({"retry_after_seconds": 60, "source": "retry-after"})
+                return {}
+
+        request_job = job()
+        request_job["history"] = [{"action": "rate_limit_retry", "attempt_id": "c" * 32}]
+        with tempfile.TemporaryDirectory() as directory:
+            now = [1000.0]
+            store = StateStore(Path(directory) / "state.json")
+            port = AlwaysLimitedPort()
+            first = run({"request_id": "legacy-recovery-budget", "jobs": [request_job]},
+                        store=store, effect_port=port, clock=lambda: now[0])
+            now[0] = 1060.0
+            resumed = run(store=store, effect_port=port, clock=lambda: now[0],
+                          attempt_id_factory=lambda: "b" * 32)
+
+        self.assertEqual(port.starts, ["a" * 32])
+        self.assertEqual(first.state["jobs"][0]["rate_limit_recoveries"], 1)
+        self.assertEqual(resumed["batch_state"], "partial")
+        self.assertIn("single bounded recovery", resumed.state["jobs"][0]["issue"])
+
+    def test_reducer_stops_after_its_single_rate_limit_recovery(self):
+        class AlwaysLimitedPort:
+            def __init__(self):
+                self.starts = []
+
+            def execute(self, effect):
+                if effect.action == "split":
+                    return {"pane_id": "pane-1"}
+                if effect.action == "move":
+                    return {"pane_id": "pane-2", "workspace_id": "workspace-1"}
+                if effect.action == "start":
+                    self.starts.append(effect.attempt_id)
+                    raise RateLimited({"retry_after_seconds": 60, "source": "retry-after"})
+                return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            now = [1000.0]
+            store = StateStore(Path(directory) / "state.json")
+            port = AlwaysLimitedPort()
+            request = {"request_id": "bounded-reducer-recovery", "jobs": [job()]}
+            run(request, store=store, effect_port=port, clock=lambda: now[0])
+            now[0] = 1060.0
+            recovered = run(store=store, effect_port=port, clock=lambda: now[0],
+                            attempt_id_factory=lambda: "b" * 32)
+            now[0] = 1120.0
+            final = run(store=store, effect_port=port, clock=lambda: now[0],
+                        attempt_id_factory=lambda: "c" * 32)
+
+        self.assertEqual(port.starts, ["a" * 32, "b" * 32])
+        self.assertEqual(recovered.state["jobs"][0]["rate_limit_recoveries"], 1)
+        self.assertTrue(recovered.state["jobs"][0]["rate_limit_exhausted"])
+        self.assertEqual(final["batch_state"], "partial")
+        self.assertEqual(len([item for item in final.state["jobs"][0]["history"]
+                             if item["action"] == "rate_limit_retry"]), 1)
 
     def test_blocked_startup_returns_without_reobserving_or_claiming_unknown_effect(self):
         class BlockedPort:

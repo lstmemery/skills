@@ -102,14 +102,20 @@ class FakeHost:
             output.mkdir(parents=True, exist_ok=True)
             (output / "rate-limit-evidence.md").write_text("Provider rejected this attempt with HTTP 429.\n")
             raise RateLimited({"retry_after_seconds": 0.2, "source": "retry-after"})
+        if action in ("prompt", "jail") and mode == "rate_limited_always":
+            self.rate_limited_attempts.add(job["attempt_id"])
+            output = Path(job["host_output"])
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "rate-limit-evidence.md").write_text("Provider rejected this attempt with HTTP 429.\n")
         pi_retry_start = (action == "start" and job["spec"]["route"]["runtime"] == "pi"
                           and job.get("retry_profile") is not None)
         if (action in ("prompt", "jail")
                 or (codex_start and mode not in ("failed_start_diagnostic", "blocked"))
                 or pi_retry_start):
             (self.path.parent / f"prompt-{job['spec']['job_id']}.txt").write_text(prompt)
-            rate_limited_first_attempt = (mode in ("rate_limited_once", "rate_limited_without_metadata_once")
-                                          and job["spec"]["job_id"] not in self.rate_limited_jobs)
+            rate_limited_first_attempt = (mode == "rate_limited_always" or
+                                          (mode in ("rate_limited_once", "rate_limited_without_metadata_once")
+                                           and job["spec"]["job_id"] not in self.rate_limited_jobs))
             if rate_limited_first_attempt:
                 self.rate_limited_jobs.add(job["spec"]["job_id"])
                 self.rate_limited_attempts.add(job["attempt_id"])
@@ -159,7 +165,7 @@ class FakeHost:
             raise JobError("unavailable_capability", cli_diagnostic_message(diagnostic))
         if mode == "rate_limited_start_once" and job["attempt_id"] in self.rate_limited_attempts:
             raise JobError("unavailable_capability", "worker was not registered after provider rejection")
-        if mode in ("rate_limited_once", "rate_limited_without_metadata_once") and job["attempt_id"] in self.rate_limited_attempts:
+        if mode in ("rate_limited_once", "rate_limited_without_metadata_once", "rate_limited_always") and job["attempt_id"] in self.rate_limited_attempts:
             delay = None if mode == "rate_limited_without_metadata_once" else 0.2
             source = None if delay is None else "retry-after"
             return {"state": "done", "identity_verified": True,

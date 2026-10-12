@@ -152,7 +152,23 @@ available, the policy's bounded 60-second default applies. A new acquisition
 for that provider/model remains denied until the recorded time expires. The
 CLI reads provider caps from the adjacent `launch-policy.json`; set an explicit
 `provider` in a managed job override when its model ID does not identify the
-provider.
+provider. For a direct/unmanaged worker, also persist a continuation record in
+the task directory so the existing coordinator watcher can surface the due
+reset:
+
+```sh
+python3 /path/to/orchestrator/scripts/herdr-admission.py rate-limit \
+  --provider codex --model gpt-6-luna --retry-after 30 \
+  --continuation-record "$RUN_DIR/tasks/$TASK_ID/quota-continuation.json" \
+  --task-id "$TASK_ID" --pane-id "$PANE_ID" --attempt-id "$ATTEMPT_ID"
+```
+
+Keep `durable_watch.py` armed for `tasks/$TASK_ID`. When its reconcile event
+reports `worker-continuation-due`, the coordinator verifies the task, pane,
+attempt, current worker identity, and unused continuation budget, records the
+continuation in `STATE.md`, and queues the original brief on that exact pane.
+The watcher records and notifies the due event; it does not start or prompt a
+worker. See [quota recovery](quota-recovery.md) for the full sequence.
 
 ## Herdr launch
 

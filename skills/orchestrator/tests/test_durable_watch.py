@@ -83,6 +83,23 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(second["new_events"], [])
         self.assertEqual([event["task_dir"] for event in self.events()], ["task-a"])
 
+    def test_reconcile_announces_direct_continuation_only_after_reset_and_once(self):
+        record = {"task": "task-a", "pane": "pane-42", "reset_at": 1001.0, "attempt": "attempt-7"}
+        (self.task_a / "quota-continuation.json").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        with mock.patch.object(durable_watch.time, "time", return_value=1000.0):
+            waiting = durable_watch.reconcile_once(self.run_dir)
+        with mock.patch.object(durable_watch.time, "time", return_value=1001.0):
+            due = durable_watch.reconcile_once(self.run_dir)
+            repeated = durable_watch.reconcile_once(self.run_dir)
+
+        self.assertEqual(waiting["new_events"], [])
+        self.assertEqual(len(due["new_events"]), 1)
+        self.assertEqual(due["new_events"][0]["event"], "worker-continuation-due")
+        self.assertEqual(due["new_events"][0]["pane"], "pane-42")
+        self.assertEqual(due["new_events"][0]["attempt"], "attempt-7")
+        self.assertEqual(repeated["new_events"], [])
+
     def test_changed_result_is_a_distinct_observation(self):
         result = self.task_a / "result.json"
         result.write_text('{"outcome":"ready"}\n', encoding="utf-8")

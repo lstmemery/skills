@@ -41,6 +41,7 @@
         "pane-old"
       ],
       "provider": "codex",
+      "rate_limit_recoveries": 0,
       "rate_limit_seen": false,
       "rate_limit_until": null,
       "resolved_model": null,
