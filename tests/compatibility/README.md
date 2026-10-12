@@ -1,9 +1,10 @@
 # Durable format compatibility fixtures
 
-Run from the combined repository tree:
+Run from the skills repository worktree. Point the fixture consumers at the paired agents worktree:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s skills/tests/compatibility -p 'test*.py' -v
+COMPAT_AGENTS_ROOT=/path/to/agents-worktree \
+  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p 'test*.py' -v
 ```
 
 These fixtures pin the behavior supplied for ticket #1240. Production code is
@@ -27,10 +28,14 @@ JSON objects and exact marker strings, including final newlines. Existing fake
 SMTP/IMAP classes and the complete meal-plan builder are reused from their
 bundled test modules.
 
-The corpus needs the supplied combined tree (`skills/` plus `skills-local/`).
-Within the skills repository, tests import it from `tests/compatibility`.
-Keep that directory with consumer tests when running them in another checkout;
-there is no new production import or deployment dependency.
+The corpus spans two repositories. `COMPAT_AGENTS_ROOT` selects the paired
+agents checkout containing `skills-local/`; the orchestrator and capture
+consumers load from the current skills worktree. When both repositories are
+available in one combined checkout, the agents root is discovered automatically.
+The agents repository's receipt-recovery tests use the shared builder; set
+`COMPAT_SKILLS_ROOT` to this skills checkout when the repositories are in
+separate worktrees. Keep the fixture directory with consumer tests when running
+them elsewhere; there is no new production import or deployment dependency.
 
 Capture fixtures came from a fictional two-commit history with fixed author,
 committer and dates. Only the repository location and command arguments naming
@@ -46,10 +51,9 @@ against the expected dates: Tuesday all-day storage stays Tuesday, DST trips
 cover Saturday/Sunday, and a Wednesday-midnight retreat ends on Tuesday. The
 historical 2025 transitions avoid assuming future timezone law. Review and
 marker fixtures are literal examples of the supplied formats. State fixtures
-were constructed from the supplied engine schema and have **not** been executed
-against a complete engine: this input omits `herdr_jobs.admission` and other
-engine dependencies. The two state tests explicitly skip for those missing
-modules. A passing run with those skips does not establish full #1240 acceptance.
+are loaded by the real engine and pin result, migration, checkpoint, and
+refusal behavior. Missing engine dependencies fail the tests instead of
+producing skips.
 
 Do not regenerate goldens during tests. When an intentional protocol change is
 approved, retain the old reader fixture, add a separately named version, update

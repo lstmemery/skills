@@ -6,12 +6,14 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compatibility.builders import ROOT, golden, load_module, review_bundle, write_json
+from compatibility.builders import SKILLS_ROOT, golden, load_module, review_bundle, write_json
 
-sys.path.insert(0, str(ROOT / "skills/skills/orchestrator/scripts"))
+sys.path.insert(0, str(SKILLS_ROOT / "skills/orchestrator/scripts"))
 from herdr_jobs import records, review_dispositions
 
-PREFLIGHT = load_module("compat_preflight", "skills/skills/orchestrator/scripts/integration-preflight.py")
+PREFLIGHT = load_module(
+    "compat_preflight", SKILLS_ROOT / "skills/orchestrator/scripts/integration-preflight.py"
+)
 
 
 class ReviewCompatibilityTests(unittest.TestCase):

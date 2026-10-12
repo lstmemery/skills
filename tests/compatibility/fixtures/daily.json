@@ -2,31 +2,43 @@
   "day": "2026-10-02",
   "task_id": "compat-task-1",
   "config": {
+    "schema": "daily-brief-route/v1",
     "executor": "codex-cli",
     "model_provider": "openai",
     "model": "gpt-6-luna",
     "reasoning_effort": "medium",
-    "primary_route": [
-      "codex",
-      "exec",
-      "--model",
-      "{model}",
-      "-c",
-      "model_provider=\"{model_provider}\"",
-      "-c",
-      "model_reasoning_effort=\"{reasoning_effort}\""
-    ],
-    "fallback_route": [
-      "orchestrator",
-      "launch",
-      "shell",
-      "--json",
-      "--compact"
-    ]
+    "labels": {
+      "primary": "Codex CLI",
+      "fallback": "Orchestrator shell wrapping Codex CLI"
+    },
+    "routes": {
+      "primary": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--approve-for-me",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "--model",
+        "{model}",
+        "-c",
+        "model_provider=\"{model_provider}\"",
+        "-c",
+        "model_reasoning_effort=\"{reasoning_effort}\""
+      ],
+      "fallback": [
+        "orchestrator",
+        "launch",
+        "shell",
+        "--json",
+        "--compact"
+      ]
+    }
   },
   "routes": {
     "primary": {
-      "argv": "codex\nexec\n--model\ngpt-6-luna\n-c\nmodel_provider=\"openai\"\n-c\nmodel_reasoning_effort=\"medium\"\n",
+      "argv": "codex\nexec\n--skip-git-repo-check\n--ephemeral\n--approve-for-me\n-c\nsandbox_workspace_write.network_access=true\n--model\ngpt-6-luna\n-c\nmodel_provider=\"openai\"\n-c\nmodel_reasoning_effort=\"medium\"\n",
       "label": "Codex CLI; executor=codex-cli; model_provider=openai; model=gpt-6-luna; reasoning_effort=medium\n",
       "metadata": "executor=codex-cli\nmodel_provider=openai\nmodel=gpt-6-luna\nreasoning_effort=medium\n"
     },

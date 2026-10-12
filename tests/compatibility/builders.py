@@ -15,7 +15,25 @@ import sys
 
 
 FIXTURES = Path(__file__).with_name("fixtures")
-ROOT = Path(__file__).resolve().parents[3]
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _agents_root():
+    configured = os.environ.get("COMPAT_AGENTS_ROOT")
+    if configured:
+        root = Path(configured).expanduser().resolve()
+        if not (root / "skills-local").is_dir():
+            raise RuntimeError(f"COMPAT_AGENTS_ROOT has no skills-local directory: {root}")
+        return root
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "skills-local").is_dir():
+            return parent
+    raise RuntimeError(
+        "compatibility tests require the paired agents repository; set COMPAT_AGENTS_ROOT"
+    )
+
+
+ROOT = _agents_root()
 
 
 def golden(name):
@@ -23,7 +41,8 @@ def golden(name):
 
 
 def load_module(name, relative):
-    spec = importlib.util.spec_from_file_location(name, ROOT / relative)
+    path = Path(relative)
+    spec = importlib.util.spec_from_file_location(name, path if path.is_absolute() else ROOT / path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -147,9 +166,10 @@ class DailyArchive:
         source = ROOT / "skills-local" / self.skill.name
         for name in ("daily-run.sh", workflow + "_daily_brief.py"):
             shutil.copy2(source / name, self.skill / name)
-        common = self.root / "skills-local/ml-daily-brief/runner-common.sh"
-        common.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / "skills-local/ml-daily-brief/runner-common.sh", common)
+        common_dir = self.root / "skills-local/daily-brief-common"
+        common_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("runner-common.sh", "route_config.py"):
+            shutil.copy2(ROOT / "skills-local/daily-brief-common" / name, common_dir / name)
         write_json(self.skill / "runtime-config.json", self.fixture["config"])
         for name in ("codex", "orchestrator", "date"):
             shutil.copy2(FIXTURES / "daily-process.py", self.bin / name)

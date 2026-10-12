@@ -12,21 +12,11 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compatibility.builders import ROOT, golden, write_json
+from compatibility.builders import SKILLS_ROOT, golden, write_json
 
-sys.path.insert(0, str(ROOT / "skills/skills/orchestrator/scripts"))
+sys.path.insert(0, str(SKILLS_ROOT / "skills/orchestrator/scripts"))
 from herdr_jobs import records
-
-try:
-    from herdr_jobs.engine import Engine
-except ModuleNotFoundError as error:
-    if error.name not in {"herdr_jobs.admission", "herdr_jobs.retry", "herdr_jobs.transport",
-                          "herdr_jobs.model_ladder", "herdr_jobs.worker_records"}:
-        raise
-    Engine = None
-    ENGINE_UNAVAILABLE = "source snapshot omits " + error.name
-else:
-    ENGINE_UNAVAILABLE = ""
+from herdr_jobs.engine import Engine
 
 
 class NoExternalEffects:
@@ -34,7 +24,6 @@ class NoExternalEffects:
         return {"active_count": 0}
 
 
-@unittest.skipIf(Engine is None, ENGINE_UNAVAILABLE)
 class StateCompatibilityTests(unittest.TestCase):
     def test_current_and_legacy_v1_checkpoints_resume(self):
         fixture = golden("state-v1")

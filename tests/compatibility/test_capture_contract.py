@@ -9,10 +9,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compatibility.builders import ROOT, capture_bundle, git_history, golden, write_json
+from compatibility.builders import SKILLS_ROOT, capture_bundle, git_history, golden, write_json
 
 
-CLI = ROOT / "skills/skills/code-review/scripts/capture.py"
+CLI = SKILLS_ROOT / "skills/code-review/scripts/capture.py"
 
 
 def invoke(*args):
