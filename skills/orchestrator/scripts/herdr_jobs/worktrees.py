@@ -7,9 +7,12 @@ import subprocess
 from .records import JobError, is_commit_id, parse_json, repository_worktree_record
 
 
-TREEHOUSE_GET_FIELDS = {"path", "lease_id", "lease_holder", "name", "leased_at"}
+TREEHOUSE_GET_FIELDS = {"path", "lease_id", "lease_holder", "name", "leased_at",
+                       "branch", "status", "flavor", "detached", "recovery_reason",
+                       "processes"}
 TREEHOUSE_STATUS_FIELDS = {"name", "path", "status", "flavor", "lease_id", "lease_holder",
                            "leased_at", "processes"}
+TREEHOUSE_STATUS_OPTIONAL_FIELDS = {"branch", "detached", "recovery_reason"}
 
 
 def unavailable(message):
@@ -20,6 +23,21 @@ def _string(value, label):
     if not isinstance(value, str) or not value.strip() or "\0" in value or len(value) > 4096:
         unavailable(f"{label} is missing or invalid")
     return value
+
+
+def _validate_slot_metadata(value, label):
+    for field in ("branch", "recovery_reason"):
+        if field in value and (not isinstance(value[field], str) or "\0" in value[field]
+                               or len(value[field]) > 4096):
+            unavailable(f"{label} {field} is invalid")
+    if "detached" in value and not isinstance(value["detached"], bool):
+        unavailable(f"{label} detached state is invalid")
+    if "status" in value:
+        _string(value["status"], f"{label} status")
+    if "flavor" in value:
+        _string(value["flavor"], f"{label} flavor")
+    if "processes" in value and not isinstance(value["processes"], list):
+        unavailable(f"{label} process list is invalid")
 
 
 def parse_allocation(output, expected_holder):
@@ -33,6 +51,7 @@ def parse_allocation(output, expected_holder):
     if (not isinstance(value, dict) or set(value) - TREEHOUSE_GET_FIELDS
             or not {"path", "lease_id", "lease_holder"} <= value.keys()):
         unavailable("treehouse get returned an unrecognized lease record")
+    _validate_slot_metadata(value, "treehouse lease")
     path = _string(value["path"], "treehouse lease path")
     if not Path(path).is_absolute():
         unavailable("treehouse lease path must be absolute")
@@ -82,8 +101,11 @@ def _status_entry(output, path, lease_id, holder):
         unavailable("treehouse status returned an unrecognized pool response")
     matches = []
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) != TREEHOUSE_STATUS_FIELDS:
+        if (not isinstance(entry, dict)
+                or set(entry) - (TREEHOUSE_STATUS_FIELDS | TREEHOUSE_STATUS_OPTIONAL_FIELDS)
+                or not TREEHOUSE_STATUS_FIELDS <= entry.keys()):
             unavailable("treehouse status returned an unrecognized pool entry")
+        _validate_slot_metadata(entry, "treehouse status")
         for key in ("name", "path", "status", "flavor"):
             _string(entry[key], f"treehouse status {key}")
         for key in ("lease_id", "lease_holder"):

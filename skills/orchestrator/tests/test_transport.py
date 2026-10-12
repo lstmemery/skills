@@ -316,6 +316,12 @@ class TransportTest(unittest.TestCase):
 
     def test_prompt_command_rate_limit_is_a_known_recoverable_result(self):
         fake = FakeHerdr(prompt_error="HTTP/1.1 429 Too Many Requests\nRetry-After: 20")
+        self.agent.update(agent_status="idle", pane_id="moved:1", agent="codex", name="c9-fixture")
+        self.job["pending_effect"] = {"action": "prompt"}
+        self.adapter.raw = lambda argv: (
+            json.dumps({"result": {"type": "agent_info", "agent": self.agent}}).encode()
+            if argv[:3] == ["herdr", "agent", "get"] else self.pane_output.encode()
+        )
         with patch("herdr_jobs.transport.command", fake.command):
             with self.assertRaises(RateLimited) as caught:
                 self.adapter.effect("prompt", self.job, "Assigned work")
@@ -329,9 +335,50 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(moved, {"pane_id": "moved:1", "workspace_id": "workspace:1"})
         prompt = "Literal 'quotes' and $(echo nope)\nNext line"
         fake = FakeHerdr()
+        states = iter(["idle", "working"])
+        self.agent.update(agent_status="idle", pane_id="moved:1", agent="codex", name="c9-fixture")
+        self.job["pending_effect"] = {"action": "prompt"}
+        self.pane_output = "✳ Working…"
+
+        def observation_raw(argv):
+            if argv[:3] == ["herdr", "agent", "get"]:
+                self.agent["agent_status"] = next(states)
+                return json.dumps({"result": {"type": "agent_info", "agent": self.agent}}).encode()
+            if argv[:3] == ["herdr", "pane", "read"]:
+                return self.pane_output.encode()
+            return b"{}"
+
+        self.adapter.raw = observation_raw
         with patch("herdr_jobs.transport.command", fake.command):
             self.adapter.effect("prompt", self.job, prompt)
         self.assertEqual(fake.calls[-1], ["herdr", "agent", "prompt", "c9-fixture", prompt])
+
+    def test_selectable_pane_text_transport_uses_submit_and_verify(self):
+        fake = FakeHerdr()
+        states = iter(["idle", "working"])
+        self.agent.update(agent_status="idle", pane_id="moved:1", agent="codex", name="c9-fixture")
+        self.spec["prompt_transport"] = "pane_text"
+        self.job["pending_effect"] = {"action": "prompt"}
+        self.pane_output = "✳ Working…"
+
+        def observation_raw(argv):
+            if argv[:3] == ["herdr", "agent", "get"]:
+                self.agent["agent_status"] = next(states)
+                return json.dumps({"result": {"type": "agent_info", "agent": self.agent}}).encode()
+            if argv[:3] == ["herdr", "pane", "read"]:
+                return self.pane_output.encode()
+            return b"{}"
+
+        self.adapter.raw = observation_raw
+        prompt = "literal $(text)"
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("prompt", self.job, prompt)
+
+        self.assertEqual(result, {"prompt_submitted": True})
+        self.assertEqual(fake.calls, [
+            ["herdr", "pane", "send-text", "moved:1", prompt],
+            ["herdr", "pane", "send-keys", "moved:1", "enter"],
+        ])
 
     def test_codex_start_opens_a_fresh_session_with_prompt_as_native_argv(self):
         fake = FakeHerdr(start_code=1)

@@ -22,6 +22,7 @@ from .model_ladder import billing_pool, provider_arguments, validate_provider_ha
 from .security import ANSI_ESCAPE, contains_secret_material, safe_cli_text as _safe_cli_text
 from .local_lane import (check_preconditions as check_local_lane_preconditions,
                          local_lane_environment, sanitize_pane_environment)
+from .prompt import PromptNotStarted, pane_text_submit, submit_and_verify
 
 
 class BudgetExpired(Exception):
@@ -497,7 +498,11 @@ class NativeTransport:
                 if runtime_args:
                     argv += ["--", *runtime_args]
         elif action == "prompt":
-            argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
+            prompt_transport = spec.get("prompt_transport", "agent_prompt")
+            if prompt_transport == "pane_text":
+                argv = None
+            else:
+                argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
         elif action == "jail":
             timeout_ms = spec.get("jail_stream_idle_timeout_ms", 300000)
             launch = ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check", "-c",
@@ -538,6 +543,28 @@ class NativeTransport:
                 return {"prompt_submitted": True, "start_diagnostic": start_diagnostic}
             raise EffectUnknown("Codex prompt delivery is unverified; inspect the owned pane before retrying",
                                 start_diagnostic=start_diagnostic)
+        if action == "prompt":
+            def submit_prompt():
+                if spec.get("prompt_transport", "agent_prompt") == "pane_text":
+                    pane_text_submit(command, self.herdr, pane, prompt, self.deadline)
+                    return
+                code, output, error_output = command(argv, self.deadline)
+                rate_limit = rate_limit_from_output(
+                    (error_output + b"\n" + output).decode("utf-8", "replace"),
+                    source="harness_error", exit_code=code, runtime=spec["route"]["runtime"])
+                if rate_limit is not None:
+                    raise RateLimited(rate_limit)
+                if code:
+                    raise PromptNotStarted(
+                        f"{Path(argv[0]).name} {argv[1]} exited {code}; inspect the owned pane")
+
+            try:
+                submit_and_verify(submit_prompt, lambda: self.observe(job), deadline=self.deadline)
+                return {"prompt_submitted": True}
+            except RateLimited:
+                raise
+            except (PromptNotStarted, BudgetExpired, JobError, UnicodeError) as error:
+                raise EffectUnknown(str(error) or "prompt start could not be verified; inspect before retrying") from error
         try:
             if action in ("start", "prompt"):
                 if local_environment is None:

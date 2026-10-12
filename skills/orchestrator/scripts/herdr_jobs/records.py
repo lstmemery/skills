@@ -564,7 +564,8 @@ def prepare(manifest_path, policy_path):
                 ["override", "repository_worktree", "worker_result", "task_class",
                 "model_level", "model_fallback", "escalation", "worker_mode", "mode",
                 "protected_paths", "editable_paths", "acceptance_tests", "required_context",
-                "tracker_writes", "local_lane", "independent_validator", "local_lane_scope"], "job")
+                "tracker_writes", "local_lane", "independent_validator", "local_lane_scope",
+                "prompt_transport"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         if job_id in seen:
@@ -591,6 +592,11 @@ def prepare(manifest_path, policy_path):
         task_class = identifier(job["task_class"], "task_class") if "task_class" in job else None
         ensure_task_admitted(job["task_kind"], job_id)
         route = dict(policy["routes"][job["task_kind"]])
+        prompt_transport = job.get("prompt_transport", "agent_prompt")
+        if prompt_transport not in ("agent_prompt", "pane_text"):
+            invalid(f"{job_id}: prompt_transport must be agent_prompt or pane_text")
+        if prompt_transport != "agent_prompt" and route["mode"] != "agent":
+            invalid(f"{job_id}: pane_text prompt transport requires an agent route")
         model = None
         override = job.get("override")
         if override is not None:
@@ -780,6 +786,7 @@ def prepare(manifest_path, policy_path):
             invalid(f"{job_id}: jailed work requires a required_context manifest with tests and fixtures")
         prepared_job = {**job, "task_file": task_path, "cwd": cwd,
                         "task": task, "route": route, "model": model,
+                        "prompt_transport": prompt_transport,
                         "provider": provider, "kind": policy["runtime_kinds"][runtime],
                         "worker_mode": selected_worker_mode,
                         "acceptance_tests": acceptance_tests,
