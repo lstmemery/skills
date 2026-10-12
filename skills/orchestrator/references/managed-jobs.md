@@ -197,8 +197,11 @@ settings alone. Record the proposed settings change, affected run and worker,
 and exact staged command in the run's decision record; wait for authorization
 before applying it or retrying work under a new shared setting.
 
-The coordinator also checkpoints launcher-owned `telemetry.json` (schema
-version 1) in each task output directory. It records the selected route (`lane`,
+The coordinator writes launcher-owned `telemetry.json` (schema version 1) as a
+sidecar in each task output directory. This keeps the schema-v1 `state.json`
+checkpoint and public engine result byte-compatible. Older checkpoints that
+embedded telemetry in job records remain loadable; the next checkpoint moves
+that data to the sidecar. The sidecar records the selected route (`lane`,
 `level`, `choice`, `model`, `effort`, `harness`, `provider`), start/end times,
 continuation count and reasons, quota signals, coordinator grade, and
 independent-validation status. Workers must not edit this file. A local-lane

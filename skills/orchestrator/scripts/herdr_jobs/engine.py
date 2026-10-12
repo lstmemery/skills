@@ -181,13 +181,33 @@ class Engine:
 
     def checkpoint(self):
         self.state["updated_at"] = now()
-        if len(encoded(self.state)) > 67108864:
-            raise JobError("conflict", "checkpoint exceeds 64 MiB; previous durable state retained")
-        save(self.path, self.state)
+        persisted = dict(self.state)
+        persisted["jobs"] = []
+        for job in self.state["jobs"]:
+            persisted_job = {key: value for key, value in job.items() if key != "telemetry"}
+            persisted["jobs"].append(persisted_job)
+        size = len(encoded(persisted))
+        if size > 67108864:
+            raise JobError("conflict", "checkpoint exceeds 64 MiB; previous durable records retained")
+        sidecars = []
         for job in self.state["jobs"]:
             output = Path(job["host_output"])
+            payload_size = len(encoded(job["telemetry"])) + 1
+            size += payload_size
+            if size > 67108864:
+                raise JobError("conflict", "checkpoint and telemetry exceed 64 MiB; previous durable records retained")
+            if output.is_absolute():
+                sidecars.append((output, job["telemetry"]))
+            # Compatibility fixtures use relative sentinel paths. Real engine
+            # output paths are absolute, and relative paths must not be allowed
+            # to create files relative to the coordinator's current directory.
+        # Telemetry is durable, but it is outside the schema-v1 state record.
+        # Write sidecars first so a failed state checkpoint cannot discard a
+        # telemetry update that was already accepted in memory.
+        for output, telemetry in sidecars:
             output.mkdir(parents=True, exist_ok=True, mode=0o700)
-            save(output / "telemetry.json", job["telemetry"])
+            save(output / "telemetry.json", telemetry)
+        save(self.path, persisted)
 
     def validate_preview(self, request):
         self.state = {"request": request}
@@ -259,7 +279,18 @@ class Engine:
             job.setdefault("admission_wait", None)
             job.setdefault("start_diagnostic", None)
             expected_telemetry = task_telemetry(spec, job["resolved_model"], job["provider"])
-            job.setdefault("telemetry", expected_telemetry)
+            embedded_telemetry = job.pop("telemetry", None)
+            telemetry = expected_telemetry if embedded_telemetry is None else embedded_telemetry
+            text(job["host_output"], "stored host_output", 4096)
+            host_output = Path(job["host_output"])
+            if host_output.is_absolute():
+                telemetry_path = host_output / "telemetry.json"
+                if telemetry_path.exists() or telemetry_path.is_symlink():
+                    try:
+                        telemetry = load_json(telemetry_path, 67108864)
+                    except (OSError, JobError) as error:
+                        raise JobError("conflict", "stored task telemetry is unavailable or invalid") from error
+            job["telemetry"] = telemetry
             validate_task_telemetry(job["telemetry"], expected_telemetry["route"])
             if job["start_diagnostic"] is not None:
                 diagnostic = fields(job["start_diagnostic"], ["command", "exit_code", "stdout", "stderr"],
@@ -1122,7 +1153,6 @@ class Engine:
                          "observed": job["observed"], "settled": job["settled"],
                          "pending_effect": job["pending_effect"], "issue": job["issue"],
                          "start_diagnostic": job.get("start_diagnostic"),
-                         "telemetry": job["telemetry"],
                          "workspace_id": job.get("workspace_id"),
                          "workspace_closed": job.get("workspace_closed", False),
                          "worker_disposition": job.get("worker_disposition"),

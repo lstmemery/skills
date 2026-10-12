@@ -287,6 +287,7 @@ class JobsTest(unittest.TestCase):
         state["jobs"][0]["provider"] = "zai"
         state["jobs"][0]["admission_model"] = "glm-5.3-flash"
         state["jobs"][0].pop("telemetry", None)
+        (Path(state["jobs"][0]["host_output"]) / "telemetry.json").unlink(missing_ok=True)
         state["request_digest"] = digest(encoded(state["request"]))
         (self.run / "state.json").write_bytes(encoded(state) + b"\n")
 
@@ -295,6 +296,25 @@ class JobsTest(unittest.TestCase):
 
         self.assertEqual(legacy.state["jobs"][0]["provider"], "zai")
         self.assertEqual(legacy.state["jobs"][0]["resolved_model"], "glm-5.3-flash")
+
+    def test_legacy_embedded_telemetry_migrates_to_a_sidecar(self):
+        self.call()
+        state = self.state()
+        job = state["jobs"][0]
+        output = Path(job["host_output"])
+        telemetry = json.loads((output / "telemetry.json").read_text())
+        job["telemetry"] = telemetry
+        (output / "telemetry.json").unlink()
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        legacy = Engine(self.run, None, None, admission_store=AdmissionStore(self.admission_dir))
+        legacy.load()
+
+        self.assertNotIn("telemetry", legacy.result()["jobs"][0])
+        legacy.checkpoint()
+
+        self.assertNotIn("telemetry", self.state()["jobs"][0])
+        self.assertEqual(json.loads((output / "telemetry.json").read_text()), telemetry)
 
     def test_add_applies_the_run_pinned_retry_override_to_matching_workers(self):
         retry_override = {"pi": {"max_retries": 10, "max_agent_delay_ms": 120000}}
@@ -400,6 +420,8 @@ class JobsTest(unittest.TestCase):
 
         self.assertEqual((code, run_result["batch_state"]), (0, "collected"))
         job = self.state()["jobs"][0]
+        self.assertNotIn("telemetry", job)
+        self.assertNotIn("telemetry", run_result["jobs"][0])
         output = Path(job["host_output"])
         telemetry = json.loads((output / "telemetry.json").read_text())
         self.assertEqual(telemetry["schema_version"], 1)
@@ -490,7 +512,8 @@ class JobsTest(unittest.TestCase):
         outcome = result["finish"]["jobs"]["job0"]
         self.assertIn("exceeded the finish call budget", outcome["issue"])
         self.assertFalse(result["jobs"][0]["workspace_closed"])
-        telemetry = self.state()["jobs"][0]["telemetry"]
+        job = self.state()["jobs"][0]
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
         self.assertEqual(telemetry["independent_validation"]["status"], "failed")
         self.assertEqual(telemetry["independent_validation"]["exit_code"], None)
 
@@ -783,7 +806,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(job["spec"]["repository_worktree"], lease)
         self.assertTrue(job["settled"])
         self.assertTrue(state["jobs"][1]["settled"])
-        telemetry = job["telemetry"]
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
         self.assertEqual(telemetry["continuation_count"], 1)
         self.assertEqual(telemetry["continuation_reasons"][0]["reason"], "rate_limit_backoff")
         self.assertEqual(telemetry["quota_signals"][0]["kind"], "rate_limit")
