@@ -297,17 +297,21 @@ class LocalLaneTest(unittest.TestCase):
         scope = {"network_access": False, "credential_access": False,
                  "credentials_in_environment": False, "destructive_actions": False}
         calls = []
+        primary = tempfile.TemporaryDirectory()
+        self.addCleanup(primary.cleanup)
+        root = Path(primary.name).resolve()
+        (root / ".git").mkdir()
 
         def fake_host(argv, *, env=None):
             calls.append(argv)
             if argv[:3] == ["herdr", "pane", "get"]:
-                return 0, json.dumps({"result": {"pane": {"cwd": "/home/deadhand/agents/skills"}}}).encode(), b""
+                return 0, json.dumps({"result": {"pane": {"cwd": str(root)}}}).encode(), b""
             if argv[0] == "git":
                 if "--show-toplevel" in argv:
-                    return 0, b"/home/deadhand/agents/skills", b""
+                    return 0, str(root).encode(), b""
                 if "--git-common-dir" in argv:
-                    return 0, b"/home/deadhand/agents/skills/.git", b""
-                return 0, b"worktree /home/deadhand/agents/skills\0", b""
+                    return 0, str(root / ".git").encode(), b""
+                return 0, b"worktree " + str(root).encode() + b"\0", b""
             return 0, b'{"result":{}}', b""
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
