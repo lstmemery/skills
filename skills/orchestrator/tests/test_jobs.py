@@ -688,6 +688,25 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertIn("single bounded recovery", job["issue"])
 
+    def test_legacy_retry_history_consumes_recovery_budget_after_upgrade(self):
+        self.call()
+        state = self.state()
+        job = state["jobs"][0]
+        job.pop("rate_limit_recoveries")
+        job["rate_limit_seen"] = True
+        job["rate_limit_until"] = time.time() + 60
+        job["history"].append({"action": "rate_limit_retry", "attempt_id": "a" * 32})
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        engine = Engine(self.run, None, None)
+        engine.load()
+        migrated = engine.state["jobs"][0]
+
+        self.assertEqual(migrated["rate_limit_recoveries"], 1)
+        self.assertFalse(engine.retry_rate_limited_attempt(migrated, "done", receipt_valid=False))
+        self.assertEqual(len([entry for entry in migrated["history"]
+                             if entry["action"] == "rate_limit_retry"]), 1)
+
     def test_repeat_and_resume_do_not_relaunch(self):
         self.call()
         self.call()

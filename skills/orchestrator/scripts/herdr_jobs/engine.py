@@ -198,7 +198,7 @@ class Engine:
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
                     "worker_disposition", "worker_disposition_override", "admission_wait", "start_diagnostic",
-                    "rate_limit_recoveries"],
+                    "rate_limit_recoveries", "rate_limit_exhausted"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -214,7 +214,14 @@ class Engine:
             job.setdefault("admission_acquired", False)
             job.setdefault("rate_limit_seen", False)
             job.setdefault("rate_limit_until", None)
-            job.setdefault("rate_limit_recoveries", 0)
+            job.setdefault("rate_limit_exhausted", False)
+            if "rate_limit_recoveries" not in job:
+                history = job.get("history")
+                job["rate_limit_recoveries"] = int(
+                    isinstance(history, list)
+                    and any(isinstance(entry, dict) and entry.get("action") == "rate_limit_retry"
+                            for entry in history)
+                )
             integer(job["rate_limit_recoveries"], "stored rate-limit recoveries", 0, 1)
             job.setdefault("workspace_id", None)
             job.setdefault("workspace_closed", False)
@@ -233,6 +240,8 @@ class Engine:
                         raise JobError("conflict", f"managed start diagnostic {stream} is invalid")
             if type(job["admission_acquired"]) is not bool or type(job["rate_limit_seen"]) is not bool:
                 raise JobError("conflict", "stored admission flags must be booleans")
+            if type(job["rate_limit_exhausted"]) is not bool:
+                raise JobError("conflict", "stored rate_limit_exhausted must be a boolean")
             if type(job["workspace_closed"]) is not bool:
                 raise JobError("conflict", "stored workspace_closed must be a boolean")
             if job["workspace_id"] is not None:

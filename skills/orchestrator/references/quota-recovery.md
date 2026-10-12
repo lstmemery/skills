@@ -17,15 +17,37 @@ redacted status excerpt and runtime as the evidence.
    `--retry-after` for a relative delay. If a concrete limit has no reset
    metadata, use the existing bounded 60-second default. Keep the attempt and
    output directory; do not create a duplicate attempt merely because its
-   pane is idle.
+   pane is idle. For a direct/unmanaged worker, write a durable continuation
+   record in its canonical task directory when recording the backoff:
+
+   ```sh
+   python3 /path/to/orchestrator/scripts/herdr-admission.py rate-limit \
+     --provider codex --model gpt-6-luna --reset-at '2026-10-11T18:00:00Z' \
+     --continuation-record "$RUN_DIR/tasks/$TASK_ID/quota-continuation.json" \
+     --task-id "$TASK_ID" --pane-id "$PANE_ID" --attempt-id "$ATTEMPT_ID"
+   ```
+
+   The record contains `task`, `pane`, `reset_at` (Unix seconds), and `attempt`.
+   The CLI writes it atomically and refuses a conflicting existing record.
+   Managed jobs persist their reset in the managed run state and do not need
+   this direct-worker record.
 2. Reconcile the exact worker handle and result/artifacts before acting. For a
    direct worker, when the recorded reset has passed, allow **one same-worker
    continuation** on that exact handle, with the original brief, assignment
    revision, worktree, and acceptance criteria. Record continuation count 1
-   and reset evidence in `STATE.md`. If the handle cannot accept a continuation,
-   do not silently relaunch. Managed Herdr jobs cannot continue the same pane;
-   their one allowed recovery is one fresh attempt in a new output directory,
-   only after the recorded reset, with the same pinned route and assignment.
+   and reset evidence in `STATE.md`. Keep the existing `durable_watch.py` armed
+   for `tasks/$TASK_ID`; it reads `quota-continuation.json`, records one
+   `worker-continuation-due` event once `reset_at` passes, and sends the existing
+   optional notification. At that watcher wake, verify the event's task, pane,
+   attempt, current worker identity, and remaining continuation budget before
+   queueing the original brief on the same pane. Record count 1 in `STATE.md`
+   before sending, then archive or remove the pending record. The watcher only
+   reports the due record; it does not restart or prompt the worker. Without
+   the existing watcher/notification, the coordinator must poll the durable
+   record itself. If the handle cannot accept a continuation, do not silently
+   relaunch. Managed Herdr jobs cannot continue the same pane; their one
+   allowed recovery is one fresh attempt in a new output directory, only after
+   the recorded reset, with the same pinned route and assignment.
 3. If the reset is unknown, unavailable, or the primary remains exhausted,
    when a reset cannot be awaited, the only quota fallback is the exact same-level configured model in
    `model-ladder.csv`, with concrete limit evidence and the normal explicit

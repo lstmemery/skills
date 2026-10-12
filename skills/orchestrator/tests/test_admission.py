@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.admission import AdmissionStore, backoff_delay, rate_limit_from_output
+from herdr_jobs.admission_service import AdmissionService
 from support import isolate_admission_state
 
 
@@ -129,6 +131,60 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(claude_status, {"retry_after_seconds": 45.0, "source": "retry-after"})
         self.assertEqual(backoff_delay(default_seconds=60, now=1000.0), (60.0, "default"))
 
+    def test_natural_reset_banners_parse_relative_and_zoned_times(self):
+        relative = rate_limit_from_output(
+            "You've hit your usage limit · resets in 2h 13m",
+            now=1000.0, runtime="claude-code")
+        zoned = rate_limit_from_output(
+            "You've hit your usage limit · try again at 10:00 AM America/Vancouver",
+            now=1791734400.0, runtime="claude-code")
+
+        self.assertEqual(relative, {"retry_after_seconds": 7980.0, "source": "reset"})
+        self.assertEqual(zoned, {"retry_after_seconds": 3600.0, "source": "reset"})
+        self.assertEqual(backoff_delay(reset_at="resets in 2h 13m", now=1000.0),
+                         (7980.0, "reset"))
+
+    def test_natural_reset_clock_without_zone_uses_host_timezone(self):
+        previous = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "America/Vancouver"
+            time.tzset()
+            result = rate_limit_from_output(
+                "You've hit your usage limit · try again at 10:00 AM",
+                now=1791734400.0, runtime="claude-code")
+        finally:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.assertEqual(result, {"retry_after_seconds": 3600.0, "source": "reset"})
+
+    def test_unparseable_banner_reset_keeps_the_bounded_default(self):
+        signal = rate_limit_from_output(
+            "You've hit your usage limit · resets at the next opportunity",
+            now=1000.0, runtime="claude-code")
+
+        self.assertEqual(signal, {"retry_after_seconds": None, "source": None})
+        self.assertEqual(backoff_delay(signal["retry_after_seconds"], default_seconds=60, now=1000.0),
+                         (60.0, "default"))
+
+    def test_natural_reset_is_recorded_in_shared_admission_backoff(self):
+        current_time = 1791734400.0
+        store = AdmissionStore(self.root / "fake-host-admission", clock=lambda: current_time)
+        signal = rate_limit_from_output(
+            "You've hit your usage limit · resets at 10:00 AM America/Vancouver",
+            now=current_time, runtime="claude-code")
+
+        recorded = AdmissionService(store).rate_limit(
+            {"provider": "codex", "admission_model": "gpt-6-luna"}, signal)
+        denied = store.acquire("codex", "gpt-6-luna", "next-attempt", cap=4)
+
+        self.assertEqual(recorded["retry_at"], 1791738000.0)
+        self.assertEqual((denied["admitted"], denied["reason"], denied["retry_at"]),
+                         (False, "backoff", 1791738000.0))
+
     def test_prompt_and_report_mentions_do_not_trigger_provider_backoff(self):
         samples = (
             ("pi", "Please explain HTTP 429 and rate limit responses in the prompt."),
@@ -158,6 +214,23 @@ class AdmissionTest(unittest.TestCase):
         self.assertLessEqual(delay, 61)
         self.assertFalse(denied["admitted"])
         self.assertEqual(denied["reason"], "backoff")
+
+    def test_rate_limit_cli_writes_a_task_scoped_continuation_record(self):
+        task_dir = self.root / "run" / "tasks" / "direct-task"
+        task_dir.mkdir(parents=True)
+        record_path = task_dir / "quota-continuation.json"
+        before = time.time()
+
+        self.call_cli("rate-limit", "--provider", "codex", "--model", "gpt-6-luna",
+                      "--retry-after", "30", "--continuation-record", str(record_path),
+                      "--task-id", "direct-task", "--pane-id", "pane-42", "--attempt-id", "attempt-7")
+
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record["task"], "direct-task")
+        self.assertEqual(record["pane"], "pane-42")
+        self.assertEqual(record["attempt"], "attempt-7")
+        self.assertGreaterEqual(record["reset_at"] - before, 29)
+        self.assertLessEqual(record["reset_at"] - before, 31)
 
 
 if __name__ == "__main__":

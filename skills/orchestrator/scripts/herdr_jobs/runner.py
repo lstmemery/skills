@@ -91,6 +91,8 @@ def _new_job(spec: Mapping[str, Any], index: int, request: Mapping[str, Any],
     value.setdefault("settled", False)
     value.setdefault("issue", None)
     value.setdefault("workspace_closed", False)
+    value.setdefault("rate_limit_recoveries", _prior_rate_limit_recoveries(value))
+    value.setdefault("rate_limit_exhausted", False)
     policy = request.get("policy")
     if isinstance(policy, Mapping) and "provider_admission" in policy:
         source = value.get("spec") if isinstance(value.get("spec"), Mapping) else value
@@ -111,6 +113,18 @@ def _new_job(spec: Mapping[str, Any], index: int, request: Mapping[str, Any],
         value.setdefault("rate_limit_seen", False)
         value.setdefault("rate_limit_until", None)
     return value
+
+
+def _prior_rate_limit_recoveries(job: Mapping[str, Any]) -> int:
+    history = job.get("history")
+    if isinstance(history, list) and any(
+            isinstance(entry, Mapping) and entry.get("action") == "rate_limit_retry"
+            for entry in history):
+        return 1
+    attempts = job.get("attempt_history")
+    if isinstance(attempts, list) and any(isinstance(attempt, str) and attempt for attempt in attempts):
+        return 1
+    return 0
 
 
 def _initial_state(request: Mapping[str, Any], attempt_id_factory: Callable[[], str] | None = None) -> dict[str, Any]:
@@ -257,6 +271,12 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
         if not _json_equal(stored_request, request):
             raise ValueError("request differs from the pinned lifecycle request")
 
+    for job in _jobs(state):
+        job.setdefault("rate_limit_recoveries", _prior_rate_limit_recoveries(job))
+        if type(job["rate_limit_recoveries"]) is not int or job["rate_limit_recoveries"] not in (0, 1):
+            raise ValueError("rate_limit_recoveries must be 0 or 1")
+        job.setdefault("rate_limit_exhausted", False)
+
     prepare_run = getattr(effect_port, "prepare_run", None)
     if callable(prepare_run):
         prepare_run(state.get("request", {}), state, store)
@@ -280,7 +300,7 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
         progress = False
         all_settled = True
         for index, job in enumerate(_jobs(state)):
-            if job.get("settled") is True:
+            if job.get("settled") is True or job.get("rate_limit_exhausted") is True:
                 continue
             all_settled = False
             if index in launch_waiting:
@@ -289,6 +309,11 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                 continue
 
             if job.get("phase") == "retry_ready" and job.get("rate_limit_seen") is True:
+                if job.get("rate_limit_recoveries", 0) >= 1:
+                    job["rate_limit_exhausted"] = True
+                    job["issue"] = "provider usage limit persisted after the single bounded recovery; coordinator review required"
+                    store.checkpoint(state)
+                    continue
                 retry_at = job.get("rate_limit_until")
                 if (type(retry_at) not in (int, float) or not math.isfinite(retry_at)):
                     continue
@@ -308,6 +333,11 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                         raise ValueError("rate-limited retry requires a fresh attempt ID")
                     prior_attempts.append(previous_attempt)
                     job["attempt_history"] = prior_attempts
+                    job["rate_limit_recoveries"] += 1
+                    job.setdefault("history", []).append({
+                        "action": "rate_limit_retry", "attempt_id": previous_attempt,
+                        "retry_at": retry_at, "observed_at": current_time(),
+                    })
                     job["attempt_id"] = fresh_attempt
                     job["phase"] = "pending"
                     job["pane_id"] = None
