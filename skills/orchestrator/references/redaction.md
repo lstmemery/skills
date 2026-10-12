@@ -36,17 +36,23 @@ guard, including when selecting named fields.
 
 ## WireGuard (`wg0`)
 
-Never run `cat wg0.conf` or `wg showconf`. Use this exact field selection to
-omit private and preshared key columns:
+Never use WireGuard's dump subcommand: its interface row starts with the
+private key.
+Use only these key-free subcommands:
 
 ```sh
-wg show wg0 dump | cut -f 1,3-5
+wg show wg0 listen-port
+wg show wg0 peers
+wg show wg0 allowed-ips
+wg show wg0 latest-handshakes
+wg show wg0 endpoints
 ```
 
-When reading a config file, remove key lines before any other parsing:
+Never run `cat wg0.conf` or `wg showconf`. When reading a config file, remove
+key lines in the same command before any other parsing:
 
 ```sh
-sed '/^[[:space:]]*\(PrivateKey\|PresharedKey\)[[:space:]]*=/d' wg0.conf
+sed '/^[[:space:]]*\(PrivateKey\|PresharedKey\)[[:space:]]*=/d' wg0.conf | <other parsing>
 ```
 
 ## Config, environment, and secret inventories
