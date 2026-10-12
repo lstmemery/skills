@@ -1,0 +1,91 @@
+{
+  "day": "2026-10-02",
+  "task_id": "compat-task-1",
+  "config": {
+    "executor": "codex-cli",
+    "model_provider": "openai",
+    "model": "gpt-6-luna",
+    "reasoning_effort": "medium",
+    "primary_route": [
+      "codex",
+      "exec",
+      "--model",
+      "{model}",
+      "-c",
+      "model_provider=\"{model_provider}\"",
+      "-c",
+      "model_reasoning_effort=\"{reasoning_effort}\""
+    ],
+    "fallback_route": [
+      "orchestrator",
+      "launch",
+      "shell",
+      "--json",
+      "--compact"
+    ]
+  },
+  "routes": {
+    "primary": {
+      "argv": "codex\nexec\n--model\ngpt-6-luna\n-c\nmodel_provider=\"openai\"\n-c\nmodel_reasoning_effort=\"medium\"\n",
+      "label": "Codex CLI; executor=codex-cli; model_provider=openai; model=gpt-6-luna; reasoning_effort=medium\n",
+      "metadata": "executor=codex-cli\nmodel_provider=openai\nmodel=gpt-6-luna\nreasoning_effort=medium\n"
+    },
+    "fallback": {
+      "argv": "orchestrator\nlaunch\nshell\n--json\n--compact\n",
+      "label": "Orchestrator shell wrapping Codex CLI; executor=codex-cli; model_provider=openai; model=gpt-6-luna; reasoning_effort=medium\n",
+      "metadata": "executor=codex-cli\nmodel_provider=openai\nmodel=gpt-6-luna\nreasoning_effort=medium\n"
+    }
+  },
+  "archives": {
+    "primary": {
+      "task-succeeded": "task_id=codex-2026-10-02\nstatus=succeeded\n",
+      "task-metadata": "task_id=codex-2026-10-02\nroute=primary\nexecutor=codex-cli\nmodel_provider=openai\nmodel=gpt-6-luna\nreasoning_effort=medium\n",
+      "route-used": "Codex CLI; executor=codex-cli; model_provider=openai; model=gpt-6-luna; reasoning_effort=medium\n"
+    },
+    "fallback": {
+      "task-succeeded": "task_id=compat-task-1\nstatus=succeeded\n",
+      "task-metadata": "task_id=compat-task-1\nroute=fallback\nexecutor=codex-cli\nmodel_provider=openai\nmodel=gpt-6-luna\nreasoning_effort=medium\n",
+      "route-used": "Orchestrator shell wrapping Codex CLI; executor=codex-cli; model_provider=openai; model=gpt-6-luna; reasoning_effort=medium\n"
+    },
+    "pending": {
+      "task-launched": "task_id=compat-task-1\n",
+      "task-metadata": "task_id=compat-task-1\nroute=fallback\nexecutor=codex-cli\nmodel_provider=openai\nmodel=gpt-6-luna\nreasoning_effort=medium\n",
+      "route-used": "Orchestrator shell wrapping Codex CLI; executor=codex-cli; model_provider=openai; model=gpt-6-luna; reasoning_effort=medium\n"
+    }
+  },
+  "invalid_task_markers": {
+    "empty": "",
+    "duplicate": "task_id=compat-task-1\ntask_id=another\n",
+    "bare": "compat-task-1\n",
+    "whitespace": "task_id=two words\n",
+    "shell": "task_id=$(false)\n"
+  },
+  "candidates": {
+    "generated_at": "2026-10-02T12:00:00+00:00",
+    "items": [
+      {
+        "id": "12345",
+        "title": "Fixture story",
+        "url": "https://example.invalid/story",
+        "discussion_url": "https://example.invalid/discussion",
+        "points": 50,
+        "comments": 20,
+        "age_hours": 2.0,
+        "top_comments": [
+          "Fixture comment."
+        ]
+      }
+    ]
+  },
+  "selection": {
+    "orientation": "Fixture orientation.",
+    "items": [
+      {
+        "id": "12345",
+        "why_it_matters": "Fixture explanation.",
+        "what_hn_thinks": "Fixture opinion."
+      }
+    ],
+    "also_notable": []
+  }
+}

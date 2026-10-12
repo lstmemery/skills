@@ -1,0 +1,571 @@
+{
+  "cases": [
+    {
+      "name": "empty",
+      "week_of": "2025-03-03",
+      "ics": [],
+      "away": [],
+      "trip": [],
+      "booked": [],
+      "events": [],
+      "grid": {
+        "week_of": "2025-03-03",
+        "timezone": "America/Vancouver",
+        "dinner_window": "17:00-22:00",
+        "days": [
+          {
+            "date": "2025-03-03",
+            "day": "monday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-04",
+            "day": "tuesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-05",
+            "day": "wednesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-06",
+            "day": "thursday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-07",
+            "day": "friday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-08",
+            "day": "saturday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-09",
+            "day": "sunday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "utc-midnight",
+      "week_of": "2025-03-03",
+      "ics": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:utc@example.invalid\r\nSUMMARY:UTC workshop\r\nDTSTART:20250304T000000Z\r\nDTEND:20250305T000000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      ],
+      "away": [
+        "UTC workshop"
+      ],
+      "trip": [],
+      "booked": [],
+      "events": [
+        {
+          "uid": "utc@example.invalid",
+          "summary": "UTC workshop",
+          "start": "2025-03-04T00:00:00+00:00",
+          "end": "2025-03-05T00:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        }
+      ],
+      "grid": {
+        "week_of": "2025-03-03",
+        "timezone": "America/Vancouver",
+        "dinner_window": "17:00-22:00",
+        "days": [
+          {
+            "date": "2025-03-03",
+            "day": "monday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-04",
+            "day": "tuesday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "UTC workshop (2025-03-03T16:00:00 → 2025-03-04T16:00:00)"
+            ]
+          },
+          {
+            "date": "2025-03-05",
+            "day": "wednesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-06",
+            "day": "thursday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-07",
+            "day": "friday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-08",
+            "day": "saturday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-09",
+            "day": "sunday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "all-day-date",
+      "week_of": "2025-03-03",
+      "ics": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:date@example.invalid\r\nSUMMARY:Date workshop\r\nDTSTART;VALUE=DATE:20250304\r\nDTEND;VALUE=DATE:20250305\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      ],
+      "away": [
+        "Date workshop"
+      ],
+      "trip": [],
+      "booked": [],
+      "events": [
+        {
+          "uid": "date@example.invalid",
+          "summary": "Date workshop",
+          "start": "2025-03-04T00:00:00+00:00",
+          "end": "2025-03-05T00:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        }
+      ],
+      "grid": {
+        "week_of": "2025-03-03",
+        "timezone": "America/Vancouver",
+        "dinner_window": "17:00-22:00",
+        "days": [
+          {
+            "date": "2025-03-03",
+            "day": "monday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-04",
+            "day": "tuesday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Date workshop (2025-03-03T16:00:00 → 2025-03-04T16:00:00)"
+            ]
+          },
+          {
+            "date": "2025-03-05",
+            "day": "wednesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-06",
+            "day": "thursday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-07",
+            "day": "friday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-08",
+            "day": "saturday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-09",
+            "day": "sunday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "dst-spring",
+      "week_of": "2025-03-03",
+      "ics": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:spring@example.invalid\r\nSUMMARY:Spring trip\r\nDTSTART;TZID=America/Vancouver:20250308T200000\r\nDTEND;TZID=America/Vancouver:20250309T180000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      ],
+      "away": [
+        "Spring trip"
+      ],
+      "trip": [],
+      "booked": [],
+      "events": [
+        {
+          "uid": "spring@example.invalid",
+          "summary": "Spring trip",
+          "start": "2025-03-09T04:00:00+00:00",
+          "end": "2025-03-10T01:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        }
+      ],
+      "grid": {
+        "week_of": "2025-03-03",
+        "timezone": "America/Vancouver",
+        "dinner_window": "17:00-22:00",
+        "days": [
+          {
+            "date": "2025-03-03",
+            "day": "monday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-04",
+            "day": "tuesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-05",
+            "day": "wednesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-06",
+            "day": "thursday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-07",
+            "day": "friday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-08",
+            "day": "saturday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Spring trip (2025-03-08T20:00:00 → 2025-03-09T18:00:00)"
+            ]
+          },
+          {
+            "date": "2025-03-09",
+            "day": "sunday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Spring trip (2025-03-08T20:00:00 → 2025-03-09T18:00:00)"
+            ]
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "dst-fall",
+      "week_of": "2025-10-27",
+      "ics": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:fall@example.invalid\r\nSUMMARY:Fall trip\r\nDTSTART;TZID=America/Vancouver:20251101T200000\r\nDTEND;TZID=America/Vancouver:20251102T180000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      ],
+      "away": [
+        "Fall trip"
+      ],
+      "trip": [],
+      "booked": [],
+      "events": [
+        {
+          "uid": "fall@example.invalid",
+          "summary": "Fall trip",
+          "start": "2025-11-02T03:00:00+00:00",
+          "end": "2025-11-03T02:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        }
+      ],
+      "grid": {
+        "week_of": "2025-10-27",
+        "timezone": "America/Vancouver",
+        "dinner_window": "17:00-22:00",
+        "days": [
+          {
+            "date": "2025-10-27",
+            "day": "monday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-10-28",
+            "day": "tuesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-10-29",
+            "day": "wednesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-10-30",
+            "day": "thursday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-10-31",
+            "day": "friday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-11-01",
+            "day": "saturday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Fall trip (2025-11-01T20:00:00 → 2025-11-02T18:00:00)"
+            ]
+          },
+          {
+            "date": "2025-11-02",
+            "day": "sunday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Fall trip (2025-11-01T20:00:00 → 2025-11-02T18:00:00)"
+            ]
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "end-exclusive-and-away-priority",
+      "week_of": "2025-03-03",
+      "ics": [
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:retreat@example.invalid\r\nSUMMARY:Retreat\r\nDTSTART;TZID=America/Vancouver:20250303T060000\r\nDTEND;TZID=America/Vancouver:20250305T000000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:overlap@example.invalid\r\nSUMMARY:Dinner overlap\r\nDTSTART;TZID=America/Vancouver:20250303T183000\r\nDTEND;TZID=America/Vancouver:20250303T203000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:dinner@example.invalid\r\nSUMMARY:Dinner booking\r\nDTSTART;TZID=America/Vancouver:20250306T170000\r\nDTEND;TZID=America/Vancouver:20250306T220000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:before@example.invalid\r\nSUMMARY:Before dinner\r\nDTSTART;TZID=America/Vancouver:20250307T160000\r\nDTEND;TZID=America/Vancouver:20250307T170000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:after@example.invalid\r\nSUMMARY:After dinner\r\nDTSTART;TZID=America/Vancouver:20250308T220000\r\nDTEND;TZID=America/Vancouver:20250308T230000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:short@example.invalid\r\nSUMMARY:Day trip\r\nDTSTART;TZID=America/Vancouver:20250309T110000\r\nDTEND;TZID=America/Vancouver:20250309T130000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      ],
+      "away": [
+        "Retreat"
+      ],
+      "trip": [
+        "Day trip"
+      ],
+      "booked": [
+        "Dinner overlap",
+        "Dinner booking",
+        "Before dinner",
+        "After dinner"
+      ],
+      "events": [
+        {
+          "uid": "retreat@example.invalid",
+          "summary": "Retreat",
+          "start": "2025-03-03T14:00:00+00:00",
+          "end": "2025-03-05T08:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        },
+        {
+          "uid": "overlap@example.invalid",
+          "summary": "Dinner overlap",
+          "start": "2025-03-04T02:30:00+00:00",
+          "end": "2025-03-04T04:30:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        },
+        {
+          "uid": "dinner@example.invalid",
+          "summary": "Dinner booking",
+          "start": "2025-03-07T01:00:00+00:00",
+          "end": "2025-03-07T06:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        },
+        {
+          "uid": "before@example.invalid",
+          "summary": "Before dinner",
+          "start": "2025-03-08T00:00:00+00:00",
+          "end": "2025-03-08T01:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        },
+        {
+          "uid": "after@example.invalid",
+          "summary": "After dinner",
+          "start": "2025-03-09T06:00:00+00:00",
+          "end": "2025-03-09T07:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        },
+        {
+          "uid": "short@example.invalid",
+          "summary": "Day trip",
+          "start": "2025-03-09T18:00:00+00:00",
+          "end": "2025-03-09T20:00:00+00:00",
+          "location": "",
+          "description": "",
+          "rrule": "",
+          "etag": null,
+          "href": null
+        }
+      ],
+      "grid": {
+        "week_of": "2025-03-03",
+        "timezone": "America/Vancouver",
+        "dinner_window": "17:00-22:00",
+        "days": [
+          {
+            "date": "2025-03-03",
+            "day": "monday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Retreat (2025-03-03T06:00:00 → 2025-03-05T00:00:00)"
+            ]
+          },
+          {
+            "date": "2025-03-04",
+            "day": "tuesday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Retreat (2025-03-03T06:00:00 → 2025-03-05T00:00:00)"
+            ]
+          },
+          {
+            "date": "2025-03-05",
+            "day": "wednesday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-06",
+            "day": "thursday",
+            "matt": "home",
+            "evening": "booked",
+            "evidence": [
+              "Dinner booking (2025-03-06T17:00:00 → 2025-03-06T22:00:00)"
+            ]
+          },
+          {
+            "date": "2025-03-07",
+            "day": "friday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-08",
+            "day": "saturday",
+            "matt": "home",
+            "evening": "free",
+            "evidence": []
+          },
+          {
+            "date": "2025-03-09",
+            "day": "sunday",
+            "matt": "away",
+            "evening": "away",
+            "evidence": [
+              "Day trip (2025-03-09T11:00:00 → 2025-03-09T13:00:00)"
+            ]
+          }
+        ],
+        "warnings": [
+          "booked pattern also hits away day 2025-03-03 ('Dinner overlap') — the away day already blocks that evening",
+          "booked pattern 'Before dinner' blocks no plan-week evening — no event it matches overlaps the dinner window",
+          "booked pattern 'After dinner' blocks no plan-week evening — no event it matches overlaps the dinner window"
+        ]
+      }
+    }
+  ]
+}

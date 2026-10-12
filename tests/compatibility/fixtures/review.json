@@ -1,0 +1,131 @@
+{
+  "empty": {
+    "schema_version": 1,
+    "task_id": "task-1",
+    "author_identity": "coder-1",
+    "reviewer_identity": "reviewer-1",
+    "capture_id": "fixture-capture",
+    "axes": {
+      "standards": {
+        "status": "complete",
+        "findings": []
+      },
+      "spec": {
+        "status": "complete",
+        "findings": []
+      }
+    }
+  },
+  "workers": "task-1 coder-1 w1:p1 codex fixture medium working\ntask-1 reviewer-1 w2:p1 codex fixture medium (reviewer)\n",
+  "cases": {
+    "empty": {
+      "schema_version": 1,
+      "standards": [],
+      "spec": [],
+      "markdown": "# Independent review\n\n## Standards\n\nNo findings.\nSummary: findings=0; worst=none.\n\n## Spec\n\nNo findings.\nSummary: findings=0; worst=none.\n",
+      "response": "# Review response\n\n"
+    },
+    "v1-bare": {
+      "schema_version": 1,
+      "standards": [
+        {
+          "id": "S1",
+          "disposition": "fixed",
+          "reason": "Added the guard."
+        }
+      ],
+      "spec": [],
+      "markdown": "# Independent review\n\n## Standards\n\n- [S1] Fixture Standards finding.\nSummary: findings=1; worst=Fixture Standards finding.\n\n## Spec\n\nNo findings.\nSummary: findings=0; worst=none.\n",
+      "response": "# Review response\n\n- `review/S1`: fixed — Added the guard.\n"
+    },
+    "v1-metadata": {
+      "schema_version": 1,
+      "standards": [
+        {
+          "id": "S1",
+          "disposition": "fixed",
+          "reason": "Added the guard.",
+          "confidence": "high",
+          "reproducer": "Run the focused check; the guard rejects the invalid value."
+        }
+      ],
+      "spec": [],
+      "markdown": "# Independent review\n\n## Standards\n\n- [S1] Fixture Standards finding.\nSummary: findings=1; worst=Fixture Standards finding.\n\n## Spec\n\nNo findings.\nSummary: findings=0; worst=none.\n",
+      "response": "# Review response\n\n- `review/S1`: fixed — Added the guard.\n"
+    },
+    "v2-reproducer": {
+      "schema_version": 2,
+      "standards": [
+        {
+          "id": "S1",
+          "disposition": "fixed",
+          "reason": "Added the guard.",
+          "confidence": "high",
+          "reproducer": "Run the focused check; the guard rejects the invalid value."
+        }
+      ],
+      "spec": [],
+      "markdown": "# Independent review\n\n## Standards\n\n- [S1] Fixture Standards finding.\nSummary: findings=1; worst=Fixture Standards finding.\n\n## Spec\n\nNo findings.\nSummary: findings=0; worst=none.\n",
+      "response": "# Review response\n\n- `review/S1`: fixed — Added the guard.\n"
+    },
+    "v2-assumption": {
+      "schema_version": 2,
+      "standards": [],
+      "spec": [
+        {
+          "id": "P1",
+          "disposition": "rejected",
+          "reason": "No requirement for this behavior.",
+          "confidence": "medium",
+          "evidence": "The accepted specification omits this behavior.",
+          "unresolved_assumption": "No follow-up requirement has been accepted."
+        }
+      ],
+      "markdown": "# Independent review\n\n## Standards\n\nNo findings.\nSummary: findings=0; worst=none.\n\n## Spec\n\n- [P1] Fixture Spec finding.\nSummary: findings=1; worst=Fixture Spec finding.\n",
+      "response": "# Review response\n\n- `review/P1`: rejected — No requirement for this behavior.\n"
+    }
+  },
+  "invalid": [
+    {
+      "name": "v2-needs-metadata",
+      "top_level": {},
+      "finding": {},
+      "remove": [
+        "confidence",
+        "reproducer"
+      ]
+    },
+    {
+      "name": "confidence",
+      "top_level": {},
+      "finding": {
+        "confidence": "certain"
+      },
+      "remove": []
+    },
+    {
+      "name": "empty-reproducer",
+      "top_level": {},
+      "finding": {
+        "reproducer": " "
+      },
+      "remove": []
+    },
+    {
+      "name": "future-version",
+      "top_level": {
+        "schema_version": 3
+      },
+      "finding": {},
+      "remove": []
+    },
+    {
+      "name": "boolean-version",
+      "top_level": {
+        "schema_version": true
+      },
+      "finding": {},
+      "remove": []
+    }
+  ]
+}

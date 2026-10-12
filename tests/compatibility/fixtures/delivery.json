@@ -1,0 +1,189 @@
+{
+  "message_id": "<compat-report@example.invalid>",
+  "day": "2026-10-02",
+  "delivered_at": "2026-10-02T12:00:00+0000",
+  "message_marker": "message_id=<compat-report@example.invalid>\n",
+  "delivered_marker": "state=delivered\ndelivered_at=2026-10-02T12:00:00+0000\nmessage_id=<compat-report@example.invalid>\n",
+  "receipts": {
+    "delivered": {
+      "result": {
+        "state": "delivered",
+        "message_id": "<compat-report@example.invalid>",
+        "detail": "IMAP INBOX receipt matched"
+      },
+      "exit_code": 0,
+      "smtp_submitted": true
+    },
+    "submitted": {
+      "result": {
+        "state": "submitted",
+        "message_id": "<compat-report@example.invalid>",
+        "detail": "SMTP accepted; mailbox receipt not verified within 0 seconds"
+      },
+      "exit_code": 75,
+      "smtp_submitted": true
+    },
+    "failed": {
+      "result": {
+        "state": "failed",
+        "message_id": "<compat-report@example.invalid>",
+        "detail": "SMTP authentication failed (server code 535; response redacted)"
+      },
+      "exit_code": 1,
+      "smtp_submitted": false
+    },
+    "existing": {
+      "result": {
+        "state": "delivered",
+        "message_id": "<compat-report@example.invalid>",
+        "detail": "existing IMAP INBOX receipt matched"
+      },
+      "exit_code": 0,
+      "smtp_submitted": false
+    },
+    "pending-verification": {
+      "result": {
+        "state": "submitted",
+        "message_id": "<compat-report@example.invalid>",
+        "detail": "prior SMTP acceptance remains unverified; matching Message-ID is not in INBOX"
+      },
+      "exit_code": 75,
+      "smtp_submitted": false
+    }
+  },
+  "archives": {
+    "pending": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>\n"
+      },
+      "counts": [
+        1,
+        1,
+        0,
+        0
+      ]
+    },
+    "no-final-newline": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>"
+      },
+      "counts": [
+        1,
+        1,
+        0,
+        0
+      ]
+    },
+    "bare-id": {
+      "files": {
+        "email-message-id": "<compat-report@example.invalid>\n"
+      },
+      "counts": [
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    "duplicate-id": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>\nmessage_id=<compat-report@example.invalid>\n"
+      },
+      "counts": [
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    "bad-id": {
+      "files": {
+        "email-message-id": "message_id=<two words@example.invalid>\n"
+      },
+      "counts": [
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    "legacy-date": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>\n",
+        "emailed": "2026-10-02T12:00:00+0000\n"
+      },
+      "counts": [
+        1,
+        1,
+        0,
+        0
+      ]
+    },
+    "delivered": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>\n",
+        "emailed": "state=delivered\ndelivered_at=2026-10-02T12:00:00+0000\nmessage_id=<compat-report@example.invalid>\n"
+      },
+      "counts": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "mismatched-delivery": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>\n",
+        "emailed": "state=delivered\ndelivered_at=2026-10-02T12:00:00+0000\nmessage_id=<other@example.invalid>\n"
+      },
+      "counts": [
+        1,
+        1,
+        0,
+        0
+      ]
+    },
+    "duplicate-delivery-id": {
+      "files": {
+        "email-message-id": "message_id=<compat-report@example.invalid>\n",
+        "emailed": "state=delivered\ndelivered_at=2026-10-02T12:00:00+0000\nmessage_id=<compat-report@example.invalid>\nmessage_id=<compat-report@example.invalid>\n"
+      },
+      "counts": [
+        1,
+        1,
+        0,
+        0
+      ]
+    }
+  },
+  "paste": {
+    "status": 0,
+    "result": {
+      "id": "fixture-paste",
+      "link": "https://example.invalid/paste#fixture-fragment"
+    }
+  },
+  "report_results": {
+    "delivered": {
+      "pdf": "report.pdf",
+      "link": "https://example.invalid/paste#fixture-fragment",
+      "paste_id": "fixture-paste",
+      "email_state": "delivered",
+      "message_id": "<compat-report@example.invalid>"
+    },
+    "submitted": {
+      "pdf": "report.pdf",
+      "link": "https://example.invalid/paste#fixture-fragment",
+      "paste_id": "fixture-paste",
+      "email_state": "submitted",
+      "message_id": "<compat-report@example.invalid>"
+    },
+    "failed": {
+      "pdf": "report.pdf",
+      "link": "https://example.invalid/paste#fixture-fragment",
+      "paste_id": "fixture-paste",
+      "email_state": "failed",
+      "message_id": "<compat-report@example.invalid>"
+    }
+  }
+}

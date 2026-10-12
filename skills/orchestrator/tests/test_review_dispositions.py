@@ -8,6 +8,8 @@ import unittest
 
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / "scripts/worker-records.py"
+sys.path.insert(0, str(PACKAGE.parents[1] / "tests"))
+from compatibility.builders import review_evidence
 
 
 class ReviewDispositionsTest(unittest.TestCase):
@@ -30,17 +32,10 @@ class ReviewDispositionsTest(unittest.TestCase):
         }
 
     def write_evidence(self, review_dir, findings, *, schema_version=1):
-        evidence = {
-            "schema_version": schema_version,
-            "task_id": "task-a",
-            "author_identity": "coder-a",
-            "reviewer_identity": "reviewer-a",
-            "capture_id": f"capture-{review_dir.name}",
-            "axes": {
-                "standards": {"status": "complete", "findings": findings},
-                "spec": {"status": "complete", "findings": []},
-            },
-        }
+        evidence = review_evidence(
+            schema_version=schema_version, task_id="task-a", author="coder-a",
+            reviewer="reviewer-a", capture_id=f"capture-{review_dir.name}", standards=findings,
+        )
         path = review_dir / "review-evidence.json"
         path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         return evidence
