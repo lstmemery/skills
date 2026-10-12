@@ -107,9 +107,30 @@ def check_brief_redaction(brief_path):
     except OSError as error:
         records.invalid(f"cannot read brief at {brief_path}: {error.strerror or error}")
     # Markdown fenced code is illustrative content, not a section of the brief.
-    content = re.sub(
-        r"(?ms)^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?^ {0,3}\1[ \t]*$", "", content
-    )
+    # CommonMark closes a fence only with its opening character and at least
+    # its opening length. An unclosed fence extends through end of document.
+    outside_fences = []
+    fence_char = None
+    fence_length = 0
+    for line in content.splitlines():
+        if fence_char is None:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+            if opening:
+                marker, info = opening.groups()
+                if marker[0] == "~" or "`" not in info:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+                    continue
+            outside_fences.append(line)
+            continue
+
+        closing = re.match(r"^ {0,3}([`~]+)[ \t]*$", line)
+        if (closing and closing.group(1)[0] == fence_char
+                and len(closing.group(1)) >= fence_length
+                and len(set(closing.group(1))) == 1):
+            fence_char = None
+            fence_length = 0
+    content = "\n".join(outside_fences)
     if not re.search(r"truenas|system\.general|\bwg0\b|secrets?", content, re.I):
         return False
     if re.search(r"^#{1,6}\s+Output redaction\s*$", content, re.I | re.M):

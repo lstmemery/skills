@@ -107,6 +107,43 @@ class WorkerRecordsTest(unittest.TestCase):
         self.assertEqual(process.returncode, 1)
         self.assertIn("WARNING:", process.stderr)
 
+    def test_check_brief_accepts_heading_after_longer_closing_fence(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "Inspect TrueNAS system.general data.\n\n"
+            "````md\n## Output redaction\n`````\n\n"
+            "## Output redaction\nUse named fields.\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("BRIEF OK:", process.stdout)
+
+    def test_check_brief_ignores_heading_inside_tilde_fence(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "Inspect TrueNAS system.general data.\n\n"
+            "~~~md\n## Output redaction\n~~~\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+
+    def test_check_brief_unclosed_fence_runs_to_end_of_document(self):
+        brief = self.root / "brief.md"
+        brief.write_text(
+            "Inspect TrueNAS system.general data.\n\n"
+            "```md\n## Output redaction\n"
+        )
+
+        process = self.call("check-brief", brief)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("WARNING:", process.stderr)
+
     def test_brief_redaction_check_cannot_short_circuit_identity_validation(self):
         brief = self.root / "brief.md"
         brief.write_text("Inspect TrueNAS system.general data.\n")
