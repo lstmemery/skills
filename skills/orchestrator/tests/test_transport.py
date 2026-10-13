@@ -187,6 +187,21 @@ class TransportTest(unittest.TestCase):
         with self.assertRaisesRegex(JobError, "export has not been bound"):
             self.adapter.preflight({"jobs": [self.spec]})
 
+    def test_jail_preflight_resolves_installed_codex_wrapper(self):
+        spec = self.prepared_jail_spec(None)
+        self.adapter.binding["jail_export"] = {"verified": True, "host_root": str(self.root),
+                                                "worker_root": "/work"}
+        lookups = []
+
+        def installed(command):
+            lookups.append(command)
+            return "/home/deadhand/.local/bin/codex-jail-agent" if command == "codex-jail-agent" else None
+
+        with patch("herdr_jobs.transport.shutil.which", side_effect=installed):
+            self.adapter.preflight({"jobs": [spec]})
+
+        self.assertEqual(lookups, ["codex-jail-agent"])
+
     def test_changed_command_contract_stops_preflight(self):
         self.adapter.binding["herdr_help_sha256"] = "stale"
         with self.assertRaisesRegex(JobError, "CLI help contract changed"):
@@ -796,7 +811,7 @@ class TransportTest(unittest.TestCase):
         runner_argv = shlex.split(argv[4])
         self.assertEqual(runner_argv[2], "--request")
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["codex-jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000", prompt])
         self.assertEqual(request["protected_paths"], protected_paths_record(["keys/"]))
@@ -811,7 +826,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["codex-jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000",
                                            prompt])
@@ -824,7 +839,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["codex-jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=600000",
                                            prompt])
@@ -837,7 +852,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["codex-jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000",
                                            prompt])
@@ -850,7 +865,7 @@ class TransportTest(unittest.TestCase):
 
         runner_argv = shlex.split(self.calls[-1][4])
         request = load_json(runner_argv[3])
-        self.assertEqual(request["argv"], ["jail-agent", "--harness", "codex", "exec",
+        self.assertEqual(request["argv"], ["codex-jail-agent", "--harness", "codex", "exec",
                                            "--skip-git-repo-check", "-c",
                                            "model_providers.train-openai.stream_idle_timeout_ms=300000",
                                            prompt])
@@ -891,6 +906,29 @@ class TransportTest(unittest.TestCase):
                                         jail_exports=self.jail_exports), 23)
         self.assertEqual(calls, [(request["argv"], False)])
         self.assertEqual(load_json(self.job["exit_record"])["exit_code"], 23)
+
+    def test_runner_accepts_codex_wrapper_with_stream_timeout_argument(self):
+        module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")
+        runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(runner)
+        (self.root / "acceptance_test.md").write_text("Jail acceptance test.")
+        (self.root / "fixture-input.json").write_text('{"fixture": true}\n')
+        argv = ["codex-jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check",
+                "-c", "model_providers.train-openai.stream_idle_timeout_ms=300000", "literal task"]
+        request = {"schema_version": 1, "job_id": "j1", "attempt_id": "attempt1", "argv": argv,
+                   "exit_path": self.job["exit_record"],
+                   "required_context": [
+                       {"path": str(self.root / "acceptance_test.md"), "kind": "test", "purpose": "Acceptance test."},
+                       {"path": str(self.root / "fixture-input.json"), "kind": "fixture", "purpose": "Input fixture."},
+                   ],
+                   "protected_paths": protected_paths_record(["keys/"]), "editable_paths": []}
+        calls = []
+
+        self.assertEqual(runner.execute(request,
+                                        run_process=lambda command, check: calls.append((command, check))
+                                        or SimpleNamespace(returncode=0),
+                                        jail_exports=self.jail_exports), 0)
+        self.assertEqual(calls, [(argv, False)])
 
     def test_runner_accepts_legacy_omp_train_codex_command_during_alias_period(self):
         module_spec = importlib.util.spec_from_file_location("jail_runner", PACKAGE / "scripts/jail-runner.py")

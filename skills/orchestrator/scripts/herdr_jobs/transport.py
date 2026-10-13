@@ -326,8 +326,8 @@ class NativeTransport:
                                    "Codex retry provider is not configured as a provider object")
             if job["route"]["mode"] == "jail":
                 self.check_export()
-                if not shutil.which("jail-agent"):
-                    raise JobError("unavailable_capability", "jail-agent is unavailable")
+                if not shutil.which("codex-jail-agent"):
+                    raise JobError("unavailable_capability", "codex-jail-agent is unavailable")
                 if job["model"] is not None:
                     raise JobError("unavailable_capability", "exact jail model discovery is not verified; omit the model or verify a new adapter")
                 attestation = self.binding.get("jail_default")
@@ -499,7 +499,7 @@ class NativeTransport:
                 argv = [self.herdr, "agent", "prompt", job["agent_name"], prompt]
         elif action == "jail":
             timeout_ms = spec.get("jail_stream_idle_timeout_ms", 300000)
-            launch = ["jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check", "-c",
+            launch = ["codex-jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check", "-c",
                       f"model_providers.train-openai.stream_idle_timeout_ms={timeout_ms}", prompt]
             launch_request = Path(job["exit_record"]).with_name("launch.json")
             save(launch_request, {"schema_version": 1, "job_id": spec["job_id"], "attempt_id": job["attempt_id"],

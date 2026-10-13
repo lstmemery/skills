@@ -24,16 +24,22 @@ def execute(request, run_process=subprocess.run, jail_exports=None):
     argv = request["argv"]
     supported_prefixes = (
         ["jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check"],
+        ["codex-jail-agent", "--harness", "codex", "exec", "--skip-git-repo-check"],
         ["omp-train", "--harness", "codex", "exec", "--skip-git-repo-check"],
+    )
+    supported_stream_timeouts = (
+        ["-c", "model_providers.train-openai.stream_idle_timeout_ms=300000"],
+        ["-c", "model_providers.train-openai.stream_idle_timeout_ms=600000"],
     )
     if (
         not isinstance(argv, list)
-        or len(argv) != 6
-        or argv[:5] not in supported_prefixes
+        or not ((len(argv) == 6 and argv[:5] in supported_prefixes)
+                or (len(argv) == 8 and argv[:5] in supported_prefixes
+                    and argv[5:7] in supported_stream_timeouts))
     ):
         raise JobError(
             "invalid_input",
-            "launcher request must use the supported jail-agent or omp-train Codex command",
+            "launcher request must use a supported jail-agent, codex-jail-agent, or omp-train Codex command",
         )
     text(argv[-1], "task")
     text(request["exit_path"], "exit path", 4096)
