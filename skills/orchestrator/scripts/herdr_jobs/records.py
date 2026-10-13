@@ -509,7 +509,7 @@ def ensure_task_admitted(task_kind, job_id):
     if task_kind == "shopping":
         raise JobError("decision_needed",
                        f"{job_id}: shopping is unsupported by managed Herdr Jobs because its jail route is Codex-only; "
-                       "launch it from a host Herdr pane with `omp-train --claude` as documented in "
+                       "launch it from a host Herdr pane with `jail-agent --claude` as documented in "
                        "skills/orchestrator/PREFERENCES.md")
 
 
