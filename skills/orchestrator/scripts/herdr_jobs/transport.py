@@ -144,6 +144,18 @@ class Deadline:
             raise BudgetExpired()
 
 
+def codex_prompt_argument(job, prompt):
+    # Herdr refuses agent arguments containing line breaks, so a multi-line
+    # prompt travels as a file next to the job output with a one-line pointer.
+    if "\n" not in prompt and "\r" not in prompt:
+        return prompt
+    path = Path(job["host_output"]).absolute().parent / f"{job['agent_name']}.prompt.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(prompt, encoding="utf-8")
+    return (f"Your complete task instructions are in {path}. Read that whole file now "
+            "and follow it exactly, as if its contents were this message.")
+
+
 def command(argv, deadline, cwd=None, env=None):
     deadline.check()
     chunks = {"stdout": bytearray(), "stderr": bytearray()}
@@ -468,7 +480,7 @@ class NativeTransport:
                 argv += effort_arguments("codex", effort)
                 if job.get("retry_override") and "provider_id" in job["retry_override"]:
                     argv += codex_retry_cli_args(job["retry_override"])
-                argv.append(prompt)
+                argv.append(codex_prompt_argument(job, prompt))
             elif spec["route"]["runtime"] == "pi":
                 runtime_args = []
                 runtime_args += provider_arguments("pi", spec.get("provider"))
@@ -666,10 +678,13 @@ class NativeTransport:
         paths = self.binding["paths"]
         pane = at(result, paths["agent_pane_id"])
         kind = at(result, paths["agent_kind"])
-        name = at(result, paths["agent_name"])
+        # Herdr 0.9.4 no longer reports agent names; a contract binds `null`
+        # there and identity rests on the helper-owned pane plus kind.
+        name = at(result, paths["agent_name"]) if paths["agent_name"] is not None else None
         if pane != job["pane_id"] or kind != job["spec"]["kind"]:
             raise JobError("unavailable_capability", "observed worker identity differs from the owned job")
-        if job["spec"]["route"]["mode"] == "agent" and name != job["agent_name"]:
+        if (paths["agent_name"] is not None and job["spec"]["route"]["mode"] == "agent"
+                and name != job["agent_name"]):
             raise JobError("unavailable_capability", "observed agent name differs from the owned job")
         state = at(result, paths["agent_state"])
         if state not in ("idle", "done", "working", "blocked", "unknown"):

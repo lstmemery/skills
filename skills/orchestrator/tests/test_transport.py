@@ -1051,3 +1051,23 @@ class TransportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodexPromptArgumentTests(unittest.TestCase):
+    def test_single_line_prompt_passes_through(self):
+        from herdr_jobs.transport import codex_prompt_argument
+        with tempfile.TemporaryDirectory() as root:
+            job = {"host_output": str(Path(root) / "out"), "agent_name": "c9-x"}
+            self.assertEqual(codex_prompt_argument(job, "do it"), "do it")
+            self.assertFalse((Path(root) / "c9-x.prompt.md").exists())
+
+    def test_multiline_prompt_moves_to_file(self):
+        from herdr_jobs.transport import codex_prompt_argument
+        with tempfile.TemporaryDirectory() as root:
+            job = {"host_output": str(Path(root) / "out"), "agent_name": "c9-x"}
+            argument = codex_prompt_argument(job, "line one\nline two\r\n")
+            path = Path(root) / "c9-x.prompt.md"
+            self.assertEqual(path.read_bytes(), b"line one\nline two\r\n")
+            self.assertNotIn("\n", argument)
+            self.assertNotIn("\r", argument)
+            self.assertIn(str(path), argument)
