@@ -16,7 +16,16 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.records import (JobError, digest, jail_context_path, load_json, prepare,
                                 protected_paths_record, save, validate_required_context)
-from herdr_jobs.transport import Deadline, EffectUnknown, NativeTransport, RateLimited
+from herdr_jobs.transport import (Deadline, EffectUnknown, NativeTransport, RateLimited,
+                                  orchestrator_help_contract_bytes)
+
+
+def compact_orchestrator_help(cwd, extra=None):
+    value = {"schemaVersion": 1, "fullHelp": {"args": ["help", "--json", "--workspace", cwd]},
+             "commands": [{"name": "help"}]}
+    if extra is not None:
+        value["commands"].append(extra)
+    return json.dumps(value, separators=(",", ":")).encode()
 
 
 class FakeHerdr:
@@ -212,6 +221,23 @@ class TransportTest(unittest.TestCase):
         with self.assertRaisesRegex(JobError, "CLI help contract changed"):
             self.adapter.preflight({"jobs": [self.spec]})
         self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in self.calls))
+
+    def test_orchestrator_help_cwd_does_not_change_preflight_digest(self):
+        payloads = [compact_orchestrator_help(path) for path in
+                    ("/home/deadhand", "/home/deadhand/agents", "/repo/skills/orchestrator/scripts")]
+        self.adapter.binding["orchestrator_help_sha256"] = digest(orchestrator_help_contract_bytes(payloads[0]))
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.adapter.raw = lambda argv, payload=payload: payload if argv[:2] == ["orchestrator", "help"] else self.raw(argv)
+                self.adapter.preflight({"jobs": [self.spec]})
+
+    def test_real_orchestrator_help_change_still_stops_preflight(self):
+        baseline = compact_orchestrator_help("/home/deadhand")
+        changed = compact_orchestrator_help("/different/cwd", {"name": "new-command"})
+        self.adapter.binding["orchestrator_help_sha256"] = digest(baseline)
+        self.adapter.raw = lambda argv: changed if argv[:2] == ["orchestrator", "help"] else self.raw(argv)
+        with self.assertRaisesRegex(JobError, "CLI help contract changed"):
+            self.adapter.preflight({"jobs": [self.spec]})
 
     def test_preflight_uses_installed_help_flags_json_status_and_endpoint_identity(self):
         status = load_json(HERDR_FIXTURES / "status.json")

@@ -42,6 +42,22 @@ class RateLimited(Exception):
         self.signal = signal
 
 
+def orchestrator_help_contract_bytes(output):
+    """Return stable compact help bytes with the invocation cwd normalized."""
+    try:
+        contract = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        return output
+    try:
+        args = contract["fullHelp"]["args"]
+        if not isinstance(args, list) or len(args) < 2 or args[-2] != "--workspace" or not isinstance(args[-1], str):
+            raise TypeError
+        args[-1] = "<invocation-cwd>"
+    except (KeyError, TypeError):
+        return output
+    return json.dumps(contract, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def _cli_command_name(argv):
     parts = [Path(argv[0]).name, *argv[1:3]]
     return " ".join(parts)
@@ -253,7 +269,7 @@ class NativeTransport:
         if (digest(help_bytes) != self.binding["herdr_help_sha256"]
                 or digest(agent_help) != self.binding["herdr_agent_help_sha256"]
                 or digest(pane_help) != self.binding["herdr_pane_help_sha256"]
-                or digest(orchestrator_help) != self.binding["orchestrator_help_sha256"]):
+                or digest(orchestrator_help_contract_bytes(orchestrator_help)) != self.binding["orchestrator_help_sha256"]):
             raise JobError("unavailable_capability", "CLI help contract changed; reverify the host binding")
         status = self.read([self.herdr, "status", "--json"])
         paths = self.binding["paths"]
