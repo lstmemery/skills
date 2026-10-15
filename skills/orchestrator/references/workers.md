@@ -105,6 +105,11 @@ rule verbatim from [redaction.md](redaction.md); a paraphrase is insufficient.
 Run `python3 scripts/worker-records.py check-brief BRIEF.md` before dispatch to
 warn when a brief mentions TrueNAS, `system.general`, `wg0`, or secrets without
 that section.
+For jailed assignments, start from the
+[jailed-task brief template](../templates/jail-task-brief.md), then run its
+`check-brief --jail --bundle-root` preflight against the staged bundle before
+launch. It checks declared import filenames and every production, test,
+fixture, and prior input path.
 
 Pass the user's standing pre-PR/pre-integration decision boundary explicitly to
 coding workers. Delegate a bounded execution task, not coordinator authority.

@@ -10,6 +10,7 @@ import sys
 
 from . import records
 from . import review_dispositions
+from . import jail_brief
 
 
 MAX_REVISION = 2**63 - 1
@@ -605,9 +606,17 @@ def build_parser():
     result_parser.add_argument("--repository-changes", action="store_true")
 
     brief_parser = commands.add_parser(
-        "check-brief", help="warn when a brief names known leak paths without output redaction"
+        "check-brief", help="check brief redaction and optional jailed-task bundle preflight"
     )
     brief_parser.add_argument("brief", type=Path)
+    brief_parser.add_argument(
+        "--jail", action="store_true",
+        help="validate the brief's jail pre-launch inventory against its staged bundle",
+    )
+    brief_parser.add_argument(
+        "--bundle-root", type=Path,
+        help="root of the staged jail bundle (required with --jail)",
+    )
 
     disposition_parser = commands.add_parser("record-disposition", help="write a terminal coordinator disposition")
     disposition_parser.add_argument("worker_dir", type=Path)
@@ -656,7 +665,25 @@ def main(argv=None):
             print(f"VALID: {args.result_json}")
             return 0
         if args.command == "check-brief":
-            if check_brief_redaction(args.brief):
+            if args.jail and args.bundle_root is None:
+                parser.error("check-brief --jail requires --bundle-root")
+            if args.bundle_root is not None and not args.jail:
+                parser.error("check-brief --bundle-root requires --jail")
+            redaction_warning = check_brief_redaction(args.brief)
+            if args.jail:
+                issues = jail_brief.validate_jail_brief(args.brief, args.bundle_root)
+                if redaction_warning:
+                    issues.append(
+                        f"{args.brief} mentions TrueNAS, system.general, wg0, or secrets "
+                        "but has no Output redaction section."
+                    )
+                if issues:
+                    for issue in issues:
+                        print(f"ERROR: {issue}", file=sys.stderr)
+                    return 1
+                print(f"BRIEF OK: {args.brief} (jail inventory and bundle inputs checked)")
+                return 0
+            if redaction_warning:
                 print(
                     f"WARNING: {args.brief} mentions TrueNAS, system.general, wg0, "
                     "or secrets but has no Output redaction section.",
