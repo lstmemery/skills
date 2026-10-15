@@ -358,6 +358,9 @@ lose the selected jail boundary. Observe that command's actual foreground
 process, exit/result, and supported lifecycle; do not assume a native agent API
 owns a wrapper-launched process. This branch is unavailable from a jail lacking
 the host launcher/session.
+Before spending a jail attempt, validate its staged inputs with the
+[jailed-task brief preflight](../templates/jail-task-brief.md) and its documented
+`check-brief --jail --bundle-root` command.
 
 Jailed `claude -p` workers (`jail-agent --claude -p "…"`):
 
