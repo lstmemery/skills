@@ -89,7 +89,8 @@ class LocalLaneTest(unittest.TestCase):
             "destructive_actions": False,
         })
 
-        with redirect_stdout(stdout), redirect_stderr(stderr), \
+        with tempfile.TemporaryDirectory() as directory, \
+                redirect_stdout(stdout), redirect_stderr(stderr), \
                 patch("herdr_jobs.local_lane.check_preconditions",
                       side_effect=AssertionError("scope gate must run first")) as preflight:
             code = main([
@@ -97,7 +98,7 @@ class LocalLaneTest(unittest.TestCase):
                 "--local-lane-scope-json", request,
                 "--pane", "pane:1", "--name", "bounded-task",
                 "--prompt-file", "/unread/for-rejected-scope.md",
-                "--telemetry-file", "/tmp/local-lane-rejected/telemetry.json",
+                "--telemetry-file", str(Path(directory) / "local-lane-rejected" / "telemetry.json"),
             ])
 
         self.assertEqual(code, 2)

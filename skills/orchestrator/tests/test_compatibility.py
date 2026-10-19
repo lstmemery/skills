@@ -94,11 +94,12 @@ class CompatibilityTest(unittest.TestCase):
             "default_provider_cap": 4,
             "provider_caps": {"codex": 0},
         }}
-        engine = Engine("/tmp/provider-cap-validation", object(), Deadline())
-        engine.state = {"request": {"policy": policy}}
+        with tempfile.TemporaryDirectory() as directory:
+            engine = Engine(Path(directory) / "provider-cap-validation", object(), Deadline())
+            engine.state = {"request": {"policy": policy}}
 
-        with self.assertRaisesRegex(JobError, "stored provider admission caps are malformed") as engine_error:
-            engine.provider_cap("codex")
+            with self.assertRaisesRegex(JobError, "stored provider admission caps are malformed") as engine_error:
+                engine.provider_cap("codex")
         with self.assertRaisesRegex(JobError, "stored provider admission caps are malformed") as service_error:
             AdmissionService.provider_cap(policy, "codex")
 
