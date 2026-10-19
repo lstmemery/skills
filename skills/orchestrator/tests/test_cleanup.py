@@ -79,26 +79,23 @@ class CleanupStaleTest(unittest.TestCase):
         self.assertFalse(any("workspace" in command and "close" in command for command in calls))
         self.assertEqual(self.store.status()["active_count"], 1)
 
-    def test_reconciled_orphan_releases_by_id_with_evidence(self):
+    def test_orphan_without_pending_effect_refuses_release(self):
         self.store.release("lease-a")
-        self.store.acquire("codex", "model", "orphan", cap=3, run_id="missing-run")
+        self.store.acquire("codex", "model", "orphan", cap=3, run_id="fixture-run")
         calls = []
         def run(argv, **kwargs):
             calls.append(argv)
             if argv[1:3] == ["workspace", "list"]:
                 return subprocess.CompletedProcess(argv, 0, json.dumps({"result": {"workspaces": []}}), "")
-            if "herdr-admission.py" in argv[1] and argv[2:4] == ["release", "--lease-id"]:
-                released = self.store.release(argv[4], reconciliation_evidence=argv[6])
-                return subprocess.CompletedProcess(argv, 0, json.dumps(released), "")
-            return subprocess.CompletedProcess(argv, 0, "{}", "")
+            self.fail(f"unexpected command: {argv}")
         with patch("herdr_jobs.cleanup.subprocess.run", side_effect=run):
             self.args.apply = True
             result = cleanup_stale(self.args, env={}, admission_dir=self.root / "admission")
-        self.assertTrue(result["released_orphans"][0]["released"])
-        release_call = next(command for command in calls if "herdr-admission.py" in command[1])
-        self.assertIn("--lease-id", release_call)
-        self.assertIn("--reconciliation-evidence", release_call)
-        self.assertEqual(self.store.status()["active_count"], 0)
+        refusal = result["released_orphans"][0]
+        self.assertFalse(refusal["released"])
+        self.assertIn(str(self.run), refusal["reason"])
+        self.assertEqual(self.store.status()["active_count"], 1)
+        self.assertEqual(calls, [["herdr", "workspace", "list"]])
 
     def test_non_lease_panes_are_untouched(self):
         self.store.release("lease-a")

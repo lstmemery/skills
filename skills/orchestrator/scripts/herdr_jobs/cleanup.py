@@ -88,8 +88,7 @@ def _caller_workspace(env):
 def _reconciliation_evidence(lease, *, herdr, run_command):
     effect = lease.get("pending_effect")
     if effect is None:
-        return (f"Admission lease {lease['lease_id']} has no pending launch effect; "
-                f"managed run state {lease.get('run_id')} is absent or does not own this lease.")
+        return None
     pane_id = effect.get("pane_id") if isinstance(effect, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
         return None
