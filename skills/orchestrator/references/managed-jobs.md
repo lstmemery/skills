@@ -20,11 +20,27 @@ python3 scripts/herdr-jobs.py resume --run-dir RUN_DIR --wait-seconds 30
 python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 30
 python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 0 --summary
 python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR --wait-seconds 30
+python3 scripts/herdr-jobs.py cleanup-stale
+python3 scripts/herdr-jobs.py cleanup-stale --apply
+python3 scripts/herdr-jobs.py close-workspace WORKSPACE_ID
 ```
 
 `status --summary` prints one fixed table row per job (`job`, `pane`, `state`,
 `disposition`, `lease`); missing values are `-`. With `--wait-seconds 0`, it
 reports local checkpoint state only. Plain `status` retains its JSON output.
+
+`cleanup-stale` defaults to a read-only report. It maps held provider leases
+for settled jobs to managed run state and, with `--apply`, delegates mapped
+settled runs to `finish` so leases are released before owned workspaces close.
+Unsettled managed jobs are retained. An orphan lease is released by ID with
+reconciliation evidence only when its admission record names a launch pane and
+Herdr confirms a finished agent at a shell prompt there; an orphan without a
+pending launch effect, or without that confirmation, is retained and refused. The command never closes an unknown workspace. Inspect the report and
+reconcile a refused lease through its owning run.
+Do not use raw `herdr workspace close` for lease-bound panes; use this command
+or `finish --run-dir RUN_DIR` so admission capacity is reconciled first. The
+`close-workspace` guard refuses a workspace with a held managed lease and names
+the run directory; ordinary workspaces retain Herdr's existing close behavior.
 
 `finish` maps worker outcomes to coordinator dispositions using the worker
 contract: `ready` → `completed`, `blocked` → `blocked`, `partial` → `failed`,

@@ -37,5 +37,7 @@ Use pane commands for raw terminals and ordinary processes; use agent commands f
 Inspect state and output before retrying a failed wait or prompt. A timeout or stalled response does **not** prove nondelivery; never blindly resubmit work.
 
 Close only workspaces, tabs, panes, and sessions you created unless the user requested broader cleanup. `workspace close --group` also closes linked worktree workspaces; it is not a retry for `workspace_group_close_required`.
+Route requests to clear stale panes through `herdr-jobs cleanup-stale` so managed leases are reconciled before workspaces close.
+For a requested workspace close, use `herdr-jobs close-workspace WORKSPACE_ID`; it refuses held managed leases and names the run directory.
 
 `--trust-repository` grants per-request Git trust; use it only after user verification of that repository. Check `herdr status` before relying on new server features after an update. A missing method does not authorize stopping or replacing the server. `herdr server stop` kills pane processes: require the user's explicit intent to stop them. Never kill the main Herdr process; isolated experiments use named test sessions.
