@@ -24,15 +24,22 @@ def _json_command(argv):
         raise JobError("unavailable_capability", f"invalid JSON from {' '.join(argv[:2])}") from error
 
 
-def _managed_runs(root, leases):
-    lease_ids = {item["lease_id"] for item in leases}
-    found = []
+def _run_states(root):
+    """Yield parseable managed checkpoints, skipping unreadable or malformed files."""
     for state_path in sorted(root.glob("**/state.json")):
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        jobs = state.get("jobs") if isinstance(state, dict) else None
+        if isinstance(state, dict):
+            yield state_path, state
+
+
+def _managed_runs(root, leases):
+    lease_ids = {item["lease_id"] for item in leases}
+    found = []
+    for state_path, state in _run_states(root):
+        jobs = state.get("jobs")
         if not isinstance(jobs, list):
             continue
         matching = [job for job in jobs if isinstance(job, dict)
@@ -40,8 +47,9 @@ def _managed_runs(root, leases):
                     and job.get("admission_acquired") is True
                     and job.get("settled") is True]
         if matching:
+            request = state.get("request")
             found.append({"run_dir": str(state_path.parent),
-                          "request_id": state.get("request", {}).get("request_id"),
+                          "request_id": request.get("request_id") if isinstance(request, dict) else None,
                           "lease_ids": sorted({job["admission_lease_id"] for job in matching}),
                           "workspace_ids": sorted({job.get("workspace_id") for job in matching
                                                     if isinstance(job.get("workspace_id"), str)}),
@@ -50,12 +58,8 @@ def _managed_runs(root, leases):
 
 
 def _run_directory_for_id(root, run_id):
-    for state_path in root.glob("**/state.json"):
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        request = state.get("request") if isinstance(state, dict) else None
+    for state_path, state in _run_states(root):
+        request = state.get("request")
         if isinstance(request, dict) and request.get("request_id") == run_id:
             return str(state_path.parent)
     return None
@@ -64,12 +68,8 @@ def _run_directory_for_id(root, run_id):
 def _active_lease_ids(root, leases):
     lease_ids = {item["lease_id"] for item in leases}
     active = set()
-    for state_path in root.glob("**/state.json"):
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        jobs = state.get("jobs", []) if isinstance(state, dict) else []
+    for state_path, state in _run_states(root):
+        jobs = state.get("jobs", [])
         active.update(job["admission_lease_id"] for job in jobs if isinstance(job, dict)
                       and job.get("admission_lease_id") in lease_ids
                       and job.get("admission_acquired") is True
@@ -232,12 +232,8 @@ def close_workspace(workspace_id, *, env=None, herdr="herdr", runs_root=None,
     root = Path(runs_root or (Path.home() / ".local/share/orchestrator/runs")).expanduser()
     leases = AdmissionStore(admission_dir or (Path.home() / ".local/state/orchestrator")).status()["leases"]
     active_ids = {item["lease_id"] for item in leases}
-    for state_path in root.glob("**/state.json"):
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        jobs = state.get("jobs", []) if isinstance(state, dict) else []
+    for state_path, state in _run_states(root):
+        jobs = state.get("jobs", [])
         for job in jobs:
             if (isinstance(job, dict) and job.get("workspace_id") == workspace_id
                     and job.get("admission_lease_id") in active_ids):
