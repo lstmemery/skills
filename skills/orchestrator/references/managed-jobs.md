@@ -18,8 +18,13 @@ python3 scripts/herdr-jobs.py run --manifest request.json --policy launch-policy
 python3 scripts/herdr-jobs.py add --manifest one-job.json --policy launch-policy.json --run-dir RUN_DIR --host-contract HOST_CONTRACT --wait-seconds 30
 python3 scripts/herdr-jobs.py resume --run-dir RUN_DIR --wait-seconds 30
 python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 30
+python3 scripts/herdr-jobs.py status --run-dir RUN_DIR --wait-seconds 0 --summary
 python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR --wait-seconds 30
 ```
+
+`status --summary` prints one fixed table row per job (`job`, `pane`, `state`,
+`disposition`, `lease`); missing values are `-`. With `--wait-seconds 0`, it
+reports local checkpoint state only. Plain `status` retains its JSON output.
 
 `finish` maps worker outcomes to coordinator dispositions using the worker
 contract: `ready` → `completed`, `blocked` → `blocked`, `partial` → `failed`,

@@ -79,6 +79,8 @@ workers, and collects bounded result artifacts. Read
 contract, recovery rules, and result states; read
 [host-integration.md](references/host-integration.md) before first live use or
 after an installed Herdr/launcher contract changes.
+For copyable routing, escalation, and add examples, see the
+[managed-job tool card](references/tool-card.md).
 
 Start with an offline preview, retain one run directory, and continue only with
 the returned argv:
