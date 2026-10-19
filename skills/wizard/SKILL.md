@@ -22,3 +22,26 @@ Open the relevant URL before asking for its value. Use hidden entry for secrets,
 Run `bash -n <script>` and `shellcheck` if available, then make the script executable. Trace it statically: every scoped value is captured and lands at its declared destination, every CI secret/variable name matches its workflow reference, stages are ordered/count correctly, secrets use hidden input, and irreversible actions have confirmation gates.
 
 Done when the concrete procedure is reviewable, static checks pass or each unrun check is named in the hand-off message with its reason, and the user has the path and run command. For an authorized repeatable setup path, commit it and link it from README. Never validate by executing the human procedure yourself.
+
+## Edit wizards
+
+For an edit wizard, make every screen reviewable on its own. State the source
+(`reviewer comment <ID>`, `AI finding <ID> from run <run>`, or `Matt decision`),
+and classify the edit as **value correction**, **wording**, or **formatting
+only**. For a value correction, say explicitly that the old value is wrong and
+identify the source of the replacement value (file and run, when applicable).
+For invisible character edits, print both codepoints, such as `U+002D` →
+`U+2212`, alongside the characters if useful. Do not label a value correction
+as a decimal-places or formatting change.
+
+Combine mechanical bulk edits into one **Find & Replace** step. Show the exact
+find pattern, replacement, and expected match count; do not make a screen per
+occurrence.
+
+Example screen:
+
+```text
+Source: AI finding AF-12, analysis run 2026-10-18-r3
+Kind: Value correction — the old value 0.738 is wrong.
+Replace with: 0.77 (analysis.csv, run 2026-10-18-r3, column corrected_rate)
+```
