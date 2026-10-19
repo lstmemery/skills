@@ -27,6 +27,9 @@ def parser():
         sub.add_argument("--run-dir", required=True)
         sub.add_argument("--host-contract", help="verified Herdr endpoint, CLI contract, and optional jail export binding")
         sub.add_argument("--wait-seconds", type=float, default=30)
+        if name == "status":
+            sub.add_argument("--summary", action="store_true",
+                             help="print a fixed human-readable job table instead of JSON")
         if name == "finish":
             sub.add_argument("--coordinator-disposition-override", action="append", metavar="JOB_ID=DISPOSITION",
                              help="explicitly override one worker disposition (repeatable; requires a reason)")
@@ -177,7 +180,10 @@ def main(argv=None, transport_factory=NativeTransport):
                         next_argv += ["--host-contract", str(Path(args.host_contract).absolute())]
                 result["observation"] = "local_only; no fresh host observation at zero budget"
                 result["next_action"] = {"kind": "resume", "argv": next_argv, "message": "Continue with a positive call budget."}
-                print(encoded(result).decode())
+                if args.operation == "status" and args.summary:
+                    print(render_status_summary(result, engine.state))
+                else:
+                    print(encoded(result).decode())
                 return EXIT_CODES.get(result["batch_state"], 0)
             binding_path = args.host_contract or (engine.state["host_contract"] if exists else None)
             transport = transport_factory(binding_path, deadline)
@@ -208,7 +214,10 @@ def main(argv=None, transport_factory=NativeTransport):
                 result["next_action"] = {"kind": "inspect" if result["batch_state"] in ("partial", "unresolved_effect") else "resume",
                                          "argv": [sys.executable, ENTRYPOINT, "resume", "--run-dir", str(root)],
                                          "message": "Inspect per-job issues; resume reconciles without replaying ambiguous effects."}
-        print(encoded(result).decode())
+        if args.operation == "status" and args.summary:
+            print(render_status_summary(result, engine.state))
+        else:
+            print(encoded(result).decode())
         return EXIT_CODES.get(result["batch_state"], 0)
     except BudgetExpired:
         print(encoded({"schema_version": 1, "error": "unavailable_capability", "message": "preflight exceeded the call budget; no new launch was attempted"}).decode())
@@ -226,3 +235,26 @@ def main(argv=None, transport_factory=NativeTransport):
     except KeyboardInterrupt:
         print(encoded({"schema_version": 1, "error": "interrupted", "message": "Resume from the durable checkpoint; effects may be unresolved."}).decode())
         return 130
+
+
+def render_status_summary(result, state=None):
+    """Render the stable human-readable status view without changing JSON output."""
+    columns = ("job", "pane", "state", "disposition", "lease")
+    rows = []
+    lease_by_job = {
+        job["spec"]["job_id"]: job.get("admission_lease_id")
+        for job in (state or {}).get("jobs", [])
+    }
+    for job in result.get("jobs", []):
+        lease = lease_by_job.get(job.get("job_id"))
+        rows.append((job.get("job_id"), job.get("pane_id"), job.get("phase"),
+                     job.get("worker_disposition"), lease))
+    values = [["-" if value is None or value == "" else str(value) for value in row]
+              for row in rows]
+    widths = [max(len(columns[index]), *(len(row[index]) for row in values))
+              if values else len(columns[index]) for index in range(len(columns))]
+    line = " | ".join(name.ljust(widths[index]) for index, name in enumerate(columns))
+    divider = "-+-".join("-" * width for width in widths)
+    body = [" | ".join(value.ljust(widths[index]) for index, value in enumerate(row))
+            for row in values]
+    return "\n".join([line, divider, *body])

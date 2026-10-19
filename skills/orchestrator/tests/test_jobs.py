@@ -253,6 +253,31 @@ class JobsTest(unittest.TestCase):
         before = self.events()
         code, result = self.call("status", real=True, wait_seconds=0)
         self.assertEqual((code, result["batch_state"]), (0, "collected"))
+
+    def test_status_summary_is_fixed_table_and_zero_budget_is_local_only(self):
+        self.call()
+        before = (self.run / "state.json").read_bytes()
+        command = [sys.executable, str(SCRIPT), "status", "--run-dir", str(self.run),
+                   "--wait-seconds", "0", "--summary"]
+        completed = subprocess.run(command, cwd=PACKAGE, text=True, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual((self.run / "state.json").read_bytes(), before)
+        self.assertTrue(completed.stdout.splitlines()[0].startswith("job"))
+        self.assertEqual([value.strip() for value in completed.stdout.splitlines()[0].split("|")],
+                         ["job", "pane", "state", "disposition", "lease"])
+        self.assertIn("job0", completed.stdout)
+        self.assertIn("managed-", completed.stdout)
+        self.assertNotIn("batch_state", completed.stdout)
+        self.assertEqual((self.run / "state.json").read_bytes(), before)
+
+    def test_status_default_json_output_is_unchanged(self):
+        self.call()
+        before = self.events()
+        command = [sys.executable, str(SCRIPT), "status", "--run-dir", str(self.run),
+                   "--wait-seconds", "0"]
+        completed = subprocess.run(command, cwd=PACKAGE, text=True, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, encoded(json.loads(completed.stdout)).decode() + "\n")
         self.assertEqual(self.events(), before)
 
     def test_add_appends_one_worker_to_a_persistent_run_without_replaying_old_jobs(self):
