@@ -146,6 +146,7 @@ missing or uncertain receipts and artifacts remain incomplete.
    a verified outcome, a recorded human decision, or an explicit supervision
    handoff/blocker.
 5. **Present.** Research and other artifacts follow their task's delivery contract.
+   For ongoing human-facing projects, maintain and consult the [deliverables manifest](references/deliverables.md).
    For repository changes, follow [human code inspection](references/review.md):
    show the complete task diff and files in Herdr before the action requiring the
    user's decision. Apply the standing review boundary in preferences. Finish
