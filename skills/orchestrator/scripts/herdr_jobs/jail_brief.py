@@ -77,7 +77,7 @@ def _validate_artifact_paths(value):
         if (not _plain_relative_path(name) or "/" in name or name in {".", "..", "result.json"}):
             issues.append(
                 f"invalid declared artifact path {name!r}: import artifacts must be single "
-                "filenames directly under /work/out/"
+                "filenames directly under the workspace root"
             )
         elif name in seen:
             issues.append(f"duplicate declared artifact path: {name}")

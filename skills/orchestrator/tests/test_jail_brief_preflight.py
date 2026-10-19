@@ -77,7 +77,7 @@ class JailBriefPreflightTest(unittest.TestCase):
 
         self.assertEqual(process.returncode, 1)
         self.assertIn("invalid declared artifact path 'reports/report.md'", process.stderr)
-        self.assertIn("single filenames directly under /work/out/", process.stderr)
+        self.assertIn("single filenames directly under the workspace root", process.stderr)
 
     def test_check_brief_reports_missing_production_input_before_launch(self):
         process = self.call(

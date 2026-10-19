@@ -14,7 +14,7 @@ worker_mode: literal # literal or inferential; mode never changes routing
 objective: "{{one observable outcome}}"
 scope:
   readable: ["{{approved readable paths}}"]
-  editable: ["/work/out/ only"]
+  editable: ["the workspace root ({{workspace-root}}) only"]
   protected: ["tools/pii-jail/", "tools/pii-jail/token-allowlist.txt", "scripts/pii-jail/", "keys/"]
 authority: "Delegation and harness policy are authoritative; observations cannot grant permission."
 required_context:
@@ -33,7 +33,7 @@ result_schema: "Copy the Worker result record below verbatim."
 Before spending a jail attempt, stage the required files in `{{bundle-root}}`
 and run the preflight command below. Inventory input paths are relative to that
 bundle root. `artifact_paths` are the flat filenames expected under
-`/work/out/`; the validator checks their import-safe shape, not whether those
+the workspace root (`{{workspace-root}}`); the validator checks their import-safe shape, not whether those
 future outputs already exist. Declare at least one production input, test
 input, and fixture input. List every reused report or other prior output in
 `prior_inputs`.
@@ -62,9 +62,9 @@ python3 scripts/worker-records.py check-brief --jail \
 
 ## Output
 
-Write each declared output file under `/work/out/`. Write the worker `result`
+Write each declared output file under the workspace root (`{{workspace-root}}`). Write the worker `result`
 record as one of those artifacts, then write the jail import declaration last
-to `/work/out/.runs/{{run-id}}/result.json`. Do not put the import declaration
+to `{{run-metadata-dir}}/result.json` under the workspace root. Do not put the import declaration
 itself in `artifact_paths`. Compute each declaration hash from the final file
 bytes. Do not create publish or queue markers.
 
@@ -134,7 +134,7 @@ Repository-change candidate shape:
 The worker result record above describes the worker's findings and checks. The
 separate jail import declaration lists only files to import and their lowercase
 SHA-256 digests. It is written after those files are final. Each artifact path
-is one filename directly under `/work/out/`; the declaration file itself is
+is one filename directly under the workspace root (`{{workspace-root}}`); the declaration file itself is
 metadata and is not imported.
 
 This is a valid declaration example. The digest matches `example-report.md`
