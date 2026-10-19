@@ -18,6 +18,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from herdr_jobs.engine import Engine
+from herdr_jobs.cli import preview_runtime_argv
 from herdr_jobs.admission import AdmissionStore
 from support import isolate_admission_state
 from herdr_jobs.records import digest, encoded
@@ -212,6 +213,12 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["batch_state"], result["concurrency"]), (0, "preview", 4))
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
+
+    def test_claude_preview_exposes_model_and_effort_arguments(self):
+        job = {"route": {"runtime": "claude-code"}, "model": "claude-opus-5-5",
+               "override": {"effort": "high"}}
+        self.assertEqual(preview_runtime_argv(job),
+                         ["--model", "claude-opus-5-5", "--effort", "high"])
 
     def test_shopping_admission_refuses_managed_route_with_host_pane_command(self):
         self.write_jobs(1, ["shopping"])

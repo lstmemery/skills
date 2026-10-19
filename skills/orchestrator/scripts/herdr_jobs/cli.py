@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 from .engine import Engine, WORKER_DISPOSITIONS
-from .records import JobError, digest, encoded, prepare, run_lock
+from .records import JobError, digest, effort_arguments, encoded, prepare, run_lock
 from .transport import BudgetExpired, Deadline, NativeTransport
 
 
@@ -79,6 +79,17 @@ def parse_coordinator_grades(values):
     return grades
 
 
+def preview_runtime_argv(job):
+    """Expose model and effort flags for the selected runtime in preview."""
+    runtime = job["route"]["runtime"]
+    argv = []
+    if runtime != "codex" and job.get("model") is not None:
+        argv.extend(("--model", job["model"]))
+    effort = (job.get("override") or {}).get("effort")
+    argv.extend(effort_arguments(runtime, effort))
+    return argv
+
+
 def finish_message(finish):
     validations = finish["jobs"]
     validated = [job_id for job_id, item in validations.items()
@@ -133,6 +144,7 @@ def main(argv=None, transport_factory=NativeTransport):
                       "run_dir": str(root), "jobs": [{"job_id": job["job_id"], "route": job["route"],
                         "kind": job["kind"], "model": job["model"], "provider": job["provider"],
                         "effort": (job.get("override") or {}).get("effort"),
+                        "runtime_argv": preview_runtime_argv(job),
                         "model_route": job.get("model_route"), "cwd": job["cwd"],
                         "effects": ["create workspace/pane", "start worker", "submit task", "collect artifacts"]}
                         for job in request["jobs"]]}
