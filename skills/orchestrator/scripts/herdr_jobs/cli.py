@@ -1,9 +1,11 @@
 """JSON command boundary for the durable job engine."""
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
+from .cleanup import cleanup_stale, close_workspace
 from .engine import Engine, WORKER_DISPOSITIONS
 from .records import JobError, digest, encoded, prepare, run_lock
 from .transport import BudgetExpired, Deadline, NativeTransport
@@ -22,6 +24,14 @@ class Parser(argparse.ArgumentParser):
 def parser():
     result = Parser(description="Launch, checkpoint, collect, and finish Herdr jobs and worker fleets. JSON output; Python 3.11+ / POSIX.")
     commands = result.add_subparsers(dest="operation", required=True)
+    cleanup = commands.add_parser("cleanup-stale", help="reconcile managed Herdr panes and provider leases")
+    cleanup.add_argument("--dry-run", action="store_true", default=True,
+                         help="report planned cleanup without mutations (default)")
+    cleanup.add_argument("--apply", action="store_true", help="finish mapped managed runs")
+    cleanup.add_argument("--runs-root", help="managed runs root (defaults to ~/.local/share/orchestrator/runs)")
+    cleanup.add_argument("--wait-seconds", type=float, default=30)
+    close = commands.add_parser("close-workspace", help="close a workspace after checking managed lease ownership")
+    close.add_argument("workspace_id")
     for name in ("run", "add", "resume", "status", "finish"):
         sub = commands.add_parser(name)
         sub.add_argument("--run-dir", required=True)
@@ -110,7 +120,15 @@ def main(argv=None, transport_factory=NativeTransport):
     engine = None
     try:
         args = parser().parse_args(argv)
-        if not 0 <= args.wait_seconds <= 60:
+        if args.operation == "cleanup-stale":
+            result = cleanup_stale(args, env=os.environ)
+            print(encoded(result).decode())
+            return 0 if result.get("complete", True) else EXIT_CODES["partial"]
+        if args.operation == "close-workspace":
+            result = close_workspace(args.workspace_id, env=os.environ)
+            print(encoded(result).decode())
+            return 0
+        if hasattr(args, "wait_seconds") and not 0 <= args.wait_seconds <= 60:
             raise JobError("invalid_input", "wait-seconds must be finite and between 0 and 60")
         disposition_overrides, override_reason = ({}, None)
         coordinator_grades = {}
