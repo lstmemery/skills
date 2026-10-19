@@ -75,7 +75,7 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
-Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command route `jail-agent --claude` documented in [PREFERENCES.md](../PREFERENCES.md). Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
+Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command workflow documented in [PREFERENCES.md](../PREFERENCES.md), not an unmanaged `herdr agent start` workaround. Claude Code maps to runtime `claude-code` and Herdr kind `claude`; managed launch is available only after the live host contract lists `claude` following the verification steps in [host integration](host-integration.md). Until that binding is verified, the `unavailable_capability` refusal stands. Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
 
 Ordinary jobs can select `model_level: 1` through `8`; omission uses the
 policy's CSV default unless a legacy ordinary runtime or explicit override is
@@ -164,7 +164,11 @@ native argument:
 Other runtimes, including Gemini CLI, reject an effort override before launch;
 the launcher does not assume every runtime accepts a generic `--effort` flag.
 Effort values are runtime-level capabilities; a selected model may support a
-smaller subset. A Pi provider override is also passed to Pi as `--provider` and
+smaller subset. Claude Code receives the resolved exact model as
+`--model <id>` when a model is selected, and its requested effort as
+`--effort <value>`; the host binding must verify these arguments. Effort is
+preserved as requested and is never raised automatically above `xhigh` (or any
+other level). A Pi provider override is also passed to Pi as `--provider` and
 used for admission, and requires an explicit model because Pi requires
 `--model` with `--provider`.
 

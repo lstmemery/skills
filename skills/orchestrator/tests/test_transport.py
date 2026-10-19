@@ -14,7 +14,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 HERDR_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "herdr"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.records import (JobError, digest, jail_context_path, load_json, prepare,
+from herdr_jobs.records import (JobError, digest, effort_arguments, jail_context_path, load_json, prepare,
                                 protected_paths_record, save, validate_required_context)
 from herdr_jobs.transport import (Deadline, EffectUnknown, NativeTransport, RateLimited,
                                   orchestrator_help_contract_bytes)
@@ -524,6 +524,58 @@ class TransportTest(unittest.TestCase):
 
         start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
         self.assertEqual(start[-3:], ["--", "--effort", "xhigh"])
+
+    def test_claude_kind_requires_verified_binding_and_builds_native_arguments(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="claude", model="claude-sonnet-5-5",
+                         route={"mode": "agent", "runtime": "claude-code"},
+                         override={"effort": "high"})
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.job["resolved_model"] = "claude-sonnet-5-5"
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start[-5:], ["--", "--model", "claude-sonnet-5-5", "--effort", "high"])
+
+    def test_claude_kind_is_refused_when_host_binding_does_not_list_it(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        self.available.append("claude-code")
+        self.adapter.binding["supported_kinds"] = ["codex"]
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaisesRegex(JobError, "Herdr kind is not verified as installed: claude"):
+                self.adapter.preflight({"jobs": [self.spec], "policy": {"local_lane": {}}})
+
+        self.assertFalse(any(call[:3] == ["herdr", "agent", "start"] for call in fake.calls))
+
+    def test_claude_kind_is_accepted_by_preflight_when_binding_lists_it(self):
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.available.append("claude-code")
+        self.adapter.read = lambda argv: (load_json(HERDR_FIXTURES / "status.json") if argv[1] == "status"
+                                          else {"runtimeSummary": {"availableIds": self.available}}
+                                          if argv[1] == "doctor" else self.catalog)
+        self.adapter.read_terminal = lambda argv: ""
+        help_payload = (b'{"schemaVersion":1,"fullHelp":{"args":["help","--json","--workspace","fixture"]},'
+                        b'"commands":[{"name":"help"}]}')
+        self.adapter.raw = lambda argv: (b"herdr help" if argv == ["herdr", "--help"] else
+                                         b"herdr agent help" if argv[1:3] == ["agent", "--help"] else
+                                         b"herdr pane help" if argv[1:3] == ["pane", "--help"] else
+                                         help_payload)
+        self.adapter.binding["orchestrator_help_sha256"] = digest(orchestrator_help_contract_bytes(
+            b'{"schemaVersion":1,"fullHelp":{"args":["help","--json","--workspace","fixture"]},"commands":[{"name":"help"}]}'))
+        self.adapter.binding["herdr_help_sha256"] = digest(b"herdr help")
+        self.adapter.binding["herdr_agent_help_sha256"] = digest(b"herdr agent help")
+        self.adapter.binding["herdr_pane_help_sha256"] = digest(b"herdr pane help")
+
+        result = self.adapter.preflight({"jobs": [self.spec], "policy": {"local_lane": {}}})
+        self.assertEqual(result["binding"]["supported_kinds"], ["codex", "omp", "claude"])
+
+    def test_claude_effort_arguments_preserve_explicit_xhigh_or_max(self):
+        self.assertEqual(effort_arguments("claude-code", "xhigh"), ["--effort", "xhigh"])
+        self.assertEqual(effort_arguments("claude-code", "max"), ["--effort", "max"])
 
     def test_omp_effort_maps_to_thinking_without_an_explicit_model(self):
         fake = FakeHerdr()

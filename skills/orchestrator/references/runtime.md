@@ -347,10 +347,14 @@ Recovery for a blocked Codex launch:
    pending/blocked managed run is never replayed automatically; retry from a
    fresh Codex session and a new run directory.
 
-The runtime id `claude-code` typically maps to Herdr kind `claude`; verify the
-installed mapping for every selected harness. Check startup readiness before
-submission. A prompt timeout or stalled response can occur after delivery;
-read agent state/output before any resend.
+The runtime id `claude-code` maps to Herdr kind `claude` in managed routing.
+Managed execution requires `claude` in the live host contract's
+`supported_kinds`, added only after the named helper-owned Claude worker check
+in [host integration](host-integration.md) verifies kind, pane, name, idle
+startup, native `--model`/`--effort` arguments, and prompt observation. Until
+that live binding is verified, the managed refusal stands. Check startup
+readiness before submission. A prompt timeout or stalled response can occur
+after delivery; read agent state/output before any resend.
 
 For a host-launched jailed job, use the pane command route for the exact
 `jail-agent --harness codex exec ...` process. Starting a bare Codex agent would
