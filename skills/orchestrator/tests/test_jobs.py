@@ -983,8 +983,12 @@ class JobsTest(unittest.TestCase):
         job = engine.state["jobs"][0]
         job["rate_limit_seen"] = True
         job["rate_limit_recoveries"] = 1
+        job.update(phase="started", pane_id="test-pane", settled=False)
         required_fields = [
             (engine.state, "session_id"),
+            (job, "workspace_id"),
+            (job, "rate_limit_seen"),
+            (job, "rate_limit_recoveries"),
             (job, "issue"),
             (job, "collection_error"),
             (job, "collection"),

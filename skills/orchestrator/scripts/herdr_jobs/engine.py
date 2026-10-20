@@ -228,13 +228,13 @@ class Engine:
                          or job["pane_id"] is not None)):
                 active_owners.append({"job_id": job_id, "attempt_id": attempt_id,
                                       "agent_name": job["agent_name"], "pane_id": job["pane_id"],
-                                      "workspace_id": job.get("workspace_id"), "phase": job["phase"]})
+                                      "workspace_id": job["workspace_id"], "phase": job["phase"]})
             if job["pending_effect"] is not None:
                 action = job["pending_effect"]["action"]
                 unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
                                              "kind": "pending_effect",
                                              "detail": f"{action} delivery is unverified; reconcile its exact owner before retrying."})
-            if job.get("rate_limit_seen") and job.get("rate_limit_recoveries", 0) >= 1:
+            if job["rate_limit_seen"] and job["rate_limit_recoveries"] >= 1:
                 unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
                                              "kind": "provider_usage_limit",
                                              "detail": (job["issue"] or
