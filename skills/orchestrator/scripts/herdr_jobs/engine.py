@@ -319,6 +319,12 @@ class Engine:
         return False
 
     @staticmethod
+    def checkpoint_decision_identity(decision):
+        action = (decision["detail"].partition(" delivery")[0]
+                  if decision["kind"] == "pending_effect" else None)
+        return decision["job_id"], decision["attempt_id"], decision["kind"], action
+
+    @staticmethod
     def checkpoint_decision_is_reconciled(decision, jobs_by_id):
         job = jobs_by_id.get(decision["job_id"])
         if job is None:
@@ -326,7 +332,7 @@ class Engine:
         key = (decision["job_id"], decision["attempt_id"])
         history = job["history"]
         if decision["kind"] == "pending_effect":
-            action = decision["detail"].partition(" delivery")[0]
+            action = Engine.checkpoint_decision_identity(decision)[3]
             return Engine.history_action_matches_attempt(job, history, action, key[1]) or any(
                 entry["action"] == "rate_limit_retry"
                 and entry.get("attempt_id") == key[1]
@@ -357,11 +363,10 @@ class Engine:
             missing_owners = [owner for owner in latest["active_owners"]
                               if not self.checkpoint_owner_is_reconciled(owner, summary, jobs_by_id)]
 
-            current_decision_keys = {(item["job_id"], item["attempt_id"], item["kind"])
+            current_decision_keys = {self.checkpoint_decision_identity(item)
                                      for item in summary["unresolved_decisions"]}
             missing_decisions = [item for item in latest["unresolved_decisions"]
-                                 if ((item["job_id"], item["attempt_id"], item["kind"])
-                                     not in current_decision_keys
+                                 if (self.checkpoint_decision_identity(item) not in current_decision_keys
                                      and not self.checkpoint_decision_is_reconciled(item, jobs_by_id))]
             if missing_owners or missing_decisions:
                 # A checkpoint is appended after state.json is durable. If it

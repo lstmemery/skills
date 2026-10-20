@@ -21,7 +21,7 @@ from herdr_jobs.engine import Engine
 from herdr_jobs.cli import preview_runtime_argv
 from herdr_jobs.admission import AdmissionStore
 from support import isolate_admission_state
-from herdr_jobs.records import digest, encoded
+from herdr_jobs.records import JobError, digest, encoded
 
 
 class JobsTest(unittest.TestCase):
@@ -1152,6 +1152,38 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(reconciled["reason"], "takeover_reconciled")
         self.assertEqual(reconciled["reconciles_sequence"], checkpoint["sequence"])
         self.assertIn(decision, reconciled["unresolved_decisions"])
+
+    def test_takeover_preserves_checkpoint_effect_with_different_current_action(self):
+        code, _ = self.call()
+        self.assertEqual(code, 0)
+
+        engine = Engine(self.run, None, None)
+        engine.load()
+        job = engine.state["jobs"][0]
+        job.update(phase="submitted", settled=False, history=[],
+                   pending_effect={"action": "prompt", "started_at": "2030-01-01T00:00:00+00:00"})
+        prior = engine.coordinator_checkpoint_store.latest()
+        move_decision = {"job_id": "job0", "attempt_id": job["attempt_id"],
+                         "kind": "pending_effect",
+                         "detail": "move delivery is unverified; reconcile its exact owner before retrying."}
+        checkpoint = engine.coordinator_checkpoint_store.append(
+            {"request_id": engine.state["request"]["request_id"],
+             "coordinator_owner": engine.state["session_id"], "active_owners": [],
+             "unresolved_decisions": [move_decision],
+             "next_safe_action": "Reconcile the pending move for the current attempt before retrying."},
+            "checkpoint", prior["sequence"])
+
+        with self.assertRaises(JobError) as caught:
+            engine.reconcile_coordinator_checkpoint()
+
+        self.assertEqual(caught.exception.kind, "conflict")
+        reconciled = engine.coordinator_checkpoint_store.latest()
+        self.assertEqual(reconciled["reason"], "takeover_reconciled")
+        self.assertEqual(reconciled["reconciles_sequence"], checkpoint["sequence"])
+        self.assertIn(move_decision, reconciled["unresolved_decisions"])
+        self.assertTrue(any(item["kind"] == "pending_effect"
+                            and item["detail"].startswith("prompt delivery")
+                            for item in reconciled["unresolved_decisions"]))
 
     def test_stale_pending_state_cannot_discard_checkpoint_owner_without_pane(self):
         code, result = self.call()
