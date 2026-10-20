@@ -17,16 +17,19 @@
       "history": [
         {
           "action": "split",
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "observed_at": "2030-01-01T00:00:00+00:00",
           "pane_id": "pane-old"
         },
         {
           "action": "move",
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "observed_at": "2030-01-01T00:00:00+00:00",
           "pane_id": "pane-new"
         },
         {
           "action": "start",
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "observed_at": "2030-01-01T00:00:00+00:00",
           "pane_id": "pane-new"
         }

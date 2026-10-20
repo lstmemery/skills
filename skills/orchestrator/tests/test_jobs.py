@@ -1104,6 +1104,55 @@ class JobsTest(unittest.TestCase):
         self.assertIn("owner job0 attempt", reconciled["next_safe_action"])
         self.assertIn("provider_usage_limit", reconciled["next_safe_action"])
 
+    def test_prior_attempt_prompt_history_cannot_reconcile_current_pending_effect(self):
+        code, _ = self.call()
+        self.assertEqual(code, 0)
+
+        state = self.state()
+        job = state["jobs"][0]
+        prior_attempt = "a" * 32
+        if prior_attempt == job["attempt_id"]:
+            prior_attempt = "b" * 32
+        job["history"].extend((
+            {"action": "prompt", "attempt_id": prior_attempt},
+            {"action": "prompt"},
+            {"action": "rate_limit_retry", "attempt_id": prior_attempt,
+             "pending_action": "prompt"},
+        ))
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        engine = Engine(self.run, None, None)
+        engine.load()
+        previous = engine.coordinator_checkpoint_store.latest()
+        decision = {"job_id": "job0", "attempt_id": job["attempt_id"],
+                    "kind": "pending_effect",
+                    "detail": "prompt delivery is unverified; reconcile its exact owner before retrying."}
+        checkpoint = engine.coordinator_checkpoint_store.append(
+            {"request_id": state["request"]["request_id"],
+             "coordinator_owner": state["session_id"], "active_owners": [],
+             "unresolved_decisions": [decision],
+             "next_safe_action": "Reconcile the pending prompt for the current attempt before retrying."},
+            "checkpoint", previous["sequence"])
+        checkpoint_path = self.run / "coordinator-checkpoints.jsonl"
+        original_log = checkpoint_path.read_bytes()
+        effects_before = [event["action"] for event in self.events()
+                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+
+        successor_code, result = self.call("resume", wait_seconds=0.3)
+
+        self.assertEqual(successor_code, 3)
+        self.assertEqual(result["error"], "conflict")
+        self.assertIn("pending_effect", result["message"])
+        effects_after = [event["action"] for event in self.events()
+                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+        self.assertEqual(effects_after, effects_before)
+        reconciled_log = checkpoint_path.read_bytes()
+        self.assertTrue(reconciled_log.startswith(original_log))
+        reconciled = json.loads(reconciled_log.splitlines()[-1])
+        self.assertEqual(reconciled["reason"], "takeover_reconciled")
+        self.assertEqual(reconciled["reconciles_sequence"], checkpoint["sequence"])
+        self.assertIn(decision, reconciled["unresolved_decisions"])
+
     def test_stale_pending_state_cannot_discard_checkpoint_owner_without_pane(self):
         code, result = self.call()
         self.assertEqual((code, result["batch_state"]), (0, "collected"))

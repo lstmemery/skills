@@ -302,6 +302,23 @@ class Engine:
                     and observed["state"] in ("idle", "done", "exited"))
 
     @staticmethod
+    def history_action_matches_attempt(job, history, action, attempt_id):
+        for index, entry in enumerate(history):
+            if entry["action"] != action:
+                continue
+            entry_attempt = entry.get("attempt_id")
+            if entry_attempt is not None:
+                if entry_attempt == attempt_id:
+                    return True
+                continue
+            next_retry = next((retry for retry in history[index + 1:]
+                               if retry["action"] == "rate_limit_retry"), None)
+            if (next_retry is None and job["attempt_id"] == attempt_id
+                    or next_retry is not None and next_retry.get("attempt_id") == attempt_id):
+                return True
+        return False
+
+    @staticmethod
     def checkpoint_decision_is_reconciled(decision, jobs_by_id):
         job = jobs_by_id.get(decision["job_id"])
         if job is None:
@@ -310,15 +327,10 @@ class Engine:
         history = job["history"]
         if decision["kind"] == "pending_effect":
             action = decision["detail"].partition(" delivery")[0]
-            return any(
-                entry["action"] == action and (
-                    job["attempt_id"] == key[1]
-                    or entry.get("attempt_id") == key[1]
-                )
-                for entry in history
-            ) or any(entry["action"] == "rate_limit_retry"
-                     and entry.get("attempt_id") == key[1]
-                     and entry.get("pending_action") == action for entry in history)
+            return Engine.history_action_matches_attempt(job, history, action, key[1]) or any(
+                entry["action"] == "rate_limit_retry"
+                and entry.get("attempt_id") == key[1]
+                and entry.get("pending_action") == action for entry in history)
         if decision["kind"] == "provider_usage_limit":
             return any(entry["action"] == "rate_limit_retry"
                        and entry.get("attempt_id") == key[1] for entry in history)
@@ -913,7 +925,8 @@ class Engine:
                                 or (action == "start" and result.get("prompt_submitted") is True))
         if prompt_was_submitted and job["telemetry"]["started_at"] is None:
             job["telemetry"]["started_at"] = job["pending_effect"]["started_at"]
-        job["history"].append({"action": action, "observed_at": now(), "pane_id": job["pane_id"]})
+        job["history"].append({"action": action, "attempt_id": job["attempt_id"],
+                               "observed_at": now(), "pane_id": job["pane_id"]})
         if not (action == "start" and result.get("launch_blocked") is True):
             job["pending_effect"] = None
         self.checkpoint()
@@ -1238,14 +1251,16 @@ class Engine:
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["issue"] = None
-            job["history"].append({"action": pending["action"], "reconciled_by": "matching receipt", "observed_at": now()})
+            job["history"].append({"action": pending["action"], "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "matching receipt", "observed_at": now()})
         codex_start = self.is_codex_pending_start(job, pending)
         if codex_start and job["collection"] and not job["collection_error"]:
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["issue"] = None
-            job["history"].append({"action": "start", "reconciled_by": "matching receipt", "observed_at": now()})
+            job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "matching receipt", "observed_at": now()})
         try:
             observation = self.transport.observe(job)
         except JobError as error:
@@ -1276,23 +1291,27 @@ class Engine:
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
-            job["history"].append({"action": "start", "reconciled_by": "observed Codex Working state", "observed_at": now()})
+            job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "observed Codex Working state", "observed_at": now()})
         elif (pending and pending["action"] == "prompt" and observation.get("prompt_verified")
               and job["spec"]["route"]["mode"] == "agent"):
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["issue"] = None
-            job["history"].append({"action": "prompt", "reconciled_by": "observed visible Working state",
+            job["history"].append({"action": "prompt", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "observed visible Working state",
                                    "observed_at": now()})
         elif pending and pending["action"] == "jail" and lifecycle == "exited":
             job["phase"] = "submitted"
             job["pending_effect"] = None
-            job["history"].append({"action": "jail", "reconciled_by": "owned launcher exit record", "observed_at": now()})
+            job["history"].append({"action": "jail", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "owned launcher exit record", "observed_at": now()})
         elif pending and pending["action"] == "start" and not codex_start and lifecycle in ("idle", "done", "blocked"):
             job["phase"] = "ready"
             job["pending_effect"] = None
-            job["history"].append({"action": "start", "reconciled_by": "owned worker identity", "observed_at": now()})
+            job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "owned worker identity", "observed_at": now()})
         receipt_valid = job["collection"] is not None and job["collection_error"] is None
         if receipt_valid or lifecycle == "exited":
             job["activity_seen"] = True
