@@ -88,6 +88,7 @@ def legacy_engine_at_phase(request_value, run_dir, phase):
             seed = deepcopy(engine.state)
             engine.checkpoint()
             engine.launch(engine.state["jobs"][0])
+            engine.checkpoint()
         elif phase in {"split", "moved", "retry_ready"}:
             if phase == "retry_ready":
                 engine.state["jobs"][0]["retry_profile"] = {"profile": "fixture"}
@@ -199,8 +200,10 @@ class CompatibilityTest(unittest.TestCase):
                 legacy_run_dir = root / "legacy"
                 legacy_engine, seed = legacy_engine_at_phase(request_value, legacy_run_dir, phase)
                 legacy_result = legacy_engine.result()
+                legacy_persisted_state = json.loads(
+                    (legacy_run_dir / "state.json").read_text(encoding="utf-8"))
                 expected = fixtures[phase]
-                legacy_view = launch_compatibility_view(legacy_result, legacy_engine.state)
+                legacy_view = launch_compatibility_view(legacy_result, legacy_persisted_state)
                 self.assertEqual(
                     {"result": normalized(legacy_view[0], legacy_run_dir),
                      "state": normalized(legacy_view[1], legacy_run_dir)},
@@ -215,7 +218,7 @@ class CompatibilityTest(unittest.TestCase):
                     admission_service=AdmissionService(FakeAdmissionStore()),
                 )
                 compatibility = CompatibilityRunner(
-                    lambda _request: RunResult(state=legacy_engine.state, result=legacy_result),
+                    lambda _request: RunResult(state=legacy_persisted_state, result=legacy_result),
                     projector=launch_compatibility_view,
                 )
                 result = compatibility.run(
@@ -226,7 +229,9 @@ class CompatibilityTest(unittest.TestCase):
                     stop_at_phase=None if phase == "ready" else phase,
                     attempt_id_factory=lambda: ATTEMPT_ID,
                 )
-                reducer_view = launch_compatibility_view(result.result, result.state)
+                reducer_persisted_state = reducer_store.load()
+                self.assertIsNotNone(reducer_persisted_state)
+                reducer_view = launch_compatibility_view(result.result, reducer_persisted_state)
                 reducer_root = root / "reducer"
                 self.assertEqual(
                     {"result": normalized(reducer_view[0], reducer_root),
