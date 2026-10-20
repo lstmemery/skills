@@ -16,8 +16,9 @@ from .records import (JobError, atomic_bytes, digest, encoded, fields, integer, 
 class CoordinatorCheckpointStore:
     """Append compact takeover summaries without replacing earlier records."""
 
-    MAX_RECORD_BYTES = 65536
-    MAX_ENTRIES = 128
+    MAX_RECORD_BYTES = 2 * 1024 * 1024
+    MAX_ACTIVE_OWNERS = 128
+    MAX_DECISIONS = 512
 
     def __init__(self, path: str | Path):
         self.path = Path(path).absolute()
@@ -67,7 +68,8 @@ class CoordinatorCheckpointStore:
                 raise JobError("conflict", "coordinator checkpoint cannot reconcile a future sequence")
         for name in ("active_owners", "unresolved_decisions"):
             values = record[name]
-            if not isinstance(values, list) or len(values) > self.MAX_ENTRIES:
+            limit = self.MAX_ACTIVE_OWNERS if name == "active_owners" else self.MAX_DECISIONS
+            if not isinstance(values, list) or len(values) > limit:
                 raise JobError("conflict", f"coordinator checkpoint {name} is invalid")
         for owner in record["active_owners"]:
             fields(owner, ["job_id", "attempt_id", "agent_name", "pane_id", "workspace_id", "phase"],

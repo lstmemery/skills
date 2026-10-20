@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from herdr_jobs.engine import Engine
 from herdr_jobs.cli import preview_runtime_argv
 from herdr_jobs.admission import AdmissionStore
+from herdr_jobs.store import CoordinatorCheckpointStore
 from support import isolate_admission_state
 from herdr_jobs.records import JobError, digest, encoded
 
@@ -1184,6 +1185,23 @@ class JobsTest(unittest.TestCase):
         self.assertTrue(any(item["kind"] == "pending_effect"
                             and item["detail"].startswith("prompt delivery")
                             for item in reconciled["unresolved_decisions"]))
+
+    def test_checkpoint_store_accepts_worst_case_decision_count(self):
+        store = CoordinatorCheckpointStore(self.run / "capacity-checkpoints.jsonl")
+        decisions = [
+            {"job_id": f"job{index}", "attempt_id": f"{index:032x}",
+             "kind": kind, "detail": "x" * 512}
+            for index in range(128)
+            for kind in ("pending_effect", "provider_usage_limit", "collection_error", "worker_result")
+        ]
+        summary = {"request_id": "test-request", "coordinator_owner": "coordinator",
+                   "active_owners": [], "unresolved_decisions": decisions,
+                   "next_safe_action": "Review each decision before issuing work."}
+
+        checkpoint = store.append(summary, "initial")
+
+        self.assertEqual(len(checkpoint["unresolved_decisions"]), 512)
+        self.assertEqual(len(store.latest()["unresolved_decisions"]), 512)
 
     def test_stale_pending_state_cannot_discard_checkpoint_owner_without_pane(self):
         code, result = self.call()
