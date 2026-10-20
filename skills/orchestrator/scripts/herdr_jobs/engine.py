@@ -237,7 +237,7 @@ class Engine:
             if job.get("rate_limit_seen") and job.get("rate_limit_recoveries", 0) >= 1:
                 unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
                                              "kind": "provider_usage_limit",
-                                             "detail": (job.get("issue") or
+                                             "detail": (job["issue"] or
                                                         "provider usage limit persisted after one recovery; coordinator review required")[:512]})
             elif job["issue"]:
                 unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
@@ -246,7 +246,7 @@ class Engine:
                 unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
                                              "kind": "collection_error",
                                              "detail": str(job["collection_error"])[:512]})
-            collection = job.get("collection")
+            collection = job["collection"]
             if (collection is not None
                     and (collection["outcome"] != "complete" or collection["unresolved"])):
                 detail = "; ".join(collection["unresolved"][:4]) or collection["outcome"]
@@ -276,7 +276,7 @@ class Engine:
             next_action = "Review collected worker receipts and artifacts, then finish coordinator disposition if required."
 
         return {"request_id": self.state["request"]["request_id"],
-                "coordinator_owner": str(self.state.get("session_id") or "unknown"),
+                "coordinator_owner": str(self.state["session_id"]),
                 "active_owners": active_owners, "unresolved_decisions": unresolved_decisions,
                 "next_safe_action": next_action}
 
@@ -297,7 +297,7 @@ class Engine:
                        for entry in job["history"])
         if owner["pane_id"] in job["previous_pane_ids"]:
             return True
-        observed = job.get("observed")
+        observed = job["observed"]
         return bool(job["settled"] and observed and observed.get("identity_verified") is True
                     and observed.get("state") in ("idle", "done", "exited"))
 
@@ -325,12 +325,12 @@ class Engine:
         if job["attempt_id"] != key[1]:
             return any(entry.get("attempt_id") == key[1] for entry in history)
         if decision["kind"] in ("collection_error", "worker_result"):
-            collection = job.get("collection")
-            return bool(collection is not None and job.get("collection_error") is None
+            collection = job["collection"]
+            return bool(collection is not None and job["collection_error"] is None
                         and collection["outcome"] == "complete" and not collection["unresolved"])
         if decision["kind"] == "coordinator_review":
-            observed = job.get("observed")
-            return bool(job.get("issue") is None and observed
+            observed = job["observed"]
+            return bool(job["issue"] is None and observed
                         and observed.get("identity_verified") is True)
         return False
 

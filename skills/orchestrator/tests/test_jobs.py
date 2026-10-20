@@ -974,6 +974,54 @@ class JobsTest(unittest.TestCase):
                             for item in successor_checkpoint["unresolved_decisions"]))
         self.assertIn("do not retry it", successor_checkpoint["next_safe_action"])
 
+    def test_coordinator_checkpoint_summary_fails_fast_on_missing_required_state_fields(self):
+        code, _ = self.call()
+        self.assertEqual(code, 0)
+
+        engine = Engine(self.run, None, None)
+        engine.load()
+        job = engine.state["jobs"][0]
+        job["rate_limit_seen"] = True
+        job["rate_limit_recoveries"] = 1
+        required_fields = [
+            (engine.state, "session_id"),
+            (job, "issue"),
+            (job, "collection_error"),
+            (job, "collection"),
+        ]
+        for record, field in required_fields:
+            with self.subTest(field=field):
+                value = record.pop(field)
+                try:
+                    with self.assertRaises(KeyError):
+                        engine.coordinator_checkpoint_summary()
+                finally:
+                    record[field] = value
+
+        job_id = job["spec"]["job_id"]
+        required_decision_fields = [
+            ("collection", "collection_error"),
+            ("collection_error", "collection_error"),
+            ("issue", "coordinator_review"),
+        ]
+        for field, kind in required_decision_fields:
+            with self.subTest(reconciliation_field=field):
+                value = job.pop(field)
+                try:
+                    decision = {"job_id": job_id, "attempt_id": job["attempt_id"], "kind": kind}
+                    with self.assertRaises(KeyError):
+                        Engine.checkpoint_decision_is_reconciled(decision, {job_id: job})
+                finally:
+                    job[field] = value
+
+        owner = {"job_id": job_id, "attempt_id": job["attempt_id"], "pane_id": None}
+        value = job.pop("observed")
+        try:
+            with self.assertRaises(KeyError):
+                engine.checkpoint_owner_is_reconciled(owner, {"active_owners": []}, {job_id: job})
+        finally:
+            job["observed"] = value
+
     def test_stale_state_cannot_erase_checkpoint_owner_or_decision_before_launch(self):
         self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         self.configure(jobs={"job0": "rate_limited_always"})
