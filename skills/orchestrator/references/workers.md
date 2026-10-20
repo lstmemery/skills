@@ -4,6 +4,22 @@ Read when preparing an assignment, following up, or validating a result.
 
 ## Assignment
 
+### HITL access-path completion
+
+Keep human-in-the-loop interaction for tasks that require a user-visible
+device action. When a task depends on more than one way to reach a device or
+service, track every relevant access path separately in the completion
+checklist (for example, Wi-Fi and cellular, or SSH and herdr). Mark each path
+`verified` only when that path itself was checked during the task; otherwise
+mark it `unverified` and state why. A helper working does not verify an access
+path, and an incomplete session does not establish one.
+
+The final report and `outcome.md` must each list the verified paths and the
+unverified paths separately. If the user closes the pane before the task is
+complete, the coordinator must still record a partial outcome. List the paths
+verified so far, list paths that remain unverified, and identify any path whose
+status is unknown because it was not checked. Do not fill gaps by inference.
+
 Every brief starts with this required **brief core**. Replace every placeholder
 before dispatch; keep the field names and the exact task identity unchanged.
 `worker_mode` is a prompt contract and does not select or change the model

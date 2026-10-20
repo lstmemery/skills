@@ -3,6 +3,14 @@
 Use `research/<project>/CURRENT.md` under the workspace root as the current
 deliverables manifest for each ongoing human-in-the-loop project.
 
+For HITL task completion, the final report and `outcome.md` must each name
+verified and unverified access paths in separate lists. Track each relevant
+path independently in the completion checklist; only mark a path verified when
+that path was checked. A successful helper or an incomplete session does not
+prove verification. If the user closes the pane early, record a partial outcome
+with the paths verified so far, the paths still unverified, and any paths whose
+status is unknown.
+
 Update it whenever the coordinator delivers a human-facing artifact for an
 ongoing project. Replace the superseded entry and retain that generation's path
 in the new entry's `Supersedes` field. Record the artifact's role, absolute
