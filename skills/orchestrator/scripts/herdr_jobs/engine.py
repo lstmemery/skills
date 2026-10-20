@@ -37,6 +37,7 @@ class Engine:
         self.grade_record_path = self.root / "coordinator-grades.json"
         self.coordinator_checkpoint_store = CoordinatorCheckpointStore(
             self.root / "coordinator-checkpoints.jsonl")
+        self.coordinator_takeover_reconciled = False
         self.coordinator_grades = {}
         self.telemetry_grade_tampering = set()
 
@@ -279,12 +280,110 @@ class Engine:
                 "active_owners": active_owners, "unresolved_decisions": unresolved_decisions,
                 "next_safe_action": next_action}
 
+    def checkpoint_owner_is_reconciled(self, owner, summary, jobs_by_id):
+        key = (owner["job_id"], owner["attempt_id"])
+        matching = [item for item in summary["active_owners"]
+                    if (item["job_id"], item["attempt_id"]) == key]
+        if any(item["pane_id"] == owner["pane_id"] for item in matching):
+            return True
+        job = jobs_by_id.get(owner["job_id"])
+        if job is None:
+            return False
+        if job["attempt_id"] != owner["attempt_id"]:
+            return any(entry.get("action") == "rate_limit_retry"
+                       and entry.get("attempt_id") == owner["attempt_id"]
+                       and (owner["pane_id"] is None or entry.get("pane_id") == owner["pane_id"])
+                       for entry in job["history"])
+        if owner["pane_id"] is None:
+            return True
+        if owner["pane_id"] in job["previous_pane_ids"]:
+            return True
+        observed = job.get("observed")
+        return bool(job["settled"] and observed and observed.get("identity_verified") is True
+                    and observed.get("state") in ("idle", "done", "exited"))
+
+    @staticmethod
+    def checkpoint_decision_is_reconciled(decision, jobs_by_id):
+        job = jobs_by_id.get(decision["job_id"])
+        if job is None:
+            return False
+        key = (decision["job_id"], decision["attempt_id"])
+        history = job["history"]
+        if decision["kind"] == "pending_effect":
+            action = decision["detail"].partition(" delivery")[0]
+            return any(
+                entry.get("action") == action and (
+                    job["attempt_id"] == key[1]
+                    or entry.get("attempt_id") == key[1]
+                )
+                for entry in history
+            ) or any(entry.get("action") == "rate_limit_retry"
+                     and entry.get("attempt_id") == key[1]
+                     and entry.get("pending_action") == action for entry in history)
+        if decision["kind"] == "provider_usage_limit":
+            return any(entry.get("action") == "rate_limit_retry"
+                       and entry.get("attempt_id") == key[1] for entry in history)
+        if job["attempt_id"] != key[1]:
+            return any(entry.get("attempt_id") == key[1] for entry in history)
+        if decision["kind"] in ("collection_error", "worker_result"):
+            collection = job.get("collection")
+            return bool(collection is not None and job.get("collection_error") is None
+                        and collection["outcome"] == "complete" and not collection["unresolved"])
+        if decision["kind"] == "coordinator_review":
+            observed = job.get("observed")
+            return bool(job.get("issue") is None and observed
+                        and observed.get("identity_verified") is True)
+        return False
+
     def reconcile_coordinator_checkpoint(self, reason="state_reconciled"):
         summary = self.coordinator_checkpoint_summary()
         latest = self.coordinator_checkpoint_store.latest()
         summary_digest = digest(encoded(summary))
         if latest is not None and latest["request_id"] != summary["request_id"]:
             raise JobError("conflict", "coordinator checkpoint belongs to another run request")
+        if latest is not None and not self.coordinator_takeover_reconciled:
+            jobs_by_id = {job["spec"]["job_id"]: job for job in self.state["jobs"]}
+            missing_owners = [owner for owner in latest["active_owners"]
+                              if not self.checkpoint_owner_is_reconciled(owner, summary, jobs_by_id)]
+
+            current_decision_keys = {(item["job_id"], item["attempt_id"], item["kind"])
+                                     for item in summary["unresolved_decisions"]}
+            missing_decisions = [item for item in latest["unresolved_decisions"]
+                                 if ((item["job_id"], item["attempt_id"], item["kind"])
+                                     not in current_decision_keys
+                                     and not self.checkpoint_decision_is_reconciled(item, jobs_by_id))]
+            if missing_owners or missing_decisions:
+                # A checkpoint is appended after state.json is durable. If it
+                # contains an owner or decision absent from state, neither
+                # record is safe to discard: the successor cannot tell whether
+                # state is stale or the checkpoint is stale. Preserve both
+                # views and stop before any new external effect.
+                for owner in missing_owners:
+                    if owner not in summary["active_owners"]:
+                        summary["active_owners"].append(owner)
+                for decision in missing_decisions:
+                    if decision not in summary["unresolved_decisions"]:
+                        summary["unresolved_decisions"].append(decision)
+                evidence = []
+                evidence.extend(
+                    f"owner {owner['job_id']} attempt {owner['attempt_id']} at "
+                    f"{owner['pane_id'] or 'an unverified pane'}"
+                    for owner in missing_owners[:4]
+                )
+                evidence.extend(
+                    f"{item['kind']} for {item['job_id']} attempt {item['attempt_id']}: {item['detail']}"
+                    for item in missing_decisions[:4]
+                )
+                summary["next_safe_action"] = (
+                    "Reconcile checkpoint evidence missing from durable state: "
+                    + "; ".join(evidence)
+                    + ". Do not issue work until the recorded owner and decision are reconciled."
+                )[:4096]
+                reconciliation_digest = digest(encoded(summary))
+                if latest["summary_sha256"] != reconciliation_digest:
+                    self.coordinator_checkpoint_store.append(
+                        summary, "takeover_reconciled", latest["sequence"])
+                raise JobError("conflict", summary["next_safe_action"])
         if latest is not None and latest["summary_sha256"] == summary_digest:
             return latest
         if latest is None:
@@ -1247,6 +1346,7 @@ class Engine:
     def drive(self, status_only=False):
         try:
             self.reconcile_coordinator_checkpoint()
+            self.coordinator_takeover_reconciled = True
             if not status_only:
                 for job in self.state["jobs"]:
                     if (not job["settled"]

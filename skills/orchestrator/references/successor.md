@@ -26,7 +26,9 @@ operations](runtime.md) for live Herdr/model inspection, and the
    worker through its existing exact handle and supervision mechanism; an
    unknown registry lookup or missing signal is not permission to duplicate,
    stop, alter, or relaunch it. Append the reconciled state before issuing more
-   work. Never infer an exact outcome without evidence; retry only after
+   work. If the checkpoint lists an owner or decision absent from durable state,
+   preserve both records and stop before issuing work until that evidence is
+   reconciled. Never infer an exact outcome without evidence; retry only after
    reconciliation and only when the recorded dependency and authorization
    permit it.
 4. **Acknowledge before control.** Before launching any work or mutating todo/task
