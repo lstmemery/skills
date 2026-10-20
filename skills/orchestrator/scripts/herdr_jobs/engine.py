@@ -291,7 +291,7 @@ class Engine:
         if job is None:
             return False
         if job["attempt_id"] != owner["attempt_id"]:
-            return any(entry.get("action") == "rate_limit_retry"
+            return any(entry["action"] == "rate_limit_retry"
                        and entry.get("attempt_id") == owner["attempt_id"]
                        and (owner["pane_id"] is None or entry.get("pane_id") == owner["pane_id"])
                        for entry in job["history"])
@@ -311,16 +311,16 @@ class Engine:
         if decision["kind"] == "pending_effect":
             action = decision["detail"].partition(" delivery")[0]
             return any(
-                entry.get("action") == action and (
+                entry["action"] == action and (
                     job["attempt_id"] == key[1]
                     or entry.get("attempt_id") == key[1]
                 )
                 for entry in history
-            ) or any(entry.get("action") == "rate_limit_retry"
+            ) or any(entry["action"] == "rate_limit_retry"
                      and entry.get("attempt_id") == key[1]
                      and entry.get("pending_action") == action for entry in history)
         if decision["kind"] == "provider_usage_limit":
-            return any(entry.get("action") == "rate_limit_retry"
+            return any(entry["action"] == "rate_limit_retry"
                        and entry.get("attempt_id") == key[1] for entry in history)
         if job["attempt_id"] != key[1]:
             return any(entry.get("attempt_id") == key[1] for entry in history)

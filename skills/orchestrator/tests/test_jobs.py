@@ -1026,6 +1026,23 @@ class JobsTest(unittest.TestCase):
         finally:
             job["observed"] = value
 
+        history = job["history"]
+        job["history"] = [{}]
+        try:
+            decision = {"job_id": job_id, "attempt_id": job["attempt_id"],
+                        "kind": "provider_usage_limit"}
+            with self.assertRaises(KeyError):
+                Engine.checkpoint_decision_is_reconciled(decision, {job_id: job})
+            stale_attempt = "a" * 32
+            if stale_attempt == job["attempt_id"]:
+                stale_attempt = "b" * 32
+            stale_owner = {"job_id": job_id, "attempt_id": stale_attempt, "pane_id": None}
+            with self.assertRaises(KeyError):
+                engine.checkpoint_owner_is_reconciled(
+                    stale_owner, {"active_owners": []}, {job_id: job})
+        finally:
+            job["history"] = history
+
     def test_stale_state_cannot_erase_checkpoint_owner_or_decision_before_launch(self):
         self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
         self.configure(jobs={"job0": "rate_limited_always"})
