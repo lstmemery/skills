@@ -26,6 +26,8 @@ from herdr_jobs.records import JobError, digest, encoded
 
 
 class JobsTest(unittest.TestCase):
+    TAKEOVER_EFFECT_ACTIONS = frozenset(("split", "move", "start", "prompt", "jail"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
@@ -954,14 +956,14 @@ class JobsTest(unittest.TestCase):
         self.assertIn("single bounded recovery", decision["detail"])
         self.assertIn("do not retry it", checkpoint["next_safe_action"])
         effects_before = [event["action"] for event in self.events()
-                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                          if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
 
         successor_code, _ = self.call("resume", wait_seconds=0.3)
 
         self.assertIn(successor_code, (0, 10))
         self.assertTrue(checkpoint_path.read_bytes().startswith(original_log))
         effects_after = [event["action"] for event in self.events()
-                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                         if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
         self.assertEqual(effects_after, effects_before)
         successor_log = checkpoint_path.read_bytes()
         successor_checkpoints = [json.loads(line) for line in successor_log.splitlines()]
@@ -1084,7 +1086,7 @@ class JobsTest(unittest.TestCase):
                    rate_limit_until=None, admission_acquired=False)
         (self.run / "state.json").write_bytes(encoded(stale_state) + b"\n")
         effects_before = [event["action"] for event in self.events()
-                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                          if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
 
         successor_code, result = self.call("resume", wait_seconds=0.3)
 
@@ -1092,7 +1094,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["error"], "conflict")
         self.assertIn("Do not issue work", result["message"])
         effects_after = [event["action"] for event in self.events()
-                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                         if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
         self.assertEqual(effects_after, effects_before)
         reconciled_log = checkpoint_path.read_bytes()
         self.assertTrue(reconciled_log.startswith(original_log))
@@ -1137,7 +1139,7 @@ class JobsTest(unittest.TestCase):
         checkpoint_path = self.run / "coordinator-checkpoints.jsonl"
         original_log = checkpoint_path.read_bytes()
         effects_before = [event["action"] for event in self.events()
-                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                          if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
 
         successor_code, result = self.call("resume", wait_seconds=0.3)
 
@@ -1145,7 +1147,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["error"], "conflict")
         self.assertIn("pending_effect", result["message"])
         effects_after = [event["action"] for event in self.events()
-                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                         if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
         self.assertEqual(effects_after, effects_before)
         reconciled_log = checkpoint_path.read_bytes()
         self.assertTrue(reconciled_log.startswith(original_log))
@@ -1230,7 +1232,7 @@ class JobsTest(unittest.TestCase):
         checkpoint_path = self.run / "coordinator-checkpoints.jsonl"
         original_log = checkpoint_path.read_bytes()
         effects_before = [event["action"] for event in self.events()
-                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                          if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
 
         successor_code, result = self.call("resume", wait_seconds=0.3)
 
@@ -1238,7 +1240,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["error"], "conflict")
         self.assertIn("owner job0 attempt", result["message"])
         effects_after = [event["action"] for event in self.events()
-                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+                         if event["action"] in self.TAKEOVER_EFFECT_ACTIONS]
         self.assertEqual(effects_after, effects_before)
         reconciled_log = checkpoint_path.read_bytes()
         self.assertTrue(reconciled_log.startswith(original_log))
