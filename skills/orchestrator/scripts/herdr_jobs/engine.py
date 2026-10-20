@@ -20,6 +20,7 @@ from .lifecycle import JobLifecycle
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
 from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
+from .store import CoordinatorCheckpointStore
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted"}
@@ -34,6 +35,9 @@ class Engine:
         self.lifecycle = JobLifecycle()
         self.state = None
         self.grade_record_path = self.root / "coordinator-grades.json"
+        self.coordinator_checkpoint_store = CoordinatorCheckpointStore(
+            self.root / "coordinator-checkpoints.jsonl")
+        self.coordinator_takeover_reconciled = False
         self.coordinator_grades = {}
         self.telemetry_grade_tampering = set()
 
@@ -211,6 +215,199 @@ class Engine:
             output.mkdir(parents=True, exist_ok=True, mode=0o700)
             save(output / "telemetry.json", telemetry)
         save(self.path, persisted)
+        self.reconcile_coordinator_checkpoint(reason="checkpoint")
+
+    def coordinator_checkpoint_summary(self):
+        active_owners = []
+        unresolved_decisions = []
+        for job in self.state["jobs"]:
+            job_id = job["spec"]["job_id"]
+            attempt_id = job["attempt_id"]
+            if (not job["settled"]
+                    and (job["phase"] != "pending" or job["pending_effect"] is not None
+                         or job["pane_id"] is not None)):
+                active_owners.append({"job_id": job_id, "attempt_id": attempt_id,
+                                      "agent_name": job["agent_name"], "pane_id": job["pane_id"],
+                                      "workspace_id": job["workspace_id"], "phase": job["phase"]})
+            if job["pending_effect"] is not None:
+                action = job["pending_effect"]["action"]
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "pending_effect",
+                                             "detail": f"{action} delivery is unverified; reconcile its exact owner before retrying."})
+            if job["rate_limit_seen"] and job["rate_limit_recoveries"] >= 1:
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "provider_usage_limit",
+                                             "detail": (job["issue"] or
+                                                        "provider usage limit persisted after one recovery; coordinator review required")[:512]})
+            elif job["issue"]:
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "coordinator_review", "detail": str(job["issue"])[:512]})
+            if job["collection_error"]:
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "collection_error",
+                                             "detail": str(job["collection_error"])[:512]})
+            collection = job["collection"]
+            if (collection is not None
+                    and (collection["outcome"] != "complete" or collection["unresolved"])):
+                detail = "; ".join(collection["unresolved"][:4]) or collection["outcome"]
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "worker_result", "detail": detail[:512]})
+
+        if unresolved_decisions:
+            decision = unresolved_decisions[0]
+            if decision["kind"] == "provider_usage_limit":
+                next_action = (f"Review the provider usage-limit decision for job {decision['job_id']} "
+                               f"attempt {decision['attempt_id']}; do not retry it. Reconcile its worker owner "
+                               "before continuing with independent pending work.")
+            elif decision["kind"] == "pending_effect":
+                next_action = (f"Reconcile job {decision['job_id']} attempt {decision['attempt_id']} "
+                               f"({decision['detail']}) against its recorded worker before retrying or starting work.")
+            else:
+                next_action = (f"Review {decision['kind']} for job {decision['job_id']} attempt "
+                               f"{decision['attempt_id']}, then resume only after reconciling its owner and evidence.")
+        elif active_owners:
+            owner = active_owners[0]
+            pane = owner["pane_id"] or "unverified pane"
+            next_action = (f"Observe job {owner['job_id']} attempt {owner['attempt_id']} at {pane} and "
+                           "reconcile its result before launching pending work.")
+        elif any(not job["settled"] for job in self.state["jobs"]):
+            next_action = "Resume the run and launch the next pending job in request order, subject to concurrency and admission limits."
+        else:
+            next_action = "Review collected worker receipts and artifacts, then finish coordinator disposition if required."
+
+        return {"request_id": self.state["request"]["request_id"],
+                "coordinator_owner": str(self.state["session_id"]),
+                "active_owners": active_owners, "unresolved_decisions": unresolved_decisions,
+                "next_safe_action": next_action}
+
+    def checkpoint_owner_is_reconciled(self, owner, summary, jobs_by_id):
+        key = (owner["job_id"], owner["attempt_id"])
+        matching = [item for item in summary["active_owners"]
+                    if (item["job_id"], item["attempt_id"]) == key]
+        if matching and (owner["pane_id"] is None
+                         or any(item["pane_id"] == owner["pane_id"] for item in matching)):
+            return True
+        job = jobs_by_id.get(owner["job_id"])
+        if job is None:
+            return False
+        if job["attempt_id"] != owner["attempt_id"]:
+            return any(entry["action"] == "rate_limit_retry"
+                       and entry.get("attempt_id") == owner["attempt_id"]
+                       and (owner["pane_id"] is None or entry.get("pane_id") == owner["pane_id"])
+                       for entry in job["history"])
+        if owner["pane_id"] in job["previous_pane_ids"]:
+            return True
+        observed = job["observed"]
+        return bool(job["settled"] and observed and observed["identity_verified"] is True
+                    and observed["state"] in ("idle", "done", "exited"))
+
+    @staticmethod
+    def history_action_matches_attempt(job, history, action, attempt_id):
+        for index, entry in enumerate(history):
+            if entry["action"] != action:
+                continue
+            entry_attempt = entry.get("attempt_id")
+            if entry_attempt is not None:
+                if entry_attempt == attempt_id:
+                    return True
+                continue
+            next_retry = next((retry for retry in history[index + 1:]
+                               if retry["action"] == "rate_limit_retry"), None)
+            if (next_retry is None and job["attempt_id"] == attempt_id
+                    or next_retry is not None and next_retry.get("attempt_id") == attempt_id):
+                return True
+        return False
+
+    @staticmethod
+    def checkpoint_decision_identity(decision):
+        action = (decision["detail"].partition(" delivery")[0]
+                  if decision["kind"] == "pending_effect" else None)
+        return decision["job_id"], decision["attempt_id"], decision["kind"], action
+
+    @staticmethod
+    def checkpoint_decision_is_reconciled(decision, jobs_by_id):
+        job = jobs_by_id.get(decision["job_id"])
+        if job is None:
+            return False
+        key = (decision["job_id"], decision["attempt_id"])
+        history = job["history"]
+        if decision["kind"] == "pending_effect":
+            action = Engine.checkpoint_decision_identity(decision)[3]
+            return Engine.history_action_matches_attempt(job, history, action, key[1]) or any(
+                entry["action"] == "rate_limit_retry"
+                and entry.get("attempt_id") == key[1]
+                and entry.get("pending_action") == action for entry in history)
+        if decision["kind"] == "provider_usage_limit":
+            return any(entry["action"] == "rate_limit_retry"
+                       and entry.get("attempt_id") == key[1] for entry in history)
+        if job["attempt_id"] != key[1]:
+            return any(entry.get("attempt_id") == key[1] for entry in history)
+        if decision["kind"] in ("collection_error", "worker_result"):
+            collection = job["collection"]
+            return bool(collection is not None and job["collection_error"] is None
+                        and collection["outcome"] == "complete" and not collection["unresolved"])
+        if decision["kind"] == "coordinator_review":
+            observed = job["observed"]
+            return bool(job["issue"] is None and observed
+                        and observed["identity_verified"] is True)
+        return False
+
+    def reconcile_coordinator_checkpoint(self, reason="state_reconciled"):
+        summary = self.coordinator_checkpoint_summary()
+        latest = self.coordinator_checkpoint_store.latest()
+        summary_digest = digest(encoded(summary))
+        if latest is not None and latest["request_id"] != summary["request_id"]:
+            raise JobError("conflict", "coordinator checkpoint belongs to another run request")
+        if latest is not None and not self.coordinator_takeover_reconciled:
+            jobs_by_id = {job["spec"]["job_id"]: job for job in self.state["jobs"]}
+            missing_owners = [owner for owner in latest["active_owners"]
+                              if not self.checkpoint_owner_is_reconciled(owner, summary, jobs_by_id)]
+
+            current_decision_keys = {self.checkpoint_decision_identity(item)
+                                     for item in summary["unresolved_decisions"]}
+            missing_decisions = [item for item in latest["unresolved_decisions"]
+                                 if (self.checkpoint_decision_identity(item) not in current_decision_keys
+                                     and not self.checkpoint_decision_is_reconciled(item, jobs_by_id))]
+            if missing_owners or missing_decisions:
+                # A checkpoint is appended after state.json is durable. If it
+                # contains an owner or decision absent from state, neither
+                # record is safe to discard: the successor cannot tell whether
+                # state is stale or the checkpoint is stale. Preserve both
+                # views and stop before any new external effect.
+                for owner in missing_owners:
+                    if owner not in summary["active_owners"]:
+                        summary["active_owners"].append(owner)
+                for decision in missing_decisions:
+                    if decision not in summary["unresolved_decisions"]:
+                        summary["unresolved_decisions"].append(decision)
+                evidence = []
+                evidence.extend(
+                    f"owner {owner['job_id']} attempt {owner['attempt_id']} at "
+                    f"{owner['pane_id'] or 'an unverified pane'}"
+                    for owner in missing_owners[:4]
+                )
+                evidence.extend(
+                    f"{item['kind']} for {item['job_id']} attempt {item['attempt_id']}: {item['detail']}"
+                    for item in missing_decisions[:4]
+                )
+                summary["next_safe_action"] = (
+                    "Reconcile checkpoint evidence missing from durable state: "
+                    + "; ".join(evidence)
+                    + ". Do not issue work until the recorded owner and decision are reconciled."
+                )[:4096]
+                reconciliation_digest = digest(encoded(summary))
+                if latest["summary_sha256"] != reconciliation_digest:
+                    self.coordinator_checkpoint_store.append(
+                        summary, "takeover_reconciled", latest["sequence"])
+                raise JobError("conflict", summary["next_safe_action"])
+        if latest is not None and latest["summary_sha256"] == summary_digest:
+            return latest
+        if latest is None:
+            reason = "initial"
+        elif reason == "initial":
+            reason = "state_reconciled"
+        return self.coordinator_checkpoint_store.append(
+            summary, reason, latest["sequence"] if latest is not None else None)
 
     def load_coordinator_grades(self):
         try:
@@ -733,7 +930,8 @@ class Engine:
                                 or (action == "start" and result.get("prompt_submitted") is True))
         if prompt_was_submitted and job["telemetry"]["started_at"] is None:
             job["telemetry"]["started_at"] = job["pending_effect"]["started_at"]
-        job["history"].append({"action": action, "observed_at": now(), "pane_id": job["pane_id"]})
+        job["history"].append({"action": action, "attempt_id": job["attempt_id"],
+                               "observed_at": now(), "pane_id": job["pane_id"]})
         if not (action == "start" and result.get("launch_blocked") is True):
             job["pending_effect"] = None
         self.checkpoint()
@@ -1058,14 +1256,16 @@ class Engine:
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["issue"] = None
-            job["history"].append({"action": pending["action"], "reconciled_by": "matching receipt", "observed_at": now()})
+            job["history"].append({"action": pending["action"], "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "matching receipt", "observed_at": now()})
         codex_start = self.is_codex_pending_start(job, pending)
         if codex_start and job["collection"] and not job["collection_error"]:
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["issue"] = None
-            job["history"].append({"action": "start", "reconciled_by": "matching receipt", "observed_at": now()})
+            job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "matching receipt", "observed_at": now()})
         try:
             observation = self.transport.observe(job)
         except JobError as error:
@@ -1096,23 +1296,27 @@ class Engine:
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
-            job["history"].append({"action": "start", "reconciled_by": "observed Codex Working state", "observed_at": now()})
+            job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "observed Codex Working state", "observed_at": now()})
         elif (pending and pending["action"] == "prompt" and observation.get("prompt_verified")
               and job["spec"]["route"]["mode"] == "agent"):
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["issue"] = None
-            job["history"].append({"action": "prompt", "reconciled_by": "observed visible Working state",
+            job["history"].append({"action": "prompt", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "observed visible Working state",
                                    "observed_at": now()})
         elif pending and pending["action"] == "jail" and lifecycle == "exited":
             job["phase"] = "submitted"
             job["pending_effect"] = None
-            job["history"].append({"action": "jail", "reconciled_by": "owned launcher exit record", "observed_at": now()})
+            job["history"].append({"action": "jail", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "owned launcher exit record", "observed_at": now()})
         elif pending and pending["action"] == "start" and not codex_start and lifecycle in ("idle", "done", "blocked"):
             job["phase"] = "ready"
             job["pending_effect"] = None
-            job["history"].append({"action": "start", "reconciled_by": "owned worker identity", "observed_at": now()})
+            job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
+                                   "reconciled_by": "owned worker identity", "observed_at": now()})
         receipt_valid = job["collection"] is not None and job["collection_error"] is None
         if receipt_valid or lifecycle == "exited":
             job["activity_seen"] = True
@@ -1164,6 +1368,14 @@ class Engine:
 
     def drive(self, status_only=False):
         try:
+            self.reconcile_coordinator_checkpoint()
+            self.coordinator_takeover_reconciled = True
+            if not status_only:
+                for job in self.state["jobs"]:
+                    if (not job["settled"]
+                            and (job["pane_id"] is not None or job["pending_effect"] is not None)):
+                        self.observe(job)
+                        self.checkpoint()
             while True:
                 self.deadline.check()
                 observed_in_launch = set()
