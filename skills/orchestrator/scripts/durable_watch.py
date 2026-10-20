@@ -271,6 +271,31 @@ def recorded_continuations(events: Path) -> set[tuple[str, str]]:
     return known
 
 
+def recorded_handled_results(events: Path) -> set[tuple[str, str, str]]:
+    """Return result/disposition pairs already marked as handled."""
+    known = set()
+    if not events.exists():
+        return known
+    for line in events.read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(item, dict) and item.get("event") == "worker-result-handled"
+                and isinstance(item.get("task_dir"), str)
+                and isinstance(item.get("result_sha256"), str)
+                and isinstance(item.get("disposition_sha256"), str)):
+            known.add((item["task_dir"], item["result_sha256"], item["disposition_sha256"]))
+    return known
+
+
+def append_event(events: Path, event: dict) -> None:
+    with events.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
+
+
 def publish(event: dict, config: dict) -> None:
     """Publish one ntfy message without exposing secrets in process arguments."""
     if not config.get("notify"):
@@ -347,6 +372,7 @@ def reconcile_once(run_dir: Path) -> dict:
         events.parent.mkdir(parents=True, exist_ok=True)
         seen = recorded(events)
         seen_continuations = recorded_continuations(events)
+        handled_results = recorded_handled_results(events)
         new_events = []
         for relative in config["tasks"]:
             result = task_file(run_dir, relative, "result.json")
@@ -357,22 +383,40 @@ def reconcile_once(run_dir: Path) -> dict:
             except OSError:
                 continue
             key = (relative, digest)
-            if key in seen:
-                continue
-            event = {
-                "event": "worker-result",
-                "task_dir": relative,
-                "result_sha256": digest,
-                "run_dir": run_dir.name,
-                "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            }
-            with events.open("a", encoding="utf-8") as file:
-                file.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-                file.flush()
-                os.fsync(file.fileno())
-            seen.add(key)
-            new_events.append(event)
-            publish(event, config)
+            disposition = task_file(run_dir, relative, "disposition.json")
+            disposition_digest = None
+            if disposition is not None:
+                try:
+                    disposition_digest = hashlib.sha256(disposition.read_bytes()).hexdigest()
+                except OSError:
+                    pass
+            handled_key = (relative, digest, disposition_digest) if disposition_digest else None
+            already_handled = handled_key in handled_results if handled_key else False
+            if key not in seen:
+                event = {
+                    "event": "worker-result",
+                    "task_dir": relative,
+                    "result_sha256": digest,
+                    "run_dir": run_dir.name,
+                    "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                append_event(events, event)
+                seen.add(key)
+                new_events.append(event)
+                if not disposition_digest and not already_handled:
+                    publish(event, config)
+            if handled_key and not already_handled:
+                handled_event = {
+                    "event": "worker-result-handled",
+                    "task_dir": relative,
+                    "result_sha256": digest,
+                    "disposition_sha256": disposition_digest,
+                    "run_dir": run_dir.name,
+                    "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                append_event(events, handled_event)
+                handled_results.add(handled_key)
+                new_events.append(handled_event)
         continuations = []
         current_time = time.time()
         for relative in config["tasks"]:

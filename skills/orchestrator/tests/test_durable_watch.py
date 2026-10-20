@@ -83,6 +83,28 @@ class DurableWatchTest(unittest.TestCase):
         self.assertEqual(second["new_events"], [])
         self.assertEqual([event["task_dir"] for event in self.events()], ["task-a"])
 
+    def test_handled_result_keeps_arrival_and_suppresses_duplicate_notice_idempotently(self):
+        result_bytes = b'{"outcome":"ready"}\n'
+        disposition_bytes = b'{"disposition":"completed"}\n'
+        (self.task_a / "result.json").write_bytes(result_bytes)
+        (self.task_a / "disposition.json").write_bytes(disposition_bytes)
+
+        with mock.patch.object(durable_watch, "publish") as publish:
+            first = durable_watch.reconcile_once(self.run_dir)
+            second = durable_watch.reconcile_once(self.run_dir)
+
+        events = self.events()
+        arrivals = [event for event in events if event["event"] == "worker-result"]
+        handled = [event for event in events if event["event"] == "worker-result-handled"]
+        self.assertEqual(len(arrivals), 1)
+        self.assertEqual(arrivals[0]["result_sha256"], hashlib.sha256(result_bytes).hexdigest())
+        self.assertEqual(len(handled), 1)
+        self.assertEqual(handled[0]["result_sha256"], hashlib.sha256(result_bytes).hexdigest())
+        self.assertEqual(handled[0]["disposition_sha256"], hashlib.sha256(disposition_bytes).hexdigest())
+        self.assertEqual(first["new_events"][0]["event"], "worker-result")
+        self.assertEqual(second["new_events"], [])
+        publish.assert_not_called()
+
     def test_reconcile_announces_direct_continuation_only_after_reset_and_once(self):
         record = {"task": "task-a", "pane": "pane-42", "reset_at": 1001.0, "attempt": "attempt-7"}
         (self.task_a / "quota-continuation.json").write_text(json.dumps(record) + "\n", encoding="utf-8")
