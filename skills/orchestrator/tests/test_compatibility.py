@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from unittest.mock import patch
 from herdr_jobs.admission_service import AdmissionService
 from herdr_jobs.adapters import NativeHerdrAdapter
 from herdr_jobs.engine import Engine
-from herdr_jobs.lifecycle import EffectUnknown
+from herdr_jobs.lifecycle import EffectUnknown, PHASES
 from herdr_jobs.records import JobError
 from herdr_jobs.runner import CompatibilityRunner, RunResult, launch_compatibility_view
 from herdr_jobs.store import StateStore
@@ -56,6 +57,58 @@ def normalized(value, root):
     if isinstance(value, str):
         return value.replace(str(root), "$RUN_DIR")
     return value
+
+
+class StopAfterEffect(Exception):
+    pass
+
+
+def legacy_engine_at_phase(request_value, run_dir, phase):
+    run_dir.mkdir()
+    transport = FakeNativeTransport()
+    engine = Engine(run_dir, transport, Deadline(), FakeAdmissionStore())
+    seed = None
+    with patch("herdr_jobs.engine.uuid.uuid4", return_value=SimpleNamespace(hex=ATTEMPT_ID)), \
+            patch("herdr_jobs.engine.now", return_value=FIXED_TIME):
+        engine.initialize(
+            request_value,
+            {"session_id": "compatibility-session", "models": {"compatibility-job": None},
+             "binding": {}},
+            None,
+        )
+        if phase == "ready":
+            engine.state["jobs"][0].update(
+                phase="ready",
+                pane_id="pane-new",
+                workspace_id="workspace-1",
+                observed={"state": "idle", "identity_verified": False},
+                settled=False,
+                pending_effect=None,
+            )
+            seed = deepcopy(engine.state)
+            engine.checkpoint()
+            engine.launch(engine.state["jobs"][0])
+            engine.checkpoint()
+        elif phase in {"split", "moved", "retry_ready"}:
+            if phase == "retry_ready":
+                engine.state["jobs"][0]["retry_profile"] = {"profile": "fixture"}
+            target = {"split": "split", "moved": "move", "retry_ready": "retry_setup"}[phase]
+            original_effect = engine.effect
+
+            def stop_after_target(job, action):
+                result = original_effect(job, action)
+                if action == target:
+                    raise StopAfterEffect()
+                return result
+
+            engine.effect = stop_after_target
+            try:
+                engine.launch(engine.state["jobs"][0])
+            except StopAfterEffect:
+                pass
+        elif phase == "submitted":
+            engine.launch(engine.state["jobs"][0])
+    return engine, seed
 
 
 class CompatibilityTest(unittest.TestCase):
@@ -133,6 +186,58 @@ class CompatibilityTest(unittest.TestCase):
         self.assertEqual(result["batch_state"], "unresolved_effect")
         self.assertEqual(result.state["jobs"][0]["pending_effect"]["action"], "split")
         self.assertEqual(events, [("reducer", "split")])
+
+    def test_every_lifecycle_phase_matches_engine_result_and_state_fixtures(self):
+        fixtures = json.loads((FIXTURES / "engine-launch-phases.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(fixtures), set(PHASES))
+
+        for phase in sorted(PHASES):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+                root = Path(directory)
+                request_value = request()
+                if phase == "retry_ready":
+                    request_value["jobs"][0]["retry_profile"] = {"profile": "fixture"}
+                legacy_run_dir = root / "legacy"
+                legacy_engine, seed = legacy_engine_at_phase(request_value, legacy_run_dir, phase)
+                legacy_result = legacy_engine.result()
+                legacy_persisted_state = json.loads(
+                    (legacy_run_dir / "state.json").read_text(encoding="utf-8"))
+                expected = fixtures[phase]
+                legacy_view = launch_compatibility_view(legacy_result, legacy_persisted_state)
+                self.assertEqual(
+                    {"result": normalized(legacy_view[0], legacy_run_dir),
+                     "state": normalized(legacy_view[1], legacy_run_dir)},
+                    expected,
+                )
+
+                reducer_store = StateStore(root / "reducer" / "state.json")
+                if seed is not None:
+                    reducer_store.checkpoint(seed)
+                reducer_adapter = NativeHerdrAdapter(
+                    transport=FakeNativeTransport(),
+                    admission_service=AdmissionService(FakeAdmissionStore()),
+                )
+                compatibility = CompatibilityRunner(
+                    lambda _request: RunResult(state=legacy_persisted_state, result=legacy_result),
+                    projector=launch_compatibility_view,
+                )
+                result = compatibility.run(
+                    request_value,
+                    store=reducer_store,
+                    effect_port=reducer_adapter,
+                    clock=lambda: 100.0,
+                    stop_at_phase=None if phase == "ready" else phase,
+                    attempt_id_factory=lambda: ATTEMPT_ID,
+                )
+                reducer_persisted_state = reducer_store.load()
+                self.assertIsNotNone(reducer_persisted_state)
+                reducer_view = launch_compatibility_view(result.result, reducer_persisted_state)
+                reducer_root = root / "reducer"
+                self.assertEqual(
+                    {"result": normalized(reducer_view[0], reducer_root),
+                     "state": normalized(reducer_view[1], reducer_root)},
+                    expected,
+                )
 
     def test_migrated_launch_matches_current_engine_result_and_state_fixtures(self):
         self.maxDiff = None

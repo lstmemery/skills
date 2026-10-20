@@ -1,0 +1,248 @@
+{
+  "moved": {
+    "result": {
+      "batch_state": "active",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "moved",
+          "settled": false,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": true,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "moved",
+          "previous_pane_ids": [
+            "pane-old"
+          ],
+          "settled": false,
+          "workspace_id": "workspace-1"
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  },
+  "pending": {
+    "result": {
+      "batch_state": "active",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": null,
+          "pending_effect": null,
+          "phase": "pending",
+          "settled": false,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": false,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": null,
+          "pending_effect": null,
+          "phase": "pending",
+          "previous_pane_ids": [],
+          "settled": false,
+          "workspace_id": null
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  },
+  "ready": {
+    "result": {
+      "batch_state": "partial",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": "worker startup identity is unverified; the task prompt was not sent",
+          "job_id": "compatibility-job",
+          "observed": {
+            "identity_verified": false,
+            "state": "idle"
+          },
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "ready",
+          "settled": false,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": true,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": "worker startup identity is unverified; the task prompt was not sent",
+          "job_id": "compatibility-job",
+          "observed": {
+            "identity_verified": false,
+            "state": "idle"
+          },
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "ready",
+          "previous_pane_ids": [],
+          "settled": false,
+          "workspace_id": "workspace-1"
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  },
+  "retry_ready": {
+    "result": {
+      "batch_state": "active",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "retry_ready",
+          "settled": false,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": true,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "retry_ready",
+          "previous_pane_ids": [
+            "pane-old"
+          ],
+          "settled": false,
+          "workspace_id": "workspace-1"
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  },
+  "split": {
+    "result": {
+      "batch_state": "active",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-old",
+          "pending_effect": null,
+          "phase": "split",
+          "settled": false,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": true,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-old",
+          "pending_effect": null,
+          "phase": "split",
+          "previous_pane_ids": [],
+          "settled": false,
+          "workspace_id": null
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  },
+  "submitted": {
+    "result": {
+      "batch_state": "active",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "submitted",
+          "settled": false,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": true,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": null,
+          "job_id": "compatibility-job",
+          "observed": null,
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "submitted",
+          "previous_pane_ids": [
+            "pane-old"
+          ],
+          "settled": false,
+          "workspace_id": "workspace-1"
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  }
+}
