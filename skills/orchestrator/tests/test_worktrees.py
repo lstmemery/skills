@@ -14,8 +14,9 @@ PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / "scripts/lease-worktree.py"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.records import JobError, digest, is_commit_id, prepare
+from herdr_jobs.records import JobError, digest, is_commit_id, prepare, repository_worktree_record
 from herdr_jobs.transport import Deadline, NativeTransport
+from herdr_jobs.worktrees import verify_repository_worktree
 
 
 class WorktreeAllocationTest(unittest.TestCase):
@@ -23,6 +24,8 @@ class WorktreeAllocationTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.git_calls = self.root / "git-calls"
@@ -50,6 +53,9 @@ class WorktreeAllocationTest(unittest.TestCase):
             "with open(os.environ['GIT_CALLS'], 'a') as stream: stream.write(repr(sys.argv[1:]) + '\\n')\n"
             "if os.environ.get('HOST_CALLS'):\n"
             "    with open(os.environ['HOST_CALLS'], 'a') as stream: stream.write(repr(['git', *sys.argv[1:]]) + '\\n')\n"
+            "if os.environ.get('GIT_FAIL_WORKTREE_ADD') and sys.argv[1:3] == ['-C', os.environ.get('FAIL_REPO')] and 'worktree' in sys.argv and 'add' in sys.argv:\n"
+            "    sys.stderr.write('fixture refused worktree creation\\n')\n"
+            "    raise SystemExit(int(os.environ['GIT_FAIL_WORKTREE_ADD']))\n"
             "raise SystemExit(subprocess.call([os.environ['REAL_GIT'], *sys.argv[1:]]))\n",
         )
 
@@ -57,22 +63,36 @@ class WorktreeAllocationTest(unittest.TestCase):
         path.write_text(content)
         path.chmod(0o755)
 
-    def allocate(self, output="", status=0, status_output="", repo=None, expected_base="a" * 40):
+    def allocate(self, repo, expected_base=None, fail_worktree_add=None):
         env = dict(os.environ)
-        env.update({"PATH": f"{self.bin}:{os.defpath}", "GET_OUTPUT": output,
-                    "GET_STATUS": str(status), "STATUS_OUTPUT": status_output,
+        env.update({"PATH": f"{self.bin}:{os.defpath}", "HOME": str(self.home),
                     "GIT_CALLS": str(self.git_calls), "TREEHOUSE_CALLS": str(self.root / "treehouse-calls"),
                     "HOST_CALLS": str(self.root / "host-calls"),
                     "REAL_GIT": self.real_git})
+        if fail_worktree_add is not None:
+            env.update({"GIT_FAIL_WORKTREE_ADD": str(fail_worktree_add), "FAIL_REPO": str(repo)})
+        command = [sys.executable, str(SCRIPT), "acquire", "--repo", str(repo),
+                   "--lease-holder", "task-1119"]
+        if expected_base is not None:
+            command.extend(["--expected-base", expected_base])
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "acquire", "--repo", str(repo or self.root),
-             "--lease-holder", "task-1119", "--expected-base", expected_base],
+            command,
             cwd=self.root, env=env, capture_output=True, text=True, timeout=10,
         )
+
+    def calls(self):
+        if not self.git_calls.exists():
+            return []
+        return [ast.literal_eval(line) for line in self.git_calls.read_text().splitlines()]
 
     def git(self, *args, cwd=None):
         return subprocess.run([self.real_git, *args], cwd=cwd, check=True,
                               capture_output=True, text=True).stdout.strip()
+
+    def run_git(self, argv, cwd):
+        result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=10, check=False)
+        return result.returncode, result.stdout, result.stderr
 
     def git_fixture(self):
         repo = self.root / "repo"
@@ -182,6 +202,26 @@ class WorktreeAllocationTest(unittest.TestCase):
             result = adapter.preflight({"jobs": [job]})
 
         self.assertEqual(result["session_id"], "fixture-socket")
+
+    def test_managed_writer_accepts_allocator_lease_before_launch(self):
+        repo, _, base = self.git_fixture()
+        acquired = self.allocate(repo, expected_base=base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        job = {"job_id": "job0", "cwd": record["path"], "kind": "codex", "model": None,
+               "writes_repository": True,
+               "route": {"mode": "agent", "runtime": "codex"},
+               "repository_worktree": record}
+        adapter = self.writer_adapter()
+        env = {"PATH": f"{self.bin}:{os.defpath}", "HOME": str(self.home),
+               "GIT_CALLS": str(self.git_calls), "REAL_GIT": self.real_git}
+
+        with patch.dict(os.environ, env):
+            result = adapter.preflight({"jobs": [job]})
+
+        self.assertEqual(result["session_id"], "fixture-socket")
+        self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in adapter.calls))
+        self.assertFalse((self.root / "treehouse-calls").exists())
 
     def test_managed_writer_rejects_stale_lease_before_launch(self):
         repo, worktree, base = self.git_fixture()
@@ -310,85 +350,83 @@ class WorktreeAllocationTest(unittest.TestCase):
         self.assertFalse(is_commit_id("A" * 40))
         self.assertFalse(is_commit_id(None))
 
-    def test_empty_allocation_stops_before_git(self):
-        result = self.allocate()
+    def test_empty_repository_stops_before_worktree_creation(self):
+        repo = self.root / "empty-repo"
+        repo.mkdir()
+        self.git("init", "-q", str(repo))
+
+        result = self.allocate(repo)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
-        self.assertFalse(self.git_calls.exists())
+        self.assertIn("no readable HEAD commit", result.stderr)
+        self.assertFalse(any("worktree" in call and "add" in call for call in self.calls()))
 
-    def test_failed_allocation_stops_before_git(self):
-        result = self.allocate(output=json.dumps({"path": str(self.root), "lease_id": "lease",
-                                                 "lease_holder": "task-1119"}), status=1)
+    def test_failed_git_allocation_emits_no_lease_record_or_verification_calls(self):
+        repo, _, base = self.git_fixture()
+        result = self.allocate(repo, expected_base=base, fail_worktree_add=1)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
-        self.assertFalse(self.git_calls.exists())
+        self.assertIn("fixture refused worktree creation", result.stderr)
+        calls = self.calls()
+        self.assertTrue(any("worktree" in call and "add" in call for call in calls))
+        self.assertFalse(any("rev-parse" in call and "--absolute-git-dir" in call for call in calls))
 
     def test_plain_path_is_not_accepted_as_a_lease_record(self):
-        result = self.allocate(output=str(self.root))
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertFalse(self.git_calls.exists())
+        calls = []
+        with self.assertRaisesRegex(JobError, "repository_worktree: expected an object"):
+            verify_repository_worktree(str(self.root), str(self.root),
+                                       lambda argv, cwd: calls.append((argv, cwd)))
+        self.assertEqual(calls, [])
 
     def test_lease_record_missing_identity_is_rejected_before_git(self):
-        result = self.allocate(output=json.dumps({"path": str(self.root),
-                                                  "lease_holder": "task-1119"}))
+        repo, worktree, base = self.git_fixture()
+        record = self.repository_worktree_record(worktree, repo, base)
+        del record["lease_id"]
+        calls = []
+        with self.assertRaisesRegex(JobError, r"missing \['lease_id'\]"):
+            verify_repository_worktree(record, str(worktree),
+                                       lambda argv, cwd: calls.append((argv, cwd)))
+        self.assertEqual(calls, [])
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertFalse(self.git_calls.exists())
-
-    def test_broken_slot_cannot_select_main_checkout_or_home(self):
+    def test_git_lease_never_selects_main_checkout_or_home(self):
         repo, _, base = self.git_fixture()
-        for path in (repo, Path.home()):
-            with self.subTest(path=path):
-                self.git_calls.unlink(missing_ok=True)
-                output, status = self.treehouse_records(path)
-                result = self.allocate(output, status_output=status, repo=repo, expected_base=base)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(result.stdout, "")
-                self.assertFalse(self.git_calls.exists())
+        result = self.allocate(repo, expected_base=base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(result.stdout)
+        leased_path = Path(record["path"]).resolve()
+        self.assertNotEqual(leased_path, repo.resolve())
+        self.assertNotEqual(leased_path, self.home.resolve())
+
+        for unsafe_path in (repo, self.home):
+            with self.subTest(path=unsafe_path):
+                forged = dict(record, path=str(unsafe_path.resolve()))
+                calls = []
+                with patch.dict(os.environ, {"HOME": str(self.home)}):
+                    with self.assertRaisesRegex(JobError, "not home or the expected checkout"):
+                        verify_repository_worktree(forged, str(unsafe_path),
+                                                   lambda argv, cwd: calls.append((argv, cwd)))
+                self.assertEqual(calls, [])
 
     def test_valid_lease_emits_repo_base_and_linked_worktree_identity(self):
         repo, worktree, base = self.git_fixture()
-        output, status = self.treehouse_records(worktree)
-        result = self.allocate(output, status_output=status, repo=repo, expected_base=base)
+        result = self.allocate(repo, expected_base=base)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {
-            "schema_version": 1,
-            "path": str(worktree.resolve()),
-            "lease_id": "lease-fixture",
-            "lease_holder": "task-1119",
-            "repo_root": str(repo.resolve()),
-            "git_common_dir": str((repo / ".git").resolve()),
-            "base_commit": base,
-        })
-
-    def test_live_treehouse_allocator_shape_reconciles_before_git(self):
-        repo, worktree, base = self.git_fixture()
-        lease_data = json.loads((PACKAGE / "tests/fixtures/treehouse/get-lease.json").read_text())
-        lease_data["path"] = str(worktree)
-        lease_data["lease_id"] = "lease-fixture"
-        lease_data["lease_holder"] = "task-1119"
-        live_status = json.loads((PACKAGE / "tests/fixtures/treehouse/status-live.json").read_text())
-        live_status[0]["path"] = str(worktree)
-        live_status[0]["lease_id"] = "lease-fixture"
-        live_status[0]["lease_holder"] = "task-1119"
-        result = self.allocate(json.dumps(lease_data), status_output=json.dumps(live_status),
-                               repo=repo, expected_base=base)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["path"], str(worktree.resolve()))
-        calls = [ast.literal_eval(line) for line in (self.root / "treehouse-calls").read_text().splitlines()]
-        self.assertEqual(calls, [
-            ["get", "--lease", "--lease-holder", "task-1119", "--json"],
-            ["status", "--json"],
-        ])
-        host_calls = [ast.literal_eval(line) for line in (self.root / "host-calls").read_text().splitlines()]
-        self.assertEqual([call[0] for call in host_calls], ["treehouse", "treehouse", *("git",) * 6])
+        record = json.loads(result.stdout)
+        self.assertEqual(set(record), {"schema_version", "path", "lease_id", "lease_holder",
+                                       "repo_root", "git_common_dir", "base_commit"})
+        self.assertEqual(record["schema_version"], 1)
+        self.assertEqual(record["path"], str(Path(record["path"]).resolve()))
+        self.assertEqual(record["lease_id"].split("-", 2)[0:2], ["git", "worktree"])
+        self.assertEqual(record["lease_holder"], "task-1119")
+        self.assertEqual(record["repo_root"], str(repo.resolve()))
+        self.assertEqual(record["git_common_dir"], str((repo / ".git").resolve()))
+        self.assertEqual(record["base_commit"], base)
+        self.assertEqual(verify_repository_worktree(repository_worktree_record(record),
+                                                    record["path"], self.run_git), record)
+        self.assertFalse((self.root / "treehouse-calls").exists())
 
 
 if __name__ == "__main__":
