@@ -298,8 +298,8 @@ class Engine:
         if owner["pane_id"] in job["previous_pane_ids"]:
             return True
         observed = job["observed"]
-        return bool(job["settled"] and observed and observed.get("identity_verified") is True
-                    and observed.get("state") in ("idle", "done", "exited"))
+        return bool(job["settled"] and observed and observed["identity_verified"] is True
+                    and observed["state"] in ("idle", "done", "exited"))
 
     @staticmethod
     def checkpoint_decision_is_reconciled(decision, jobs_by_id):
@@ -331,7 +331,7 @@ class Engine:
         if decision["kind"] == "coordinator_review":
             observed = job["observed"]
             return bool(job["issue"] is None and observed
-                        and observed.get("identity_verified") is True)
+                        and observed["identity_verified"] is True)
         return False
 
     def reconcile_coordinator_checkpoint(self, reason="state_reconciled"):

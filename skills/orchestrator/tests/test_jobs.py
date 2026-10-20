@@ -1026,6 +1026,24 @@ class JobsTest(unittest.TestCase):
         finally:
             job["observed"] = value
 
+        job["settled"] = True
+        observed = job["observed"]
+        observed_owner = {"job_id": job_id, "attempt_id": job["attempt_id"], "pane_id": None}
+        for field in ("identity_verified", "state"):
+            with self.subTest(observation_field=field):
+                value = observed.pop(field)
+                try:
+                    with self.assertRaises(KeyError):
+                        engine.checkpoint_owner_is_reconciled(
+                            observed_owner, {"active_owners": []}, {job_id: job})
+                    if field == "identity_verified":
+                        decision = {"job_id": job_id, "attempt_id": job["attempt_id"],
+                                    "kind": "coordinator_review"}
+                        with self.assertRaises(KeyError):
+                            Engine.checkpoint_decision_is_reconciled(decision, {job_id: job})
+                finally:
+                    observed[field] = value
+
         history = job["history"]
         job["history"] = [{}]
         try:
