@@ -1,10 +1,13 @@
-"""Treehouse lease parsing and linked-worktree verification."""
+"""Local Git and legacy Treehouse lease parsing and worktree verification."""
 
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import uuid
 
-from .records import JobError, is_commit_id, parse_json, repository_worktree_record
+from .records import JobError, encoded, is_commit_id, load_json, parse_json, repository_worktree_record
 
 
 TREEHOUSE_GET_FIELDS = {"path", "lease_id", "lease_holder", "name", "leased_at",
@@ -13,6 +16,10 @@ TREEHOUSE_GET_FIELDS = {"path", "lease_id", "lease_holder", "name", "leased_at",
 TREEHOUSE_STATUS_FIELDS = {"name", "path", "status", "flavor", "lease_id", "lease_holder",
                            "leased_at", "processes"}
 TREEHOUSE_STATUS_OPTIONAL_FIELDS = {"branch", "detached", "recovery_reason"}
+GIT_LEASE_PREFIX = "git-worktree-"
+# Reserve the allocator's exact UUID form; arbitrary legacy IDs keep the Treehouse verifier.
+GIT_LEASE_ID = re.compile(re.escape(GIT_LEASE_PREFIX) + r"[0-9a-f]{32}")
+GIT_LEASE_MARKER = "orchestrator-lease.json"
 
 
 def unavailable(message):
@@ -179,8 +186,61 @@ def _git_identity(worktree, repo_hint, run_command, expected_common=None, expect
     return repo_root, worktree_common, base
 
 
+def _worktree_git_dir(worktree, run_command):
+    git = shutil.which("git")
+    if not git:
+        unavailable("git is unavailable for repository worktree verification")
+    return _canonical(_git_text(run_command, git, worktree, "rev-parse", "--absolute-git-dir"),
+                      "writer Git metadata directory")
+
+
+def _verify_git_lease_marker(record, worktree, run_command):
+    marker = _worktree_git_dir(worktree, run_command) / GIT_LEASE_MARKER
+    try:
+        recorded = load_json(marker, 16384)
+    except FileNotFoundError:
+        unavailable("local Git worktree lease marker is missing; reacquire a lease for this worktree")
+    except JobError as error:
+        unavailable(f"local Git worktree lease marker is invalid: {error}")
+    except OSError as error:
+        unavailable(f"local Git worktree lease marker cannot be read: {error.strerror}")
+    if recorded != record:
+        unavailable("local Git worktree lease record does not match its metadata marker")
+
+
+def _verify_treehouse_lease(record, worktree, run_command, treehouse):
+    treehouse_status = _call(run_command, [treehouse, "status", "--json"], None, "treehouse status")
+    _status_entry(treehouse_status, worktree, record["lease_id"], record["lease_holder"])
+
+
+def _worktree_root(repo_root, home):
+    root = home / ".local/share/orchestrator/worktrees"
+    try:
+        resolved = _canonical(root, "Git worktree lease directory", strict=False)
+        if home not in resolved.parents:
+            unavailable("Git worktree lease directory must remain below the home directory")
+        if resolved == repo_root or repo_root in resolved.parents:
+            unavailable("Git worktree lease directory must be outside the requested repository")
+        resolved.mkdir(parents=True, exist_ok=True)
+        return _canonical(resolved, "Git worktree lease directory")
+    except OSError as error:
+        unavailable(f"cannot create Git worktree lease directory {root}: {error.strerror}")
+
+
+def _write_git_lease_marker(record, worktree, run_command):
+    marker = _worktree_git_dir(worktree, run_command) / GIT_LEASE_MARKER
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded(record) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as error:
+        unavailable(f"cannot write local Git worktree lease marker {marker}: {error.strerror}")
+
+
 def verify_repository_worktree(record, cwd, run_command, treehouse="treehouse"):
-    """Refuse a writer cwd unless its current lease and Git identity match the record."""
+    """Refuse a writer cwd unless its lease and Git identity match the record."""
     record = repository_worktree_record(record)
     worktree = _canonical(record["path"], "recorded worktree")
     supplied_cwd = _canonical(cwd, "writer cwd")
@@ -191,9 +251,11 @@ def verify_repository_worktree(record, cwd, run_command, treehouse="treehouse"):
     if worktree == home or worktree == repo_hint:
         unavailable("repository writers must use a linked worktree, not home or the expected checkout")
 
-    treehouse_status = _call(run_command, [treehouse, "status", "--json"], None, "treehouse status")
-    _status_entry(treehouse_status, worktree, record["lease_id"], record["lease_holder"])
     _git_identity(worktree, repo_hint, run_command, record["git_common_dir"], record["base_commit"])
+    if GIT_LEASE_ID.fullmatch(record["lease_id"]):
+        _verify_git_lease_marker(record, worktree, run_command)
+    else:
+        _verify_treehouse_lease(record, worktree, run_command, treehouse)
     return record
 
 
@@ -208,29 +270,72 @@ def _run_command(argv, cwd):
     return result.returncode, result.stdout, result.stderr
 
 
-def acquire(repo, holder, expected_base=None, treehouse="treehouse", run_command=_run_command):
+def acquire(repo, holder, expected_base=None, *, run_command=_run_command):
+    """Create and verify an isolated linked worktree without a Treehouse service."""
     repo_hint = _canonical(repo, "requested repository")
     if not repo_hint.is_dir():
         unavailable("requested repository must be an existing directory")
-    if not holder.strip() or "\0" in holder:
+    if not isinstance(holder, str) or not holder.strip() or "\0" in holder or len(holder) > 4096:
         raise JobError("invalid_input", "lease holder must be nonempty text")
     if expected_base is not None and not is_commit_id(expected_base):
         raise JobError("invalid_input", "expected base must be a full Git commit ID")
-    allocated = _call(run_command,
-                      [treehouse, "get", "--lease", "--lease-holder", holder, "--json"],
-                      repo_hint, "treehouse get")
-    lease = parse_allocation(allocated, holder)
-    worktree = _canonical(lease["path"], "treehouse lease path")
-    if not worktree.is_dir():
-        unavailable("treehouse lease path is not a directory")
-    home = _canonical(Path.home(), "home directory")
-    if worktree == home or worktree == repo_hint:
-        unavailable("treehouse returned home or the requested checkout instead of a linked worktree")
-    status = _call(run_command, [treehouse, "status", "--json"], repo_hint, "treehouse status")
-    _status_entry(status, worktree, lease["lease_id"], lease["lease_holder"])
+    git = shutil.which("git")
+    if not git:
+        unavailable("git is unavailable; install Git before acquiring a repository worktree lease")
+    code, output, _ = run_command([git, "-C", str(repo_hint), "rev-parse", "--show-toplevel"], repo_hint)
+    if code != 0:
+        unavailable("requested repository is not a readable Git checkout")
+    repo_root = _canonical(_decode(output, "Git repository check"), "requested Git repository")
+    if repo_root != repo_hint:
+        unavailable("--repo must name the root of the expected Git checkout")
+    if expected_base is None:
+        code, output, _ = run_command([git, "-C", str(repo_hint), "rev-parse", "HEAD"], repo_hint)
+        if code != 0:
+            unavailable("requested Git repository has no readable HEAD commit")
+        base = _decode(output, "Git HEAD lookup").lower()
+    else:
+        base = expected_base.lower()
+    if not is_commit_id(base):
+        unavailable("resolved base is not a full Git commit ID")
+    if expected_base is not None:
+        code, _, _ = run_command([git, "-C", str(repo_hint), "cat-file", "-e", f"{base}^{{commit}}"],
+                                 repo_hint)
+        if code != 0:
+            unavailable("expected base commit is unavailable in the requested repository; fetch or choose a present commit")
 
-    repo_root, worktree_common, base = _git_identity(worktree, repo_hint, run_command,
-                                                      expected_base=expected_base)
-    return {"schema_version": 1, "path": str(worktree), "lease_id": lease["lease_id"],
-            "lease_holder": lease["lease_holder"], "repo_root": str(repo_root),
-            "git_common_dir": str(worktree_common), "base_commit": base}
+    home = _canonical(Path.home(), "home directory")
+    root = _worktree_root(repo_hint, home)
+
+    lease_id = GIT_LEASE_PREFIX + uuid.uuid4().hex
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", repo_hint.name).strip("-.")[:48] or "repository"
+    worktree = root / f"{safe_name}-{lease_id[len(GIT_LEASE_PREFIX):]}"
+    add_argv = [git, "-C", str(repo_hint), "worktree", "add", "--detach", str(worktree), base]
+    code, _, error = run_command(add_argv, repo_hint)
+    if code != 0:
+        detail = _decode(error, "Git worktree creation").strip()[:1000]
+        suffix = f": {detail}" if detail else ""
+        unavailable(f"Git could not create a linked worktree at {worktree}{suffix}; check repository access and base commit")
+
+    try:
+        worktree = _canonical(worktree, "created Git worktree")
+        if not worktree.is_dir() or worktree == home or worktree == repo_hint:
+            unavailable("Git did not create a separate linked worktree")
+        repo_root, worktree_common, actual_base = _git_identity(
+            worktree, repo_hint, run_command, expected_base=base)
+        record = {"schema_version": 1, "path": str(worktree), "lease_id": lease_id,
+                  "lease_holder": holder, "repo_root": str(repo_root),
+                  "git_common_dir": str(worktree_common), "base_commit": actual_base}
+        _write_git_lease_marker(record, worktree, run_command)
+        _verify_git_lease_marker(record, worktree, run_command)
+        return record
+    except JobError as error:
+        try:
+            cleanup_code, _, cleanup_error = run_command(
+                [git, "-C", str(repo_hint), "worktree", "remove", "--force", str(worktree)], repo_hint)
+        except (JobError, OSError, subprocess.TimeoutExpired) as cleanup_error:
+            unavailable(f"{error}; created worktree may remain at {worktree}; inspect and remove it with git worktree remove ({cleanup_error})")
+        if cleanup_code != 0:
+            detail = _decode(cleanup_error, "Git worktree cleanup").strip()[:500]
+            suffix = f": {detail}" if detail else ""
+            unavailable(f"{error}; created worktree could not be removed at {worktree}{suffix}; inspect and remove it with git worktree remove")
+        raise

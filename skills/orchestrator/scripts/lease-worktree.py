@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acquire a durable Treehouse lease and emit a verified writer record."""
+"""Acquire a local Git worktree lease and emit a verified writer record."""
 
 import argparse
 import sys
@@ -14,7 +14,7 @@ class Parser(argparse.ArgumentParser):
 
 
 def main(argv=None):
-    parser = Parser(description="Acquire and verify an isolated Treehouse worktree for a repository writer.")
+    parser = Parser(description="Acquire and verify an isolated Git worktree for a repository writer.")
     commands = parser.add_subparsers(dest="operation", required=True)
     command = commands.add_parser("acquire", help="lease and verify a linked worktree")
     command.add_argument("--repo", required=True, help="expected repository checkout")
