@@ -1017,6 +1017,51 @@ class JobsTest(unittest.TestCase):
         self.assertIn("owner job0 attempt", reconciled["next_safe_action"])
         self.assertIn("provider_usage_limit", reconciled["next_safe_action"])
 
+    def test_stale_pending_state_cannot_discard_checkpoint_owner_without_pane(self):
+        code, result = self.call()
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+
+        stale_state = self.state()
+        job = stale_state["jobs"][0]
+        job.update(phase="pending", pane_id=None, pending_effect=None, settled=False,
+                   observed=None, activity_seen=False, collection=None, collection_error=None,
+                   issue=None, admission_acquired=False)
+        (self.run / "state.json").write_bytes(encoded(stale_state) + b"\n")
+
+        engine = Engine(self.run, None, None)
+        engine.load()
+        owner = {"job_id": "job0", "attempt_id": job["attempt_id"],
+                 "agent_name": job["agent_name"], "pane_id": None,
+                 "workspace_id": None, "phase": "split"}
+        prior = engine.coordinator_checkpoint_store.latest()
+        checkpoint = engine.coordinator_checkpoint_store.append(
+            {"request_id": stale_state["request"]["request_id"],
+             "coordinator_owner": stale_state["session_id"], "active_owners": [owner],
+             "unresolved_decisions": [],
+             "next_safe_action": (f"Observe job0 attempt {job['attempt_id']} at an unverified pane "
+                                  "before launching pending work.")},
+            "checkpoint", prior["sequence"])
+        checkpoint_path = self.run / "coordinator-checkpoints.jsonl"
+        original_log = checkpoint_path.read_bytes()
+        effects_before = [event["action"] for event in self.events()
+                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+
+        successor_code, result = self.call("resume", wait_seconds=0.3)
+
+        self.assertEqual(successor_code, 3)
+        self.assertEqual(result["error"], "conflict")
+        self.assertIn("owner job0 attempt", result["message"])
+        effects_after = [event["action"] for event in self.events()
+                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+        self.assertEqual(effects_after, effects_before)
+        reconciled_log = checkpoint_path.read_bytes()
+        self.assertTrue(reconciled_log.startswith(original_log))
+        reconciled = json.loads(reconciled_log.splitlines()[-1])
+        self.assertEqual(reconciled["reason"], "takeover_reconciled")
+        self.assertEqual(reconciled["reconciles_sequence"], checkpoint["sequence"])
+        self.assertEqual(reconciled["active_owners"], [owner])
+        self.assertIn("Do not issue work", reconciled["next_safe_action"])
+
     def test_legacy_retry_history_consumes_recovery_budget_after_upgrade(self):
         self.call()
         state = self.state()

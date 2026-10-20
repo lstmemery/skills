@@ -284,7 +284,8 @@ class Engine:
         key = (owner["job_id"], owner["attempt_id"])
         matching = [item for item in summary["active_owners"]
                     if (item["job_id"], item["attempt_id"]) == key]
-        if any(item["pane_id"] == owner["pane_id"] for item in matching):
+        if matching and (owner["pane_id"] is None
+                         or any(item["pane_id"] == owner["pane_id"] for item in matching)):
             return True
         job = jobs_by_id.get(owner["job_id"])
         if job is None:
@@ -294,8 +295,6 @@ class Engine:
                        and entry.get("attempt_id") == owner["attempt_id"]
                        and (owner["pane_id"] is None or entry.get("pane_id") == owner["pane_id"])
                        for entry in job["history"])
-        if owner["pane_id"] is None:
-            return True
         if owner["pane_id"] in job["previous_pane_ids"]:
             return True
         observed = job.get("observed")
