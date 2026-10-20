@@ -20,6 +20,7 @@ from .lifecycle import JobLifecycle
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
 from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
+from .store import CoordinatorCheckpointStore
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted"}
@@ -34,6 +35,8 @@ class Engine:
         self.lifecycle = JobLifecycle()
         self.state = None
         self.grade_record_path = self.root / "coordinator-grades.json"
+        self.coordinator_checkpoint_store = CoordinatorCheckpointStore(
+            self.root / "coordinator-checkpoints.jsonl")
         self.coordinator_grades = {}
         self.telemetry_grade_tampering = set()
 
@@ -211,6 +214,85 @@ class Engine:
             output.mkdir(parents=True, exist_ok=True, mode=0o700)
             save(output / "telemetry.json", telemetry)
         save(self.path, persisted)
+        self.reconcile_coordinator_checkpoint(reason="checkpoint")
+
+    def coordinator_checkpoint_summary(self):
+        active_owners = []
+        unresolved_decisions = []
+        for job in self.state["jobs"]:
+            job_id = job["spec"]["job_id"]
+            attempt_id = job["attempt_id"]
+            if (not job["settled"]
+                    and (job["phase"] != "pending" or job["pending_effect"] is not None
+                         or job["pane_id"] is not None)):
+                active_owners.append({"job_id": job_id, "attempt_id": attempt_id,
+                                      "agent_name": job["agent_name"], "pane_id": job["pane_id"],
+                                      "workspace_id": job.get("workspace_id"), "phase": job["phase"]})
+            if job["pending_effect"] is not None:
+                action = job["pending_effect"]["action"]
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "pending_effect",
+                                             "detail": f"{action} delivery is unverified; reconcile its exact owner before retrying."})
+            if job.get("rate_limit_seen") and job.get("rate_limit_recoveries", 0) >= 1:
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "provider_usage_limit",
+                                             "detail": (job.get("issue") or
+                                                        "provider usage limit persisted after one recovery; coordinator review required")[:512]})
+            elif job["issue"]:
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "coordinator_review", "detail": str(job["issue"])[:512]})
+            if job["collection_error"]:
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "collection_error",
+                                             "detail": str(job["collection_error"])[:512]})
+            collection = job.get("collection")
+            if (collection is not None
+                    and (collection["outcome"] != "complete" or collection["unresolved"])):
+                detail = "; ".join(collection["unresolved"][:4]) or collection["outcome"]
+                unresolved_decisions.append({"job_id": job_id, "attempt_id": attempt_id,
+                                             "kind": "worker_result", "detail": detail[:512]})
+
+        if unresolved_decisions:
+            decision = unresolved_decisions[0]
+            if decision["kind"] == "provider_usage_limit":
+                next_action = (f"Review the provider usage-limit decision for job {decision['job_id']} "
+                               f"attempt {decision['attempt_id']}; do not retry it. Reconcile its worker owner "
+                               "before continuing with independent pending work.")
+            elif decision["kind"] == "pending_effect":
+                next_action = (f"Reconcile job {decision['job_id']} attempt {decision['attempt_id']} "
+                               f"({decision['detail']}) against its recorded worker before retrying or starting work.")
+            else:
+                next_action = (f"Review {decision['kind']} for job {decision['job_id']} attempt "
+                               f"{decision['attempt_id']}, then resume only after reconciling its owner and evidence.")
+        elif active_owners:
+            owner = active_owners[0]
+            pane = owner["pane_id"] or "unverified pane"
+            next_action = (f"Observe job {owner['job_id']} attempt {owner['attempt_id']} at {pane} and "
+                           "reconcile its result before launching pending work.")
+        elif any(not job["settled"] for job in self.state["jobs"]):
+            next_action = "Resume the run and launch the next pending job in request order, subject to concurrency and admission limits."
+        else:
+            next_action = "Review collected worker receipts and artifacts, then finish coordinator disposition if required."
+
+        return {"request_id": self.state["request"]["request_id"],
+                "coordinator_owner": str(self.state.get("session_id") or "unknown"),
+                "active_owners": active_owners, "unresolved_decisions": unresolved_decisions,
+                "next_safe_action": next_action}
+
+    def reconcile_coordinator_checkpoint(self, reason="state_reconciled"):
+        summary = self.coordinator_checkpoint_summary()
+        latest = self.coordinator_checkpoint_store.latest()
+        summary_digest = digest(encoded(summary))
+        if latest is not None and latest["request_id"] != summary["request_id"]:
+            raise JobError("conflict", "coordinator checkpoint belongs to another run request")
+        if latest is not None and latest["summary_sha256"] == summary_digest:
+            return latest
+        if latest is None:
+            reason = "initial"
+        elif reason == "initial":
+            reason = "state_reconciled"
+        return self.coordinator_checkpoint_store.append(
+            summary, reason, latest["sequence"] if latest is not None else None)
 
     def load_coordinator_grades(self):
         try:
@@ -1164,6 +1246,13 @@ class Engine:
 
     def drive(self, status_only=False):
         try:
+            self.reconcile_coordinator_checkpoint()
+            if not status_only:
+                for job in self.state["jobs"]:
+                    if (not job["settled"]
+                            and (job["pane_id"] is not None or job["pending_effect"] is not None)):
+                        self.observe(job)
+                        self.checkpoint()
             while True:
                 self.deadline.check()
                 observed_in_launch = set()

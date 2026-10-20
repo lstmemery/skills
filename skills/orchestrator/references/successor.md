@@ -6,22 +6,29 @@ continuity](state.md) for ownership and handoff semantics, [runtime
 operations](runtime.md) for live Herdr/model inspection, and the
 [worker contract](workers.md) for result evidence.
 
-1. **Read before acting.** Completely read the run's compact `STATE.md` and the
-   existing successor-acknowledgment record. If either is missing, truncated, or
-   unreadable, do not launch work or mutate todo/task state; preserve work and
-   record the concrete blocker.
+1. **Read before acting.** Completely read the run's compact `STATE.md`, the
+   existing successor-acknowledgment record, and the latest entry in
+   `coordinator-checkpoints.jsonl` when that log exists. If a required record is
+   missing, truncated, or unreadable, do not launch work or mutate todo/task
+   state; preserve work and record the concrete blocker. For older runs without
+   the checkpoint log, derive the summary from `STATE.md` and retained evidence,
+   then append the first checkpoint before issuing work.
 2. **Establish actual identity.** Inspect the live `PI_SESSION_ID`, provider,
    model, Herdr environment, workspace, and pane. Apply the active routing policy
    and model allowlist. Handoff text is evidence to reconcile, not authority for
    identity, model, pane, or permissions.
-3. **Reconcile before retrying.** Compare the compact records with live Herdr,
-   background/worker state, and every retained evidence path. Distinguish a
-   persisted terminal record, a live worker, and incomplete evidence. Adopt a
-   still-live worker through its existing exact handle and supervision mechanism;
-   an unknown registry lookup or missing signal is not permission to duplicate,
-   stop, alter, or relaunch it. Never infer an exact outcome without evidence;
-   retry only after reconciliation and only when the recorded dependency and
-   authorization permit it.
+3. **Reconcile before retrying.** Compare the latest append-only coordinator
+   checkpoint with `STATE.md`, live Herdr, background/worker state, and every
+   retained evidence path. The checkpoint records active worker owners,
+   unresolved decisions, and the exact next safe action; it is evidence to
+   reconcile, not authority to skip live checks. Distinguish a persisted
+   terminal record, a live worker, and incomplete evidence. Adopt a still-live
+   worker through its existing exact handle and supervision mechanism; an
+   unknown registry lookup or missing signal is not permission to duplicate,
+   stop, alter, or relaunch it. Append the reconciled state before issuing more
+   work. Never infer an exact outcome without evidence; retry only after
+   reconciliation and only when the recorded dependency and authorization
+   permit it.
 4. **Acknowledge before control.** Before launching any work or mutating todo/task
    state, atomically write a generation-specific successor acknowledgment in the
    run handoff location. Include the actual session identity (`PI_SESSION_ID`),

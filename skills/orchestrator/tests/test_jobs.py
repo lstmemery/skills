@@ -931,6 +931,49 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertIn("single bounded recovery", job["issue"])
 
+    def test_usage_limit_handoff_reconciles_append_only_coordinator_checkpoint(self):
+        self.write_jobs(1, runtime="pi", provider="llama-local", model="qwen3.8-27b-uncensored", effort="medium")
+        self.configure(jobs={"job0": "rate_limited_always"})
+
+        code, _ = self.call(wait_seconds=1.2)
+
+        self.assertIn(code, (0, 10))
+        checkpoint_path = self.run / "coordinator-checkpoints.jsonl"
+        original_log = checkpoint_path.read_bytes()
+        checkpoints = [json.loads(line) for line in original_log.splitlines()]
+        self.assertGreaterEqual(len(checkpoints), 2)
+        self.assertEqual([item["sequence"] for item in checkpoints],
+                         list(range(1, len(checkpoints) + 1)))
+        checkpoint = checkpoints[-1]
+        self.assertEqual(checkpoint["reason"], "checkpoint")
+        self.assertEqual(checkpoint["active_owners"][0]["job_id"], "job0")
+        self.assertEqual(checkpoint["active_owners"][0]["pane_id"], "moved:job0")
+        decision = next(item for item in checkpoint["unresolved_decisions"]
+                        if item["kind"] == "provider_usage_limit")
+        self.assertIn("single bounded recovery", decision["detail"])
+        self.assertIn("do not retry it", checkpoint["next_safe_action"])
+        effects_before = [event["action"] for event in self.events()
+                          if event["action"] in ("split", "move", "start", "prompt", "jail")]
+
+        successor_code, _ = self.call("resume", wait_seconds=0.3)
+
+        self.assertIn(successor_code, (0, 10))
+        self.assertTrue(checkpoint_path.read_bytes().startswith(original_log))
+        effects_after = [event["action"] for event in self.events()
+                         if event["action"] in ("split", "move", "start", "prompt", "jail")]
+        self.assertEqual(effects_after, effects_before)
+        successor_log = checkpoint_path.read_bytes()
+        successor_checkpoints = [json.loads(line) for line in successor_log.splitlines()]
+        successor_checkpoint = successor_checkpoints[-1]
+        self.assertGreater(successor_checkpoint["sequence"], checkpoint["sequence"])
+        self.assertEqual(successor_checkpoints[len(checkpoints) - 1], checkpoint)
+        self.assertEqual(successor_checkpoint["active_owners"], checkpoint["active_owners"])
+        self.assertTrue(any(item["kind"] == "provider_usage_limit"
+                            for item in successor_checkpoint["unresolved_decisions"]))
+        self.assertTrue(any(item["kind"] == "collection_error"
+                            for item in successor_checkpoint["unresolved_decisions"]))
+        self.assertIn("do not retry it", successor_checkpoint["next_safe_action"])
+
     def test_legacy_retry_history_consumes_recovery_budget_after_upgrade(self):
         self.call()
         state = self.state()
