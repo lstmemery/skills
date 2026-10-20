@@ -3,6 +3,36 @@
 Read before presenting repository changes, processing code feedback, opening a
 PR, or integrating a local result. Preferences own the human decision boundary.
 
+## Bounded review/fix loops
+
+Track review/fix rounds per candidate branch. The initial review establishes
+the baseline and is not a fix/review round. Each subsequent cycle in which the
+author addresses findings and the candidate receives a re-review counts as one
+round. Record the round number and candidate head in the task record or review
+artifact so a changed branch or resumed worker cannot silently reset the count.
+
+Re-reviews default to the diff since the prior reviewed candidate plus all
+previously reported findings that remain open. Recheck each prior finding
+against the new candidate, including findings whose disposition was rejected;
+preserve the recorded rejection and rationale unless the coordinator changes
+it. Review the full branch when the coordinator requests it or when changes
+cannot be safely assessed from that delta and finding set, and record why.
+
+After round 3, stop before another fix/review cycle and require a coordinator
+checkpoint. The checkpoint lists every remaining finding with its finding ID
+and current disposition, classifying it as a new defect, previously rejected
+scope, or a previously accepted finding that remains open. The coordinator
+must choose exactly one next step:
+
+- authorize one additional bounded fix/re-review round, specifying its scope;
+  this authorization permits only round 4 and does not reset the count; or
+- send the candidate for spec-level adjudication.
+
+Do not begin another round without that recorded choice. After round 4, stop
+again and return for spec-level adjudication; no further fix/re-review round is
+authorized by this procedure. Record the checkpoint decision and resulting
+candidate head with the review history.
+
 ## Prepare an inspectable candidate
 
 Delegate preparation to the coding worker or a bounded review worker. Produce:
