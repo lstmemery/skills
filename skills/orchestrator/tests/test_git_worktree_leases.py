@@ -58,6 +58,7 @@ class GitWorktreeLeaseTest(unittest.TestCase):
         self.assertEqual(set(record), {"schema_version", "path", "lease_id", "lease_holder",
                                        "repo_root", "git_common_dir", "base_commit"})
         self.assertEqual(record["schema_version"], 1)
+        self.assertRegex(record["lease_id"], r"^git-worktree-[0-9a-f]{32}$")
         self.assertEqual(record["lease_holder"], "task-1277")
         self.assertEqual(record["base_commit"], self.base)
         worktree = Path(record["path"])

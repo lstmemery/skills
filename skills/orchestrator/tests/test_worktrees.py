@@ -203,6 +203,22 @@ class WorktreeAllocationTest(unittest.TestCase):
 
         self.assertEqual(result["session_id"], "fixture-socket")
 
+    def test_legacy_lease_with_git_prefix_keeps_treehouse_verification(self):
+        repo, worktree, base = self.git_fixture()
+        record = self.repository_worktree_record(
+            worktree, repo, base, lease_id="git-worktree-legacy")
+
+        with patch.dict(os.environ, {"HOME": str(self.home)}), \
+                patch("herdr_jobs.worktrees._git_identity",
+                      return_value=(repo, repo / ".git", base)), \
+                patch("herdr_jobs.worktrees._verify_treehouse_lease") as verify_treehouse, \
+                patch("herdr_jobs.worktrees._verify_git_lease_marker") as verify_git_marker:
+            verified = verify_repository_worktree(record, str(worktree), self.run_git)
+
+        self.assertEqual(verified, record)
+        verify_treehouse.assert_called_once_with(record, worktree, self.run_git, "treehouse")
+        verify_git_marker.assert_not_called()
+
     def test_managed_writer_accepts_allocator_lease_before_launch(self):
         repo, _, base = self.git_fixture()
         acquired = self.allocate(repo, expected_base=base)
@@ -419,7 +435,7 @@ class WorktreeAllocationTest(unittest.TestCase):
                                        "repo_root", "git_common_dir", "base_commit"})
         self.assertEqual(record["schema_version"], 1)
         self.assertEqual(record["path"], str(Path(record["path"]).resolve()))
-        self.assertEqual(record["lease_id"].split("-", 2)[0:2], ["git", "worktree"])
+        self.assertRegex(record["lease_id"], r"^git-worktree-[0-9a-f]{32}$")
         self.assertEqual(record["lease_holder"], "task-1119")
         self.assertEqual(record["repo_root"], str(repo.resolve()))
         self.assertEqual(record["git_common_dir"], str((repo / ".git").resolve()))

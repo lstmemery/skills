@@ -17,6 +17,8 @@ TREEHOUSE_STATUS_FIELDS = {"name", "path", "status", "flavor", "lease_id", "leas
                            "leased_at", "processes"}
 TREEHOUSE_STATUS_OPTIONAL_FIELDS = {"branch", "detached", "recovery_reason"}
 GIT_LEASE_PREFIX = "git-worktree-"
+# Reserve the allocator's exact UUID form; arbitrary legacy IDs keep the Treehouse verifier.
+GIT_LEASE_ID = re.compile(re.escape(GIT_LEASE_PREFIX) + r"[0-9a-f]{32}")
 GIT_LEASE_MARKER = "orchestrator-lease.json"
 
 
@@ -250,7 +252,7 @@ def verify_repository_worktree(record, cwd, run_command, treehouse="treehouse"):
         unavailable("repository writers must use a linked worktree, not home or the expected checkout")
 
     _git_identity(worktree, repo_hint, run_command, record["git_common_dir"], record["base_commit"])
-    if record["lease_id"].startswith(GIT_LEASE_PREFIX):
+    if GIT_LEASE_ID.fullmatch(record["lease_id"]):
         _verify_git_lease_marker(record, worktree, run_command)
     else:
         _verify_treehouse_lease(record, worktree, run_command, treehouse)
