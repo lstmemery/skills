@@ -120,7 +120,7 @@ def validate_escalation(value, next_level):
 
 
 def complete_tuple(levels, level, pins, policy_runtime=None):
-    """Complete a partial explicit route from the cheapest compatible primary tuple."""
+    """Complete pins from the cheapest compatible configured tuple."""
     if level is not None:
         integer(level, "model_level", 1, 8)
     normalized = dict(pins)
@@ -135,22 +135,26 @@ def complete_tuple(levels, level, pins, policy_runtime=None):
     candidates = []
     levels_to_check = ((str(level),) if level is not None
                        else tuple(str(i) for i in range(1, 9)))
+    # A harness/provider constraint may select either configured tuple as its
+    # initial route. It is not an availability fallback from another worker.
+    choices = ("primary", "fallback") if not {"model", "effort"} & normalized.keys() else ("primary",)
     for candidate_level in levels_to_check:
-        requested = levels[candidate_level]["primary"]
-        runtime = HARNESS_ALIASES.get(requested["harness"], requested["harness"])
-        provider = billing_pool(requested["provider"])
-        candidate = {"model": requested["model"], "effort": requested["effort"],
-                     "runtime": runtime, "provider": provider}
-        if all(candidate[key] == value for key, value in normalized.items()):
-            validate_provider_harness(runtime, provider)
-            if (runtime, provider) in SUPPORTED_PAIRS:
-                candidates.append((int(candidate_level), candidate, requested))
+        for choice in choices:
+            requested = levels[candidate_level][choice]
+            runtime = HARNESS_ALIASES.get(requested["harness"], requested["harness"])
+            provider = billing_pool(requested["provider"])
+            candidate = {"model": requested["model"], "effort": requested["effort"],
+                         "runtime": runtime, "provider": provider}
+            if all(candidate[key] == value for key, value in normalized.items()):
+                validate_provider_harness(runtime, provider)
+                if (runtime, provider) in SUPPORTED_PAIRS:
+                    candidates.append((int(candidate_level), candidate, requested, choice))
     if not candidates:
         raise JobError("unavailable_capability",
                        "partial explicit route has no compatible validated model ladder tuple")
-    chosen_level, candidate, requested = candidates[0]
-    return {"level": chosen_level, "choice": "primary", "requested": dict(requested),
-            **candidate, "fallback": None}
+    chosen_level, candidate, requested, choice = candidates[0]
+    return {"level": chosen_level, "choice": "constraint" if choice == "fallback" else choice,
+            "requested": dict(requested), **candidate, "fallback": None}
 
 
 def load_ladder(path, data=None):

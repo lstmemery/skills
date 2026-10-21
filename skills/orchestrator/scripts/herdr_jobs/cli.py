@@ -11,7 +11,9 @@ from .continuation import continue_job
 from .engine import Engine, WORKER_DISPOSITIONS
 from .edit_scope import declared_brief_contract, edit_scope_warnings
 from .records import JobError, digest, effort_arguments, encoded, load_json, prepare, run_lock
-from .transport import BudgetExpired, Deadline, NativeTransport
+from .transport import BudgetExpired, Deadline
+from .launch_transport import LaunchTransport
+from .preflight_holds import record_hold
 
 
 ENTRYPOINT = str(Path(__file__).resolve().parents[1] / "herdr-jobs.py")
@@ -108,7 +110,7 @@ def preview_runtime_argv(job):
     argv = []
     if runtime != "codex" and job.get("model") is not None:
         argv.extend(("--model", job["model"]))
-    effort = (job.get("override") or {}).get("effort")
+    effort = (job.get("model_route") or {}).get("effort", (job.get("override") or {}).get("effort"))
     argv.extend(effort_arguments(runtime, effort))
     return argv
 
@@ -162,7 +164,7 @@ def finish_message(finish):
     return " ".join(parts)
 
 
-def main(argv=None, transport_factory=NativeTransport):
+def main(argv=None, transport_factory=LaunchTransport, *, backend="managed"):
     engine = None
     try:
         args = parser().parse_args(argv)
@@ -191,8 +193,15 @@ def main(argv=None, transport_factory=NativeTransport):
         existing_jobs = ()
         if args.operation == "add" and (root / "state.json").exists():
             existing_jobs = load_json(root / "state.json", 67108864)["request"]["jobs"]
-        request = (prepare(args.manifest, args.policy, existing_jobs)
-                   if args.operation in ("run", "add") else None)
+        try:
+            request = (prepare(args.manifest, args.policy, existing_jobs)
+                       if args.operation in ("run", "add") else None)
+        except JobError as error:
+            if not args.preview:
+                record_hold(root, None, error, manifest_path=args.manifest, backend=backend)
+            raise
+        if request is not None and backend != "managed":
+            request["backend"] = backend
         if args.operation == "add" and len(request["jobs"]) != 1:
             raise JobError("invalid_input", "add accepts exactly one new job; use run for an initial batch")
         if request is not None:
@@ -202,7 +211,8 @@ def main(argv=None, transport_factory=NativeTransport):
                       "concurrency": request["concurrency"], "capabilities": "unverified",
                       "run_dir": str(root), "jobs": [{"job_id": job["job_id"], "route": job["route"],
                         "kind": job["kind"], "model": job["model"], "provider": job["provider"],
-                        "effort": (job.get("override") or {}).get("effort"),
+                        "effort": job["route_decision"]["resolved"]["effort"],
+                        "route_decision": job["route_decision"],
                         "runtime_argv": preview_runtime_argv(job),
                         "model_route": job.get("model_route"), "cwd": job["cwd"],
                         "edit_scope_warnings": edit_scope_warnings(job),
@@ -262,11 +272,17 @@ def main(argv=None, transport_factory=NativeTransport):
                     print(encoded(result).decode())
                 return EXIT_CODES.get(result["batch_state"], 0)
             binding_path = args.host_contract or (engine.state["host_contract"] if exists else None)
-            transport = transport_factory(binding_path, deadline)
-            engine.transport = transport
             preflight_request = request if args.operation in ("run", "add") else engine.state["request"]
-            capabilities = transport.preflight(preflight_request, existing=engine.state,
-                                               status_only=args.operation in ("status", "finish", "continue"))
+            if args.operation == "add":
+                preflight_request = {**request, "jobs": [*engine.state["request"]["jobs"], *request["jobs"]]}
+            try:
+                transport = transport_factory(binding_path, deadline)
+                engine.transport = transport
+                capabilities = transport.preflight(preflight_request, existing=engine.state,
+                                                   status_only=args.operation in ("status", "finish", "continue"))
+            except (JobError, BudgetExpired) as error:
+                record_hold(root, preflight_request, error)
+                raise
             if not exists:
                 engine.initialize(request, capabilities, binding_path)
             else:

@@ -245,6 +245,12 @@ fallback. Preview includes effective provider, effort, and the pinned route;
 live preflight validates exact native model/provider/effort capabilities before
 any pane or worker is created.
 
+Every prepared job has a coordinator-owned `route_decision`; optional
+`routing_assessment` records task-specific difficulty and sufficiency evidence.
+Native dispatch uses the same manifest and launch boundary. See
+[route decisions](route-decisions.md) for the schema, pin dimensions,
+failed-preflight records, telemetry and parked-worker lease lifecycle.
+
 The `local_lane` flag is a deliberate opt-in for an ordinary host job outside
 the integer ladder. It requires the complete override tuple
 `runtime: pi`, `provider: llama-local`, `model: qwen3.8-27b-uncensored`, and

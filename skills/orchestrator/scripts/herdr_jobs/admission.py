@@ -5,6 +5,7 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,17 @@ from .model_ladder import billing_pool
 STATE_NAME = "provider-admission.json"
 LOCK_NAME = ".provider-admission.lock"
 POLICY_PATH = Path(__file__).resolve().parents[2] / "launch-policy.json"
+
+
+def dispatch_lease_id(request_id, job_id, attempt_id, root=None):
+    identity = {"request_id": request_id, "job_id": job_id, "attempt_id": attempt_id}
+    if root is not None:
+        identity["run_dir"] = str(root)
+        payload = encoded(identity)
+    else:
+        # Preserve the reducer's existing durable identity encoding.
+        payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return "managed-" + hashlib.sha256(payload).hexdigest()[:40]
 
 
 def normalize_provider(value):

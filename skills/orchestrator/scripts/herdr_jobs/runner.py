@@ -5,14 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-import hashlib
 import json
 import math
 import time
 from typing import Any, Callable
 import uuid
 
-from .admission import normalize_model, normalize_provider
+from .admission import dispatch_lease_id, normalize_model, normalize_provider
 from .lifecycle import Effect, EffectPort, EffectReceipt, EffectUnknown, JobLifecycle
 from .store import StateStore
 
@@ -104,10 +103,8 @@ def _new_job(spec: Mapping[str, Any], index: int, request: Mapping[str, Any],
                         else route.get("runtime", "default")))
         value.setdefault("provider", normalize_provider(provider))
         value.setdefault("admission_model", normalize_model(resolved_model or "default"))
-        value.setdefault("admission_lease_id", "managed-" + hashlib.sha256(
-            json.dumps({"request_id": request.get("request_id", ""),
-                        "job_id": value["job_id"], "attempt_id": value["attempt_id"]},
-                       sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:40])
+        value.setdefault("admission_lease_id", dispatch_lease_id(
+            request.get("request_id", ""), value["job_id"], value["attempt_id"]))
         value.setdefault("admission_acquired", False)
         value.setdefault("admission_wait", None)
         value.setdefault("rate_limit_seen", False)
@@ -352,12 +349,8 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                     job["issue"] = None
                     if job.get("admission_lease_id"):
                         request_id = state.get("request", {}).get("request_id", "")
-                        lease_identity = json.dumps({"request_id": request_id,
-                                                     "job_id": job.get("job_id"),
-                                                     "attempt_id": fresh_attempt},
-                                                    sort_keys=True, separators=(",", ":"))
-                        job["admission_lease_id"] = "managed-" + hashlib.sha256(
-                            lease_identity.encode()).hexdigest()[:40]
+                        job["admission_lease_id"] = dispatch_lease_id(
+                            request_id, job.get("job_id"), fresh_attempt)
                     store.checkpoint(state)
 
             # A pending effect is an ambiguous external operation.  Give an

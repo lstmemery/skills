@@ -10,9 +10,10 @@ help; examples below are starting points, not evidence of installation.
   Its generic topology default is overridden by the user's Orchestrator
   preference for a new workspace per worker. The active profile still wins:
   a jail cannot connect to or create work in a host session.
-- Outside Herdr, use the Orchestrator CLI when available and permitted. Exact
-  shell jobs also use its shell route when appropriate. Report when this route
-  cannot provide the user's preferred visible panes.
+- Outside Herdr, ordinary worker launches need an adapter that consumes the
+  same coordinator decision and shared lease. The packaged guarded adapter
+  requires Herdr; hold the worker when that binding is unavailable. Exact
+  deterministic shell jobs may still use the CLI shell route when permitted.
 - Preserve a named harness exactly. A missing CLI process registration can be
   repaired as below; it does not establish a missing Herdr agent kind. Use only
   a verified matching route, or report the specific gap. `omp` and `pi` remain
@@ -154,22 +155,18 @@ elsewhere and any checkout-changing commands separately isolated.
 
 ## Provider admission
 
-Before a direct or ad-hoc launch creates a pane, reserve a slot through the
-shared admission CLI shipped with this skill. Managed jobs use the same host
-state and configured provider caps:
+Ordinary managed and native dispatch reserve provider capacity through the same
+locked admission store. Use the [dispatch entrypoint](route-decisions.md), which
+binds the lease to the validated decision and worker identity before creating a
+pane. The admission CLI remains an inspection and reconciliation tool:
 
 ```sh
-python3 /path/to/orchestrator/scripts/herdr-admission.py acquire \
-  --provider codex --model gpt-6-luna --lease-id TASK_ATTEMPT --run-id TASK_ID
-python3 /path/to/orchestrator/scripts/herdr-admission.py status --provider codex
-python3 /path/to/orchestrator/scripts/herdr-admission.py release --lease-id TASK_ATTEMPT
+python3 scripts/herdr-admission.py status --provider codex
 ```
 
-Only create the pane and start the worker when `acquire` returns
-`"admitted":true`. A denied acquisition reports whether the provider cap or a
-provider/model backoff blocked it. Keep the lease through the worker's active
-lifetime; release it after the owned worker is terminal. `status` reports the
-provider-wide active count used by both direct and managed launches.
+An `acquire` result alone is not launch authorization. Keep a lease through an
+active or ambiguously started worker's lifetime. Release only after terminal
+state or verified absence; a parked coordinator does not release workers.
 
 An ad-hoc launcher must also verify that the submitted prompt landed by checking
 the runtime's active-turn status line in the owned pane. A generic occurrence of
@@ -311,20 +308,15 @@ worker. See [quota recovery](quota-recovery.md) for the full sequence.
 
 ## Herdr launch
 
-Use current help to inspect supported kinds. For a normal recognized harness:
+For ordinary workers, use the shared [native dispatch entrypoint](route-decisions.md)
+with a coordinator-prepared manifest, policy, host contract and run directory.
+It verifies the exact model and effort, reserves shared admission, and records
+workspace/pane/name before prompting. A managed preflight refusal remains a hold
+on the native path. Do not manually create a worker from `model-route.py` argv.
 
-```sh
-herdr pane split --current --direction right --cwd <worker-cwd> --no-focus
-herdr pane move <returned-pane-id> --new-workspace --label <task-name> --no-focus
-herdr agent start <unique-name> --kind <verified-kind> --pane <moved-pane-id>
-herdr agent prompt <unique-name> <brief> --wait --timeout 30000
-```
-
-Choose split geometry per the Herdr skill. Parse `.result.pane.pane_id`, then
-the moved `.result.move_result.pane.pane_id`; movement changes the public ID.
-Record workspace/pane/name before prompting. Pass native arguments only through
-the installed CLI's supported argument boundary. Do not turn a brief into shell
-code: use structured argv where possible and shell-quote any necessary command.
+The Herdr split/move/start operations below describe transport internals, not an
+alternate launch procedure. Keep native arguments as structured argv and retain
+the installed CLI's argument boundary.
 
 For ad-hoc prompts, use the submit-and-verify operation in
 `scripts/herdr_jobs/prompt.py`. It checks the owned worker before writing,
@@ -369,8 +361,8 @@ shows `Working`.
 Only then mark the prompt submitted and begin normal observation. A blocked
 state, a trust/resume dialog, or output that does not prove `Working` is a
 launch failure or unresolved effect; do not answer the dialog or replay the
-prompt. Other harnesses continue to use the verified `agent start` then
-`agent prompt` sequence above.
+prompt. Other harnesses use the guarded transport's verified `agent start`
+then `agent prompt` sequence.
 
 Some non-repository run folders may still trigger Codex's trust screen despite
 the scoped trust override. In that case the managed launch stops for inspection;
