@@ -443,6 +443,26 @@ class JobsTest(unittest.TestCase):
         self.assertIn("Validated each worker result.json schema", result["next_action"]["message"])
         self.assertNotIn("accept the work", result["next_action"]["message"].lower())
 
+    def test_preflight_rejects_task_declaring_conflicting_output_directory(self):
+        self.task.write_bytes((PACKAGE / "tests/fixtures/managed-jobs/conflicting-output-task.md").read_bytes())
+        code, result = self.call("run", preview=True)
+        self.assertEqual((code, result["error"]), (2, "invalid_input"))
+        self.assertIn("job0: task file", result["message"])
+        self.assertIn("declares conflicting output directory: 'cwd'", result["message"])
+
+    def test_prompt_uses_same_canonical_output_directory_in_brief_and_collection_contract(self):
+        from herdr_jobs.records import prepare
+        request = prepare(self.manifest, self.policy)
+        engine = Engine(self.run, None, None)
+        engine.state = {"request": request}
+        job = {"spec": request["jobs"][0], "worker_output": str(self.run / "workers/job0/attempt"),
+               "attempt_id": "attempt"}
+        prompt = engine.prompt(job)
+        expected = f"{job['worker_output']}"
+        self.assertEqual(prompt.count(f"Canonical output directory: {expected}"), 1)
+        self.assertEqual(prompt.count(f"Collection contract output directory: {expected}"), 1)
+        self.assertEqual(prompt.count(f"Output directory: {expected}"), 1)
+
     def test_local_lane_finish_records_telemetry_and_requires_independent_validation(self):
         self.write_jobs(1, runtime="pi", provider="llama-local",
                         model="qwen3.8-27b-uncensored", effort="medium")

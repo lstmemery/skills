@@ -182,6 +182,12 @@ native argument:
 | `claude-code` | `low`, `medium`, `high`, `xhigh`, `max` | `--effort <value>` |
 | `omp` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` | `--thinking <value>` |
 
+Every prompt names one canonical output directory in both its worker brief and
+collection contract. Workers must write the expected result, receipt, and
+supporting files there; the collector reads that same directory. Preflight
+rejects task text that explicitly names a different output or editable
+directory and reports the conflicting declaration and source task file.
+
 Other runtimes, including Gemini CLI, reject an effort override before launch;
 the launcher does not assume every runtime accepts a generic `--effort` flag.
 Effort values are runtime-level capabilities; a selected model may support a
