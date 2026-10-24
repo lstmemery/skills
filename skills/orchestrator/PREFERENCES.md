@@ -15,6 +15,9 @@ acceptance of worker output.
 
 ## User Preferences
 
+- Run up to 8 workers at once by default: use concurrency 8 in managed-job
+  manifests unless quota, a shared resource, or the user says otherwise
+  (Matt 2026-10-18).
 - Deliver each finished report produced by focused or deep research through the
   active runtime's delivery contract by default, after the research coordinator
   completes synthesis and validation. Do not ask again whether to send it. Honor
@@ -29,13 +32,19 @@ acceptance of worker output.
 - Explicit model and effort requests remain fixed; change defaults only through
   an accepted policy update backed by a task-class comparison.
 - Ordinary workers use the cost-conscious eight-level CSV ladder according to
-  [model routing](references/model-routing.md). Start at the cheapest sufficient
-  level, record bounded escalation evidence, and preserve the three independent
+  [model routing](references/model-routing.md). Start at the level the
+  coordinator judges best suited to the job (not necessarily level 1; Matt
+  2026-10-24), escalate on demonstrated failure with recorded evidence, and
+  preserve the three independent
   billing pools. That reference owns ordinary model defaults and same-level
   fallback selection; explicit requests and the research/shopping jail rules win.
 - Inside Herdr, place each worker in a new pane in its own new workspace; the
   managed path's topology is set and validated in
   [launch-policy.json](launch-policy.json). Preserve the user's focus. Support different harnesses across workers.
+- Label every worker workspace `<harness> · <short task>` (e.g. `codex · meal plan Oct24-30`,
+  `jail · Well Dweller tips`) right after launch; relabel others on cleanup (Matt 2026-10-24).
+- Always give the user absolute paths for every file or folder mentioned in reports,
+  task cards, and decision docs, never relative or `~`-elided (Matt 2026-10-24).
 - Use isolated worktrees for repository changes, including small fixes. Prefer
   standalone Treehouse for their lifecycle. Research and other work that does
   not change a repository uses an ordinary task output folder.
