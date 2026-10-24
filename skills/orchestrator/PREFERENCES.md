@@ -45,6 +45,8 @@ acceptance of worker output.
   `jail · Well Dweller tips`) right after launch; relabel others on cleanup (Matt 2026-10-24).
 - Always give the user absolute paths for every file or folder mentioned in reports,
   task cards, and decision docs, never relative or `~`-elided (Matt 2026-10-24).
+- Ask Matt before launching any host `gpt-6-astra` worker; use `gpt-6.1-sol` instead by
+  default. Jailed workers may keep astra (Matt 2026-10-24).
 - Use isolated worktrees for repository changes, including small fixes. Prefer
   standalone Treehouse for their lifecycle. Research and other work that does
   not change a repository uses an ordinary task output folder.
