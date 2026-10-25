@@ -1,7 +1,9 @@
 """Project collected managed jobs into the integration gate's evidence layout."""
 
+import io
 from pathlib import Path
 import re
+import tarfile
 
 from . import records
 from .review_evidence import AXES, ReviewEvidenceError
@@ -9,6 +11,8 @@ from .worker_records import WorkerIdentity, validate_result
 
 
 REVIEW_SIDECAR = re.compile(r"^(review|review-r[1-9][0-9]*)/review-evidence\.json$")
+CAPTURE_BUNDLE = re.compile(r"^(review|review-r[1-9][0-9]*)/capture\.tar$")
+CAPTURE_PAYLOAD = re.compile(r"^capture/(manifest\.json|COMPLETE|diff\.patch|commits\.txt|blobs/[0-9a-f]{64})$")
 TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
@@ -78,11 +82,51 @@ def collected_files(root, request_id, job):
     return files
 
 
+def expand_capture_bundles(files):
+    """Read receipt-pinned tar bytes; never extract archive paths to disk.
+
+    Capture manifests and payload hashes are checked by the gate's existing
+    capture verifier after projection, just as for individually collected files.
+    """
+    expanded = dict(files)
+    total = sum(len(data) for source, data in files.items() if not CAPTURE_BUNDLE.fullmatch(source))
+    for source, raw in files.items():
+        match = CAPTURE_BUNDLE.fullmatch(source)
+        if match is None:
+            continue
+        del expanded[source]
+        seen = set()
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            for index, member in enumerate(archive):
+                if index >= 20002:
+                    raise ReviewEvidenceError("managed capture bundle exceeds 20002 entries")
+                if member.name in seen:
+                    raise ReviewEvidenceError("managed capture bundle repeats a path")
+                seen.add(member.name)
+                if member.isdir() and member.name in ("capture", "capture/blobs"):
+                    continue
+                if (member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
+                        or not CAPTURE_PAYLOAD.fullmatch(member.name)):
+                    raise ReviewEvidenceError("managed capture bundle has an unsafe member")
+                total += member.size
+                if not 0 <= member.size <= 16777216 or total > 67108864:
+                    raise ReviewEvidenceError("managed capture bundle exceeds payload size limits")
+                path = f"{match[1]}/{member.name}"
+                if path in expanded:
+                    raise ReviewEvidenceError("managed capture bundle conflicts with collected evidence")
+                with archive.extractfile(member) as stream:
+                    data = stream.read(member.size + 1)
+                if len(data) != member.size:
+                    raise ReviewEvidenceError("managed capture bundle has a truncated member")
+                expanded[path] = data
+    return expanded
+
+
 def materialize_runs(run_dirs, output_dir):
     """Return a durable evidence snapshot and provenance, without changing jobs."""
     try:
         return _materialize_runs(run_dirs, output_dir)
-    except (records.JobError, KeyError, TypeError, ValueError) as error:
+    except (records.JobError, KeyError, TypeError, ValueError, tarfile.TarError) as error:
         raise ReviewEvidenceError(f"invalid managed preflight input: {error}") from error
 
 
@@ -100,7 +144,7 @@ def _materialize_runs(run_dirs, output_dir):
             raise ReviewEvidenceError("unsupported managed state")
         states.append((root, raw))
         for job in state["jobs"]:
-            files = collected_files(root, state["request"]["request_id"], job)
+            files = expand_capture_bundles(collected_files(root, state["request"]["request_id"], job))
             provenance = {
                 "run_dir": str(root), "state_sha256": records.digest(raw),
                 "request_id": state["request"]["request_id"], "job_id": job["spec"]["job_id"],

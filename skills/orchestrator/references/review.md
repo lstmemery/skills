@@ -84,10 +84,26 @@ shared run only once. All supplied jobs must be settled with complete,
 unresolved-free collections. Coding jobs must enable `worker_result` and collect
 their assignment-bound `result.json` with its candidate block and declared
 artifacts. Review jobs collect `review/review.md`,
-`review/review-evidence.json`, and every file of the completed `review/capture/`
-bundle in their receipt. Use `review-rN/` for delta reviews. Normal receipt
-artifact count and size limits still apply. Link each sidecar to the coding
-job's `worker_result.task_id`; the review job may have a different job/task ID.
+`review/review-evidence.json`, and `review/capture.tar` in their receipt. Create
+the uncompressed archive from the completed capture, with paths rooted at
+`capture/`:
+
+```sh
+tar -cf OUTPUT_DIR/review/capture.tar -C OUTPUT_DIR/review capture
+```
+
+The archive counts as one receipt artifact regardless of the capture's file
+count. Normal receipt limits still apply: 1–32 artifacts, at most 16 MiB per
+artifact and 64 MiB in total. The adapter permits at most 20002 archive entries,
+16 MiB per payload file and 64 MiB of expanded evidence per job. It accepts
+only regular capture files and the `capture/` and `capture/blobs/` directories;
+links, special files, unsafe paths, duplicate members and collisions with
+individually collected evidence are refused. The manifest, completion marker,
+diff, history and source blobs still undergo full capture verification. Small
+captures may also collect every capture file individually, as before. Use
+`review-rN/` for delta reviews, including the archive's parent directory.
+Link each sidecar to the coding job's `worker_result.task_id`; the review job
+may have a different job/task ID.
 
 In managed review briefs, instruct the reviewer to omit `author_identity` and
 `reviewer_identity` from the sidecar. The adapter fills these from the coding
@@ -101,7 +117,9 @@ decides a finding's disposition.
 
 The adapter verifies receipt request/job/attempt identity, collection revision,
 artifact hashes and sizes, and worker-result assignment before using the
-collected snapshots. It writes a durable projection under
+collected snapshots. Archives are read exclusively from receipt-pinned bytes;
+worker output directories are not needed after collection. It writes a durable
+projection under
 `EVIDENCE_DIR/managed-inputs/DIGEST/` and runs the same capture, review-chain,
 disposition, candidate-head and target-head checks as the legacy layout. The
 report records `managed_input_dir` and `managed_jobs`, including original state
