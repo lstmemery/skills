@@ -67,10 +67,11 @@ coordinator session, and some cap their own runtime (a background watcher
 stopped at its 2-hour cap during an earlier night run). Workers then keep
 running unsupervised (F1: in-session timers also vanish with the coordinator).
 
-Durable supervision requires a mechanism outside the coordinator session — for
-example a host systemd user timer running a finite reconcile pass over
-`STATE.md`, live workers, and result files — that has been tested on this host
-against coordinator death. Record it and its last observation in the
+On Matt's desktop, the standard tested durable mechanism is the systemd user
+`codex-heartbeat.timer`, described below. It runs outside the coordinator
+session; it can resume managed work and queue an identity-checked wake even
+while the coordinator is busy or absent. Other hosts need their own tested
+out-of-session mechanism. Record the mechanism and its last observation in the
 `Supervision` line. If no such tested mechanism is installed, record
 `Supervision: in-session only (gap)` and tell the user before they leave what
 happens if the coordinator stops: running workers continue, nobody grades
@@ -83,6 +84,139 @@ Spend coordinator context on the ledger, not on evidence. Open a worker's report
 only to verify or compile it, and renew the coordinator per
 [state and continuity](state.md#renew-early) rather than letting a long night
 accumulate in one context (F8: coordinator context/quota was the scarce resource).
+
+### Desktop codex-heartbeat
+
+D9 (2026-10-25) adopts the desktop heartbeat as the tested unattended mechanism.
+The skill vendors the observed scripts in
+[scripts/supervision](../scripts/supervision/README.md); these are a host-specific
+snapshot, not an installer. D9's documentation check observed the timer enabled
+and active; it did not kill a coordinator or restart the timer to repeat the
+earlier operational test. A live timer is evidence of scheduling, not proof
+that every recovery branch succeeded.
+
+| Desktop file | Role |
+|---|---|
+| `/home/deadhand/.local/share/orchestrator/supervision/codex-heartbeat.sh` | One locked supervision pass over enrolled runs; invokes the wake helper at the end. |
+| `/home/deadhand/.local/share/orchestrator/supervision/wake-coordinator.py` | Delivers queued events only to the recorded idle agent/session/pane. |
+| `/home/deadhand/.local/share/orchestrator/supervision/coordinator.json` | Wake target keys: `pane_id`, `agent`, `session`; currently a Claude coordinator. |
+| `/home/deadhand/.local/share/orchestrator/supervision/active-runs.txt` | One absolute run-root path per line; the script splits on whitespace, so paths must have no spaces. |
+| `/home/deadhand/.config/systemd/user/codex-heartbeat.service` | Runs the finite heartbeat pass outside the coordinator session. |
+| `/home/deadhand/.config/systemd/user/codex-heartbeat.timer` | Schedules passes at roughly two-minute intervals; inspect actual scheduling on the host. |
+
+The snapshot pins the helper to
+`/home/deadhand/.claude/skills/orchestrator/scripts/herdr-jobs.py`, policy to
+`/home/deadhand/.claude/skills/orchestrator/launch-policy.json`, host contract to
+`/home/deadhand/.config/orchestrator/host-contract.json`, and Herdr socket to
+`/home/deadhand/.config/herdr/herdr.sock`. It sets its own executable `PATH`.
+It uses a nonblocking `flock` on
+`/home/deadhand/.local/share/orchestrator/supervision/codex-heartbeat.lock` to
+avoid overlapping passes. No live installation, enrollment, or unit change is
+performed by copying the skill.
+
+For each enrolled run root, the current script:
+
+1. Requires its `run` subdirectory, calls managed `resume` with a 20-second
+   budget, and reads `status --summary --wait-seconds 0`. This status is local
+   checkpoint evidence; it is not another live observation pass. It retains
+   `last-resume.json` and appends to `heartbeat.log` in that run root.
+2. Renames newly observed workspaces `codex · <run-basename> <job-id>` and
+   records workspace IDs in the run's `labeled` file. Jobs with the required
+   `out-<job-id>/DONE` marker queue a wake once, tracked by `out-<job-id>/.woke`.
+3. Reads the last 15 unwrapped lines of each unfinished worker pane. The legacy
+   check matches `usage limit` when `Working (` is absent. It parses a
+   `try again at … AM/PM` timestamp into `quota-<job-id>.until`, using the host
+   timezone; parse failure falls back to one hour, and a time over ten minutes
+   in the past is advanced a day. At reset plus five minutes it sends continuation
+   text to the same pane, waits **two seconds**, then sends Enter. Immediate
+   Enter did not reliably submit in the operational test. It clears the reset
+   file afterward, or when the banner disappears. This is one send per stored
+   reset, not a lifetime retry bound: a persistent banner can re-arm it.
+4. Feeds `backlog/task-<job-id>.md` in the run's `ORDER` order only when no
+   `quota-*.until` files remain and fewer than **four** unfinished jobs with panes
+   were counted. It copies the brief into the run root and writes `add-<job-id>.json`
+   for one managed `add`, retaining `add-<job-id>.out`. The generated manifest
+   fixes concurrency at 4, ordinary Codex `gpt-6.1-sol`, provider `codex`, effort
+   `high`, and `writes_repository: false`, with output and worktree editable
+   paths. Its AFK authorization text belongs to the original approved batch;
+   it cannot grant new authorization or replace a repository-writer lease.
+   Use this feeder only for compatible, explicitly authorized jobs and a run
+   already pinned to concurrency 4; the normal preference for 8 does not change
+   this snapshot. An add response with an `error` queues a wake and stops feeding
+   for that pass.
+5. When all status rows have `DONE` and every `ORDER` entry has been added,
+   calls `finish` with a ten-second budget. It retries on later passes until
+   the returned nonempty jobs list has `workspace_closed` for every job. Only
+   then does it remove the run from `active-runs.txt` and queue a review wake.
+   `DONE` is a feeder signal, not acceptance: collected receipts, dispositions,
+   coordinator review, and the worker-contract `check-closeout` still decide
+   task/run completion.
+
+After processing all runs, the wake helper reads
+`/home/deadhand/.local/share/orchestrator/supervision/wake-queue.txt`. It queries
+`herdr agent list` and requires **all three** recorded values to match:
+`pane_id`, agent kind (`claude` for the current coordinator), and
+`agent_session.value` equal to `session`, with `agent_status` exactly `idle`.
+A missing, busy, or replaced session leaves events queued. It never intentionally
+types into an unmatched shell. A successful `herdr agent prompt` sends at most
+the last eight queued lines, marks them as heartbeat evidence rather than user
+input, appends to `wake-sent.log`, and clears the queue. Prompt failure retains
+the queue. This wakes an existing coordinator; it does not create or resurrect
+a dead Claude session.
+
+#### Successor wake target
+
+Complete the ownership/generation acknowledgment and transfer in
+[state and continuity](state.md#renew-early) and
+[the successor procedure](successor.md#persistent-herdr-successor-replacement)
+first. After becoming the recorded owner, the successor observes its actual
+identity with `herdr agent list`, then atomically replaces
+`/home/deadhand/.local/share/orchestrator/supervision/coordinator.json` using a
+temporary file in that same directory followed by rename. Preserve exactly this
+shape with the successor's observed values, never the predecessor's identifiers:
+
+```json
+{"pane_id": "<observed successor pane>", "agent": "claude", "session": "<observed agent_session.value>"}
+```
+
+Read it back and compare all three values against the live agent before
+recording supervision acceptance. Updating this file changes only the wake
+target; it does not transfer coordinator authority. Keep `active-runs.txt` and
+pending wake events intact during succession. A non-Claude successor needs a
+separately verified prompt route; do not infer compatibility from the three-key
+file. This reference describes the authorized handoff procedure; D9 does not
+change the live target.
+
+#### Limits and pending detector integration
+
+- **s1 integration:** switch the heartbeat's legacy banner grep to the shared
+  Codex detector from `d1024b/s1-codex-usage-banner` once merged. That branch is
+  already merged into D9's base (`72e7710`), but the observed live heartbeat
+  still uses the grep. The remaining follow-up is wiring the heartbeat to
+  `herdr_jobs.admission.rate_limit_from_output(..., source="pane", runtime="codex")`
+  and validating recovery before an authorized deployment. D9 preserves the
+  live scripts byte for byte and does not deploy that follow-up.
+- This is a desktop Codex/Claude bridge, not a generic scheduler. Bash, GNU
+  `date`, `flock`, Python, the installed helper/Herdr contract, and a running
+  systemd user manager are prerequisites. Suspend, logout/user-manager shutdown,
+  host reboot, provider availability, and a dead coordinator can delay or prevent
+  progress; boot/login and lingering guarantees require separate host testing.
+- Pane-tail text and localized reset timestamps are heuristics. Old transcript
+  text can re-trigger the legacy grep, and a 15-line tail can miss a banner.
+  The continuation send clears its reset file even if a Herdr command fails.
+  The wake identity check and prompt are separate calls, so session replacement
+  between them remains a race, not an atomic identity guarantee.
+- The script parses the helper's summary table, not a versioned API. It has no
+  aggregate pass deadline, per-task wall-clock enforcement, retry budget, or
+  independent result grading. Its active count is a local heuristic; managed
+  concurrency/provider leases remain authoritative. A malformed/non-JSON add
+  response can be logged as added, so reconcile effects before any retry.
+- The heartbeat lock serializes heartbeat passes, not coordinator edits to the
+  enrollment file, target file, or queue. The enrollment rewrite and queue clear
+  can race with external writers. Coordinate such changes at a safe boundary;
+  after a partial pass or a missing wake, inspect run logs, receipts, queued
+  events, live identities, and managed state before retrying. `finish` cleanup
+  is not coordinator acceptance and cannot replace the run closeout gate.
 
 ## Workers
 

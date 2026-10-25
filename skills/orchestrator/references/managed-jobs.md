@@ -306,6 +306,15 @@ Ordinary runtime/model/effort defaults come from the configured CSV ladder, as d
 
 ## State and recovery
 
+For desktop unattended fleets, the tested out-of-session driver is
+[`codex-heartbeat.timer`](unattended.md#desktop-codex-heartbeat). It calls
+`resume`, labels workspaces, feeds an approved `ORDER` backlog at cap 4, and
+retries `finish` until every returned job has a closed workspace. Its `DONE`
+markers and queued coordinator wakes do not replace receipts, acceptance, or
+`check-closeout`. The vendored snapshot pins a Codex route and concurrency;
+check those constraints before enrolling another run. It is separate from the
+helper's own recovery and does not install itself when this skill is loaded.
+
 The explicit run directory contains `state.json`, a per-run lock, worker output directories, immutable collection revisions, and (for jail work) launcher requests and exit records. Files are written through temporary files and atomic replacement. State retains request/policy digests, attempts, returned IDs, observations, and pending effects. The same request and run directory resume; altered content conflicts. Different directories are independent runs, even if the caller reuses a request ID. Provider admission is the shared exception: all launch paths use the locked host file `~/.local/state/orchestrator/provider-admission.json` and its adjacent lock.
 
 Plan → act → observe → checkpoint: persist an effect intent, issue the command, validate the response, then persist its result. A pane move changes the ID; all later operations use the returned ID. A lost response can leave an effect ambiguous. A matching worker receipt proves prompt delivery. For Codex, identity alone cannot reconcile a prompt-bearing start: require a matching receipt or a visible `Working` state from the owned pane. Other agent kinds retain the verified startup then prompt sequence. An unidentified split or move stays unresolved. Inspect host resources under the original request's authority before deciding how to handle that case; creating a fresh run is not an automatic retry.
