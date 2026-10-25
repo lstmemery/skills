@@ -308,9 +308,12 @@ Ordinary runtime/model/effort defaults come from the configured CSV ladder, as d
 
 For desktop unattended fleets, the tested out-of-session driver is
 [`codex-heartbeat.timer`](unattended.md#desktop-codex-heartbeat). It calls
-`resume`, labels workspaces, feeds an approved `ORDER` backlog at cap 4, and
-retries `finish` until every returned job has a closed workspace. Its `DONE`
-markers and queued coordinator wakes do not replace receipts, acceptance, or
+`resume`, labels workspaces, and feeds an approved `ORDER` backlog at cap 4.
+It uses the recorded coordinator pane as the worker split origin and retries
+`finish` until every returned job either has a closed workspace or no pane.
+`DONE` and `CANCELLED` markers count as terminal for this feeder; cancelled jobs
+are skipped during pane supervision. JSON add errors stop feeding for the pass
+and queue a wake. These markers and wakes do not replace receipts, acceptance, or
 `check-closeout`. The vendored snapshot pins a Codex route and concurrency;
 check those constraints before enrolling another run. It is separate from the
 helper's own recovery and does not install itself when this skill is loaded.

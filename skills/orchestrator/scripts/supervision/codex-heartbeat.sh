@@ -16,6 +16,9 @@ CAP=4
 MSG="The usage limit has reset. Continue the task from where you stopped; do not repeat changes already made."
 export HERDR_SOCKET_PATH=/home/deadhand/.config/herdr/herdr.sock HERDR_ENV=1
 export PATH=/home/deadhand/.local/bin:/home/deadhand/.local/npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# herdr-jobs splits the *current* pane to create workers; systemd has none, so use the coordinator's.
+export HERDR_PANE_ID=$(python3 -c 'import json;print(json.load(open("/home/deadhand/.local/share/orchestrator/supervision/coordinator.json"))["pane_id"])')
+export HERDR_WORKSPACE_ID=${HERDR_PANE_ID%%:*}
 exec 9>"$SUP/codex-heartbeat.lock"; flock -n 9 || exit 0
 log() { echo "$(date -u +%FT%TZ) $*" >> "$R/heartbeat.log"; }
 wake() { echo "$(date -u +%H:%MZ) $(basename "$R"): $*" >> "$SUP/wake-queue.txt"; }
@@ -31,6 +34,7 @@ for R in $(cat "$SUP/active-runs.txt"); do
   rows=$(echo "$S" | awk -F'|' 'NR>2 {gsub(/ /,"",$1);gsub(/ /,"",$2);print $1,$2}')
   active=0; now=$(date -u +%s)
   while read -r j p; do
+    [ -f "out-$j/CANCELLED" ] && continue
     [ -f "out-$j/DONE" ] && { [ -f "out-$j/.woke" ] || { touch "out-$j/.woke"; wake "$j DONE"; }; continue; }
     [ "$p" = "-" ] && continue
     active=$((active+1)); w=${p%%:*}
@@ -71,12 +75,12 @@ PY
     done
   fi
   rows=$(python3 $H status --run-dir run --summary --wait-seconds 0 2>&1 | awk -F'|' 'NR>2 {gsub(/ /,"",$1);print $1}')
-  n=0; t=0; for j in $rows; do t=$((t+1)); [ -f "out-$j/DONE" ] && n=$((n+1)); done
+  n=0; t=0; for j in $rows; do t=$((t+1)); { [ -f "out-$j/DONE" ] || [ -f "out-$j/CANCELLED" ]; } && n=$((n+1)); done
   pend=0; [ -f ORDER ] && for j in $(cat ORDER); do echo "$rows" | grep -qx "$j" || pend=1; done
   log "done=$n/$t active=$active backlog_pending=$pend"
   if [ "$pend" -eq 0 ] && [ "$n" -ge "$t" ] && [ "$t" -gt 0 ]; then
     python3 $H finish --run-dir run --host-contract $HC --wait-seconds 10 > last-finish.json 2>&1
-    if ! python3 -c 'import json,sys;d=json.load(open("last-finish.json"));j=d.get("jobs",d.get("checkpoint",{}).get("jobs",[]));sys.exit(0 if j and all(x.get("workspace_closed") for x in j) else 1)'; then
+    if ! python3 -c 'import json,sys;d=json.load(open("last-finish.json"));j=d.get("jobs",d.get("checkpoint",{}).get("jobs",[]));sys.exit(0 if j and all(x.get("workspace_closed") or not x.get("pane_id") for x in j) else 1)'; then
       log "finish left open workspaces; retrying next pass"; continue
     fi
     log "finished; removed from active-runs"; wake "all $t jobs DONE and finished — review reports"

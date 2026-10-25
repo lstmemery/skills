@@ -99,7 +99,7 @@ that every recovery branch succeeded.
 |---|---|
 | `/home/deadhand/.local/share/orchestrator/supervision/codex-heartbeat.sh` | One locked supervision pass over enrolled runs; invokes the wake helper at the end. |
 | `/home/deadhand/.local/share/orchestrator/supervision/wake-coordinator.py` | Delivers queued events only to the recorded idle agent/session/pane. |
-| `/home/deadhand/.local/share/orchestrator/supervision/coordinator.json` | Wake target keys: `pane_id`, `agent`, `session`; currently a Claude coordinator. |
+| `/home/deadhand/.local/share/orchestrator/supervision/coordinator.json` | Coordinator split origin and wake target; keys: `pane_id`, `agent`, `session`; currently Claude. |
 | `/home/deadhand/.local/share/orchestrator/supervision/active-runs.txt` | One absolute run-root path per line; the script splits on whitespace, so paths must have no spaces. |
 | `/home/deadhand/.config/systemd/user/codex-heartbeat.service` | Runs the finite heartbeat pass outside the coordinator session. |
 | `/home/deadhand/.config/systemd/user/codex-heartbeat.timer` | Schedules passes at roughly two-minute intervals; inspect actual scheduling on the host. |
@@ -108,7 +108,16 @@ The snapshot pins the helper to
 `/home/deadhand/.claude/skills/orchestrator/scripts/herdr-jobs.py`, policy to
 `/home/deadhand/.claude/skills/orchestrator/launch-policy.json`, host contract to
 `/home/deadhand/.config/orchestrator/host-contract.json`, and Herdr socket to
-`/home/deadhand/.config/herdr/herdr.sock`. It sets its own executable `PATH`.
+`/home/deadhand/.config/herdr/herdr.sock`. It sets its own executable `PATH`, including
+`/home/deadhand/.local/bin` for the orchestrator binary and
+`/home/deadhand/.local/npm-global/bin` for installed CLI tools, so systemd can
+resolve the launch dependencies without an interactive shell. It reads
+`HERDR_PANE_ID` from `coordinator.json` before acquiring the pass lock and derives
+`HERDR_WORKSPACE_ID` from the prefix before `:`. `herdr-jobs` splits the current
+pane to launch workers; systemd supplies no pane, so the recorded coordinator
+pane is also the launch origin. It attempts this read even when no runs are
+enrolled. Keep the file valid and current: a failed read leaves the pane empty
+without stopping the pass.
 It uses a nonblocking `flock` on
 `/home/deadhand/.local/share/orchestrator/supervision/codex-heartbeat.lock` to
 avoid overlapping passes. No live installation, enrollment, or unit change is
@@ -121,8 +130,11 @@ For each enrolled run root, the current script:
    checkpoint evidence; it is not another live observation pass. It retains
    `last-resume.json` and appends to `heartbeat.log` in that run root.
 2. Renames newly observed workspaces `codex · <run-basename> <job-id>` and
-   records workspace IDs in the run's `labeled` file. Jobs with the required
-   `out-<job-id>/DONE` marker queue a wake once, tracked by `out-<job-id>/.woke`.
+   records workspace IDs in the run's `labeled` file. It first skips jobs with
+   `out-<job-id>/CANCELLED`, so they consume no active slot and receive no pane
+   reads, labels, or quota continuation. They do not queue a per-job DONE wake.
+   Otherwise, jobs with `out-<job-id>/DONE` queue a wake once, tracked by
+   `out-<job-id>/.woke`.
 3. Reads the last 15 unwrapped lines of each unfinished worker pane. The legacy
    check matches `usage limit` when `Working (` is absent. It parses a
    `try again at … AM/PM` timestamp into `quota-<job-id>.until`, using the host
@@ -142,14 +154,22 @@ For each enrolled run root, the current script:
    it cannot grant new authorization or replace a repository-writer lease.
    Use this feeder only for compatible, explicitly authorized jobs and a run
    already pinned to concurrency 4; the normal preference for 8 does not change
-   this snapshot. An add response with an `error` queues a wake and stops feeding
-   for that pass.
-5. When all status rows have `DONE` and every `ORDER` entry has been added,
-   calls `finish` with a ten-second budget. It retries on later passes until
-   the returned nonempty jobs list has `workspace_closed` for every job. Only
-   then does it remove the run from `active-runs.txt` and queue a review wake.
-   `DONE` is a feeder signal, not acceptance: collected receipts, dispositions,
-   coordinator review, and the worker-contract `check-closeout` still decide
+   this snapshot. It checks the JSON response's truthy `error` field rather
+   than relying only on the helper's process exit: a reported launch failure
+   queues a wake, logs `add-failed`, and stops feeding for that pass without
+   logging the job as added or incrementing the active count.
+5. When all status rows have `DONE` or `CANCELLED` and every `ORDER` entry has
+   been added, calls `finish` with a ten-second budget. Cancellation counts as
+   terminal so deliberately stopped jobs do not keep the run enrolled forever.
+   It retries on later passes until the returned nonempty jobs list (top-level
+   `jobs`, or `checkpoint.jobs` when that key is absent) has either
+   `workspace_closed` or no truthy `pane_id` for every job. Jobs never assigned
+   a pane have no workspace to close; a job with a pane still requires closure.
+   Only then does it remove the run from `active-runs.txt` and queue a review
+   wake. The wake text still says all jobs are DONE, even when some were
+   cancelled; inspect the markers and reports for their actual disposition.
+   `DONE` and `CANCELLED` are feeder signals, not acceptance: collected receipts,
+   dispositions, coordinator review, and the worker-contract `check-closeout` still decide
    task/run completion.
 
 After processing all runs, the wake helper reads
@@ -180,9 +200,9 @@ shape with the successor's observed values, never the predecessor's identifiers:
 ```
 
 Read it back and compare all three values against the live agent before
-recording supervision acceptance. Updating this file changes only the wake
-target; it does not transfer coordinator authority. Keep `active-runs.txt` and
-pending wake events intact during succession. A non-Claude successor needs a
+recording supervision acceptance. Updating this file changes the wake target
+and the pane/workspace used for subsequent worker splits; it does not transfer
+coordinator authority. Keep `active-runs.txt` and pending wake events intact during succession. A non-Claude successor needs a
 separately verified prompt route; do not infer compatibility from the three-key
 file. This reference describes the authorized handoff procedure; D9 does not
 change the live target.

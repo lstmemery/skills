@@ -80,6 +80,9 @@ class WakeCoordinatorTest(unittest.TestCase):
 HELPER_STUB = '''import json, os, pathlib, sys
 root = pathlib.Path(os.environ["HB_FIXTURE_DIR"])
 cfg = json.loads((root / "fixture.json").read_text())
+(root / "helper-environment.json").write_text(json.dumps({
+    key: os.environ[key] for key in ("HERDR_PANE_ID", "HERDR_WORKSPACE_ID")
+}))
 operation = sys.argv[1]
 with (root / "calls.jsonl").open("a") as output:
     output.write(json.dumps(["helper", *sys.argv[1:]]) + "\\n")
@@ -89,13 +92,22 @@ if operation == "status":
     for job, pane in cfg["jobs"].items():
         print(f"{job} | {pane} | working")
 elif operation == "add":
+    if cfg.get("add_error"):
+        print(json.dumps({"error": cfg["add_error"]}))
+        sys.exit(0)
     manifest = json.loads(pathlib.Path(sys.argv[sys.argv.index("--manifest") + 1]).read_text())
     job = manifest["jobs"][0]["job_id"]
     cfg["jobs"][job] = f"w-{job}:p1"
     (root / "fixture.json").write_text(json.dumps(cfg))
     print("{}")
 elif operation == "finish":
-    print(json.dumps({"jobs": [{"workspace_closed": cfg["closed"]} for _ in cfg["jobs"]]}))
+    result = {"jobs": [
+        {"workspace_closed": cfg["closed"], "pane_id": None if pane == "-" else pane}
+        for pane in cfg["jobs"].values()
+    ]}
+    if cfg.get("finish_checkpoint"):
+        result = {"checkpoint": result}
+    print(json.dumps(result))
 else:
     print("{}")
 '''
@@ -123,6 +135,9 @@ class HeartbeatTest(unittest.TestCase):
         self.root = Path(temporary.name)
         self.sup = self.root / "supervision"
         self.sup.mkdir()
+        (self.sup / "coordinator.json").write_text(json.dumps({
+            "pane_id": "coordinator-workspace:p2", "agent": "claude", "session": "test-session",
+        }), encoding="utf-8")
         self.run = self.root / "batch"
         (self.run / "run").mkdir(parents=True)
         (self.run / "run" / "state.json").write_text('{"request_id":"test-batch"}', encoding="utf-8")
@@ -159,7 +174,8 @@ class HeartbeatTest(unittest.TestCase):
     def pass_once(self):
         (self.root / "fixture.json").write_text(json.dumps(self.fixture), encoding="utf-8")
         result = subprocess.run(["bash", str(self.script)], cwd=self.root,
-                                env={**os.environ, "HB_FIXTURE_DIR": str(self.root)},
+                                env={**os.environ, "HB_FIXTURE_DIR": str(self.root),
+                                     "HERDR_PANE_ID": "stale:p1", "HERDR_WORKSPACE_ID": "stale"},
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.fixture = json.loads((self.root / "fixture.json").read_text(encoding="utf-8"))
@@ -182,6 +198,56 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual(calls[0][:2], ["helper", "resume"])
         self.assertIn(["herdr", "workspace", "rename", "w1", "codex · batch a"], calls)
         self.assertFalse((self.run / "add-e.json").exists())
+
+    def test_helper_uses_recorded_coordinator_as_split_origin(self):
+        self.pass_once()
+        environment = json.loads((self.root / "helper-environment.json").read_text(encoding="utf-8"))
+        self.assertEqual(environment, {
+            "HERDR_PANE_ID": "coordinator-workspace:p2",
+            "HERDR_WORKSPACE_ID": "coordinator-workspace",
+        })
+
+    def test_json_add_error_stops_feeding_even_with_success_exit(self):
+        self.backlog()
+        self.fixture["add_error"] = "launch failed"
+        self.pass_once()
+        self.assertEqual(list(self.fixture["jobs"]), ["a"])
+        self.assertEqual(sum(call[:2] == ["helper", "add"] for call in self.calls()), 1)
+        self.assertFalse((self.run / "add-c.json").exists())
+        self.assertIn("adding b failed", (self.sup / "wake-queue.txt").read_text(encoding="utf-8"))
+        log = (self.run / "heartbeat.log").read_text(encoding="utf-8")
+        self.assertIn("add-failed b", log)
+        self.assertNotIn("added b", log)
+        self.assertIn("active=1", log)
+
+    def test_cancelled_job_is_terminal_without_pane_supervision_or_done_wake(self):
+        (self.run / "out-a").mkdir()
+        (self.run / "out-a" / "CANCELLED").touch()
+        self.fixture["pane_text"] = "You've hit your usage limit."
+        self.pass_once()
+        self.assertFalse(any(call[0] == "herdr" for call in self.calls()))
+        self.assertFalse((self.run / "quota-a.until").exists())
+        self.assertFalse((self.run / "out-a" / ".woke").exists())
+        self.assertFalse((self.sup / "wake-queue.txt").exists())
+        self.assertIn(["helper", "finish"], [call[:2] for call in self.calls()])
+        self.assertIn("active=0", (self.run / "heartbeat.log").read_text(encoding="utf-8"))
+        self.assertEqual((self.sup / "active-runs.txt").read_text(encoding="utf-8"), str(self.run) + "\n")
+        self.fixture["closed"] = True
+        self.pass_once()
+        self.assertEqual((self.sup / "active-runs.txt").read_text(encoding="utf-8"), "")
+
+    def test_panelless_job_still_requires_terminal_marker_then_needs_no_closure(self):
+        self.fixture["jobs"] = {"a": "-"}
+        self.fixture["finish_checkpoint"] = True
+        self.pass_once()
+        self.assertFalse(any(call[:2] == ["helper", "finish"] for call in self.calls()))
+        self.assertEqual((self.sup / "active-runs.txt").read_text(encoding="utf-8"), str(self.run) + "\n")
+        (self.run / "out-a").mkdir()
+        (self.run / "out-a" / "DONE").touch()
+        self.pass_once()
+        self.assertFalse(any(call[0] == "herdr" for call in self.calls()))
+        self.assertFalse(self.fixture["closed"])
+        self.assertEqual((self.sup / "active-runs.txt").read_text(encoding="utf-8"), "")
 
     def test_quota_wait_blocks_backlog_then_text_delay_enter(self):
         self.backlog()
