@@ -21,7 +21,21 @@ Open the relevant URL before asking for its value. Use hidden entry for secrets,
 
 Run `bash -n <script>` and `shellcheck` if available, then make the script executable. Trace it statically: every scoped value is captured and lands at its declared destination, every CI secret/variable name matches its workflow reference, stages are ordered/count correctly, secrets use hidden input, and irreversible actions have confirmation gates.
 
-Done when the concrete procedure is reviewable, static checks pass or each unrun check is named in the hand-off message with its reason, and the user has the path and run command. For an authorized repeatable setup path, commit it and link it from README. Never validate by executing the human procedure yourself.
+For procedures that replace credentials or change an existing service, also
+verify behavior with synthetic values and mocked effects: installed configuration
+shape, activation, already-working state, partial failure, rollback, and
+revocation order as applicable. Keep the review evidence with the candidate's
+absolute path and SHA-256. Test extracted logic in isolation; do not execute
+the human procedure against live services. For an unattended handoff, apply the
+[procedure-verification matrix](../orchestrator/references/unattended.md#verify-behavior-of-human-run-procedures)
+and its separate-review requirement. A mock pass leaves future human execution
+unverified. Link the corrected copy in runnable handoff commands after changes.
+
+Done when the concrete procedure is reviewable, static and applicable behavioral
+checks pass or each unrun check is named in the hand-off message with its reason,
+and the user has the path and run command. For an authorized repeatable setup
+path, commit it and link it from README. Never validate by executing the human
+procedure yourself.
 
 ## Edit wizards
 

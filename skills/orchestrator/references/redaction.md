@@ -64,4 +64,35 @@ sed 's/=.*/=<redacted>/'
 ```
 
 Never print a raw config line as a diagnostic. If anything secret reaches your
-output anyway, say so in `result.json` under `unresolved`.
+output anyway, report the incident without repeating its value through the
+active contract: `result.json` under `unresolved` for direct workers, or
+`result.md` and `receipt.json` under `unresolved` for managed jobs.
+
+## Calibrate the output boundary and record its version
+
+A clean detector scan means only that the selected detector/configuration found
+nothing. It does not establish that an arbitrary response contains no secrets.
+Before adopting or changing a detector, exercise a positive control, benign
+control, bare credential, cookie JSON, private-key assignment, and encoded
+credential envelope, plus a scanner-error case, using synthetic values. Record
+the detector version, configuration hash, decoding limits, exit status, rule
+IDs, and finding counts; never publish matched values. Record misses explicitly
+and keep detection separate from
+sanitization: a findings-producing scanner is not a redacting pipe.
+
+Prefer named, selected-field read operations for known credential-bearing
+sources. A voluntary shell filter does not enforce isolation when the same
+worker can read the source through another command. Treat a credential-isolated
+reader as a separate reviewed capability with an explicit access boundary;
+proposing it does not authorize installation or a change to jail controls.
+
+At admission, record the redaction reference revision/hash and result contract
+used to render the brief. When an incident establishes that a recipe fails,
+mark that recipe superseded and check the rendered next batch rather than
+assuming the retrospective changed active templates. Report incident ownership
+through the active result/receipt contract. Historical briefs remain immutable.
+
+Until the helper emits this provenance itself, retain the reference path,
+Git revision, SHA-256 of the rendered reference bytes, and active contract in
+the coordinator's admission evidence. This is a manual record, not a claim of
+helper enforcement or permission to alter launcher telemetry.

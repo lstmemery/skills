@@ -38,3 +38,10 @@ herdr agent read reviewer --source recent-unwrapped --lines 120
 Apply the core's inspect-before-resend rule. For truncated transcripts or read-source selection, read [COMMANDS.md](COMMANDS.md#read-output).
 
 Use logical keys for interactive controls, for example `herdr agent send-keys reviewer esc` or `ctrl+c`. Herdr validates every key before writing bytes. Use pane input only when raw terminal control is intentional. Read the actual result and check the requested outcome before reporting completion.
+
+For raw Codex pane input, an immediate `pane send-keys Enter` after
+`pane send-text` was observed not to submit the pasted text; a roughly two-second
+delay was needed (2026-10-25T08:21Z). If using this route, allow that delay
+between text and Enter, then verify that the intended turn began. This is an
+observed workaround, not a delivery guarantee or a reason to resend the text.
+If it remains in the composer, inspect the pane before any further input.

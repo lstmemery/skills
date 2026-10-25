@@ -45,9 +45,10 @@ redacted status excerpt and runtime as the evidence.
    reports the due record; it does not restart or prompt the worker. Without
    the existing watcher/notification, the coordinator must poll the durable
    record itself. If the handle cannot accept a continuation, do not silently
-   relaunch. Managed Herdr jobs cannot continue the same pane; their one
-   allowed recovery is one fresh attempt in a new output directory, only after
-   the recorded reset, with the same pinned route and assignment.
+   relaunch. Managed Herdr jobs currently have no supported same-pane
+   continuation. Their default recovery is one fresh attempt in a new output
+   directory after the recorded reset, with the same pinned route and
+   assignment, subject to the mutation-reconciliation fence below.
 3. If the reset is unknown, unavailable, or the primary remains exhausted,
    when a reset cannot be awaited, the only quota fallback is the exact same-level configured model in
    `model-ladder.csv`, with concrete limit evidence and the normal explicit
@@ -83,3 +84,33 @@ recovery budget for that stalled owner. After it is consumed, stop and record a
 blocked state with evidence; further retries require an explicit coordinator
 or user decision. Human approval remains required for any provider/model change
 outside the configured same-level fallback.
+
+## Reconcile mutations before managed quota recovery
+
+This is a coordinator preflight requirement; it does not establish that the
+helper enforces a mutation checkpoint or ingests external recovery observations.
+
+Before any fresh managed attempt, inspect the existing receipt, declared
+artifacts, and mutation checkpoint. Classify the task as read-only,
+mutation-not-started, mutation-checkpointed, or mutation-state-unknown. A fresh
+attempt is eligible only when its unchanged assignment can be executed safely
+from that observed state. Unknown mutation state blocks automatic replay; keep
+the original attempt and record the reconciliation needed. Never duplicate a
+production action merely because the quota reset has passed.
+
+An explicit coordinator decision may select the existing exact pane when a
+fresh attempt could repeat production effects. This is an exception record,
+not a claim that the managed helper supports same-pane continuation. Preserve
+the task/attempt/route, before-and-after checkpoint, reset source, exact pane,
+continuation budget, and observation proving work resumed. Until the helper has
+a supported operation for this, record the gap outside launcher-owned
+telemetry; neither workers nor ad hoc scripts may edit that telemetry.
+
+When an operator observes a quota banner that the helper does not classify,
+retain the bounded redacted excerpt and mark detection as unknown or missed,
+not false. Persist provider backoff through the supported admission command and
+record the affected task/attempt separately. The planned helper interface must
+validate the existing attempt identity, accept only explicit quota evidence,
+record its provenance atomically, and consume the same single recovery budget
+as automatic detection. It must reject stale identities and duplicate events.
+A manually submitted continuation must not be reported as zero continuations.

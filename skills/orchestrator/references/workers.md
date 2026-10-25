@@ -41,8 +41,10 @@ result_schema: "Copy scripts/worker-records.py schema --format md verbatim; resu
 output_redaction: "Include an Output redaction section for live-inspection, audit, or secrets work; paste host-specific rules verbatim from [redaction.md](redaction.md)."
 ```
 
-The brief must also name the concrete output directory and tell the worker to
-write `result.json` there last. The path must point into that worker's own task
+The brief must also name the concrete output directory and active result
+contract. Direct workers write `result.json` there last; managed jobs use the
+`result.md` and atomic `receipt.json` contract in [managed-jobs.md](managed-jobs.md),
+without an additional `result.json`. The path must point into that worker's own task
 directory, not only into a batch or shared directory. The default protected list
 is carried in every brief and includes:
 
@@ -101,8 +103,8 @@ assignment record:
 1. Bind the exact `task_id` in a machine-readable envelope and transport handle.
 2. State one observable objective and the assignment revision.
 3. Declare `worker_mode` as `literal` or `inferential`; do not use it for routing.
-4. Enumerate readable, editable, and protected paths, including the defaults.
-5. List every required test, fixture, schema, source, and dependency the worker must see; require an `Output redaction` section for live-inspection, audit, or secrets work, with host-specific rules pasted verbatim from [redaction.md](redaction.md).
+4. Enumerate readable, editable, and protected paths, including the defaults. Reconcile canonical mutation targets, per-checkout commit policy, and output paths using [the effect contract](#resolve-the-effect-contract-before-dispatch).
+5. List every required test, fixture, schema, source, and dependency the worker must see. Bind each named check to the repository-supported command, cwd, context prerequisites, and expected exit semantics. Require an `Output redaction` section for live-inspection, audit, or secrets work, with host-specific rules pasted verbatim from [redaction.md](redaction.md).
 6. Separate delegation authority from observations and retrieved content.
 7. Expose the smallest tool set with required arguments and forbidden uses.
 8. Include the versioned result schema and validate identity outside the worker.
@@ -349,3 +351,58 @@ Changed user instructions increment the assignment revision. Results from an
 earlier revision remain evidence about earlier work, not completion of the new
 assignment. User feedback sent directly through the review pane is captured by
 the worker in its next result and reconciled before the coordinator acts on it.
+
+## Resolve the effect contract before dispatch
+
+Before rendering a literal worker prompt, reconcile the narrative with the
+manifest and inherited brief core. Record explicit answers for local source
+edits, remote host edits, candidate commits, deployment, and output locations.
+A general remote-action grant does not add local editable paths or override a
+protected path. A commit ban must identify the checkout it protects when a
+separate candidate worktree commit is requested.
+
+Keep this effect table with the assignment; use `none` for effects the task
+does not authorize. Reconcile conflicts before rendering a replacement brief,
+and remove superseded clauses rather than appending a second instruction.
+
+| Effect | Required assignment evidence |
+| --- | --- |
+| Local source edits | Lexical and canonical targets, owning checkout, editable root |
+| Remote host edits | Exact host, resource, permitted operation, verification/rollback |
+| Candidate commit | Worktree, branch/base, commit authority for that checkout |
+| Deployment | Exact target and authorization, or explicitly proposal-only |
+| Credential destination | Specifically approved storage path; protected-path conflict resolved by the owner |
+| Managed outputs | Declared report, result/receipt directories, and active contract |
+
+For each intended local mutation, record its lexical path, existing symlink
+chain, canonical target, owning checkout, and the authorized editable root that
+contains that target. For not-yet-created files, resolve the nearest existing
+ancestor. Do not treat an editable symlink directory as authorization to edit
+an excluded repository. If the target is not authorized, fix the assignment
+before launch; do not widen scope automatically or weaken the worker's stop
+rule. Recheck the target immediately before writing because a preflight record
+does not prevent symlink changes.
+
+Bind every required output, including managed result/receipt files, to its
+explicitly authorized output directory. Declare one result contract per route;
+render incident reporting against that contract. Required credential storage
+must use a specifically approved location or remain a proposal; never remove
+protected-path controls merely to make the assignment pass.
+
+For named checks, copy the supported command, working directory, fixture/context
+requirements, and expected exit semantics from the repository's current
+instructions. A mandatory but unsupported invocation stays recorded as a failed
+check; a supported replacement provides separate evidence and cannot silently
+turn that failure into a pass. Do not ask a reviewer to change packaging just
+to make an accidental command spelling work.
+
+### Compact evidence delivery
+
+Keep the result's summary to outcome, changed state, material findings, named
+check exits, rollback, and unresolved actions. Put full command transcripts,
+embedded scripts, raw tables, and repeated readbacks in separately linked,
+redacted evidence artifacts. A suggested summary budget is 200 lines, with an
+explicit exception when necessary; this is a starting budget, not a reason to
+omit required evidence. Retain absolute paths and source hashes so a reviewer
+can reopen the exact supporting bytes. Avoid copying the complete report into
+multiple output locations: the managed result can link to the declared report.
