@@ -139,12 +139,8 @@ class JobsTest(unittest.TestCase):
         (global_agent / "settings.json").write_text('{"retry":{"enabled":true,"maxRetries":2}}')
         (global_agent / "auth.json").write_text("{}")
 
-        policy = json.loads(self.policy.read_text())
-        policy["routes"]["ordinary"]["runtime"] = "pi"
-        policy["runtime_kinds"]["pi"] = "pi"
-        self.policy.write_text(json.dumps(policy))
+        self.write_jobs(1, runtime="pi", provider="codex", model="gpt-6-luna", effort="low")
         manifest = json.loads(self.manifest.read_text())
-        manifest["jobs"][0].pop("override")
         manifest["retry_override"] = retry_override
         self.manifest.write_text(json.dumps(manifest))
         return global_agent
@@ -380,7 +376,7 @@ class JobsTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
             self.call()
-            self.write_add_job(runtime="pi", provider=None, model=None, effort=None,
+            self.write_add_job(runtime="pi", provider="codex", model="gpt-6-luna", effort="low",
                                retry_override=retry_override, local_lane=False)
             code, result = self.call("add", wait_seconds=1)
 
@@ -400,7 +396,7 @@ class JobsTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(global_agent)}):
             self.call()
-            self.write_add_job(runtime="pi", provider=None, model=None, effort=None,
+            self.write_add_job(runtime="pi", provider="codex", model="gpt-6-luna", effort="low",
                                retry_override={"pi": {"max_retries": 9}}, local_lane=False)
             code, result = self.call("add")
 
@@ -412,7 +408,7 @@ class JobsTest(unittest.TestCase):
 
     def test_add_rejects_a_retry_override_when_the_run_has_no_pin(self):
         self.call()
-        self.write_add_job(runtime="pi", provider=None, model=None, effort=None,
+        self.write_add_job(runtime="pi", provider="codex", model="gpt-6-luna", effort="low",
                            retry_override={"pi": {"max_retries": 10}}, local_lane=False)
 
         code, result = self.call("add")
@@ -1413,12 +1409,8 @@ class JobsTest(unittest.TestCase):
         global_settings.write_text(original_settings)
         (global_agent / "auth.json").write_text("{}")
 
-        policy = json.loads(self.policy.read_text())
-        policy["routes"]["ordinary"]["runtime"] = "pi"
-        policy["runtime_kinds"]["pi"] = "pi"
-        self.policy.write_text(json.dumps(policy))
+        self.write_jobs(1, runtime="pi", provider="codex", model="gpt-6-luna", effort="low")
         manifest = json.loads(self.manifest.read_text())
-        manifest["jobs"][0].pop("override")
         manifest["retry_override"] = {"pi": {"max_retries": 10, "max_agent_delay_ms": 120000}}
         self.manifest.write_text(json.dumps(manifest))
         self.configure(jobs={"job0": "rate_limited_start_once"})
@@ -1538,7 +1530,7 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
     def test_agent_working_without_prompt_landing_is_not_verified_activity(self):
-        self.write_jobs(1, runtime="pi")
+        self.write_jobs(1, runtime="pi", provider="codex", model="gpt-6-luna", effort="low")
         self.configure(jobs={"job0": "unverified_working"})
 
         _, result = self.call(wait_seconds=0.3)

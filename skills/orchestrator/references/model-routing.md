@@ -2,17 +2,19 @@
 
 Read before selecting an ordinary worker's level, fallback, or escalation.
 [model-ladder.csv](../model-ladder.csv) is the executable tuple authority, copied
-verbatim from the user's `~/Documents/model-ladder.csv` on 2026-10-10. The
+verbatim from the user's `~/Documents/model-ladder.csv` on 2026-10-25. The
 [launch policy](../launch-policy.json) references that packaged file and defaults
 to level 1. Future CSV changes are reviewable repository changes; do not mutate
 the source CSV, maintain a second tuple table in prose, or edit runtime defaults.
+OpenCode Go was retired on 2026-10-25 and is no longer a primary or fallback
+route in the packaged ladder.
 
 ## Choose the cheapest sufficient level
 
 Start routine, bounded work at level 1: deterministic tool operations need no
 agent at all. Levels 2–4 add reasoning effort for investigation, unfamiliar
 code, and tasks whose previous attempt exposed a concrete difficulty. Level 5
-is a different model/provider step; check its exact effort support before use.
+is a different model step; check its exact effort support before use.
 Reserve levels 6–7 for demonstrated cross-module difficulty, complex diagnosis,
 or a failed lower-level approach. Level 8 is the ceiling for the hardest
 reasoning when evidence justifies it. This is selection guidance, not a model
@@ -79,7 +81,8 @@ Explicit user requests can select any level immediately and remain fixed.
 
 The user's approximate 2× cost increase per level is an ordering heuristic.
 Do not derive dollar prices, token budgets, or quota sizes from it. There are
-three separate subscription pools; preserve their observed remaining capacity.
+two active subscription pools, Codex and Claude; preserve their observed
+remaining capacity.
 
 ## Calibration by model and harness
 
@@ -96,8 +99,6 @@ registry, context packet, retries, checks, latency, and cost.
 | Codex CLI + gpt-6-luna low | Literal mode, short context packet, exact fields, one or two named checks | Retain low only after exact-ID, schema-recovery, and forbidden-edit cases pass; raise on ambiguity or cross-file effects. |
 | Codex CLI + gpt-6-luna medium through max | Same authority boundary with a bounded tool loop | Sweep effort on identical cases and keep the lowest setting that preserves recovery and verification. |
 | Codex CLI + gpt-6.1-sol high/max | Multi-file implementation with explicit protected paths and acceptance tests | Use high as baseline; reserve max for difficult diagnosis or targeted review after a cheaper pass exposes real uncertainty. |
-| pi + OpenCode Go gpt-6-luna | Narrow default tool surface and structured result record | Use low/minimal for literal work; test provider effort support before medium/high tool loops. |
-| pi + OpenCode Go mimo-v2.6-pro | Verify provider metadata and native tool-call compatibility | Sweep available thinking levels and route only measured gains that justify Go quota/cost; do not infer support from the name. |
 | Claude Code + Sonnet 5.5 | Complete subagent prompt, allowlist, max-turn bound, and acceptance checks | Start medium/high for routine implementation or exploration; promote to Opus for unresolved ambiguity or long-horizon synthesis. |
 | Claude Code + Opus 5.5 worker | Hard diagnosis or independent review with deterministic oracle | Start high; use max only when the unresolved case has enough decision value. |
 | Jailed Codex + gpt-6-astra max | Required-context manifest with exact quotes, source roles, and an external evaluator | Max is suitable for deep evidence chains; use a cheaper extractor before synthesis when that reduces cost without weakening evidence. |
@@ -133,9 +134,9 @@ python3 scripts/herdr-admission.py rate-limit --provider codex --model '*' \
 ```
 
 `codex` and `openai-codex` share the Codex pool; `claude` and `claude-code`
-share the Claude pool; `opencode go` and `opencode-go` share the OpenCode Go
-pool. OpenCode Go routes always use Pi. Admission counts and resets are shared
-across provider aliases.
+share the Claude pool. The retired `opencode go` and `opencode-go` aliases
+continue to share a pool for explicit and saved routes; those routes require
+Pi. Admission counts and resets are shared across provider aliases.
 Older alias-keyed leases migrate on read; colliding alias backoffs retain the
 later reset. Older policies with different caps for aliases use the stricter
 cap. Pool exhaustion blocks every model in that pool; model-specific rate limits
@@ -173,31 +174,23 @@ Herdr action, and native argument construction fails closed on such a mapping.
 Explicit Codex routes through other custom providers remain blocked until a
 provider-specific exact-model discovery adapter is verified.
 
-Pi's read-only `pi --offline --list-models` output includes
-`opencode-go/gpt-6-luna`. The installed Pi model metadata reports `low`,
-`medium`, `xhigh`, and `max` support for that exact model, so levels 1–4 retain
-their configured `gpt-6-luna` fallbacks at the requested efforts. Managed-job
-preflight still checks the exact model and effort against the installed Pi
-catalog before launch; it does not replace a missing model or effort with a
-different choice.
-
+OpenCode Go is retired from the packaged ladder. Generic Pi discovery and
+provider/harness validation remain available for explicit routes and saved
+runs; their regression tests use fixture CSVs rather than active ladder rows.
 Pi discovery uses its native offline model table, disambiguated by provider.
-The ladder additionally checks installed SDK model effort metadata composed
-with its native, credential-blind `models.json` loader; a model
-that clamps the requested effort fails before effects. On the inspected Pi
-1.1.0 build, `opencode-go/mimo-v2.6-pro` supports through `high`, so level 5's
-`max` primary is a capability gap. Recover using its configured Codex fallback
-with this unavailable evidence, or separately restore/verify exact Pi effort
-support. Changed SDK contracts, provider extensions, and runtimes lacking the
-native configured-metadata adapter remain gaps rather than assumed upgrades.
+The helper additionally checks installed SDK model effort metadata composed
+with its native, credential-blind `models.json` loader; a model that clamps
+the requested effort fails before effects. Changed SDK contracts, provider
+extensions, and runtimes lacking the native configured-metadata adapter remain
+capability gaps rather than assumed upgrades.
 
 Codex discovery accepts both the older flat model catalog and current
 `runtimes[].models` catalog. Claude's installed discovery may be partial and
 contain only `opus`/`sonnet` aliases. That does not verify the CSV's exact
 Claude versions: hold the affected choice until an exact available catalog
 adapter is verified. Level 8 can recover to its configured Codex fallback with
-that evidence. Levels 6–7 keep their usable Codex primaries; an unavailable
-Claude fallback is a gap, not permission to invent another route.
+that evidence. Levels 1–7 keep their Codex primaries; an unavailable Claude
+fallback is a gap, not permission to invent another route.
 
 ## Preserved routes and migration
 
