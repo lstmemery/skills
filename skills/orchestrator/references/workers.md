@@ -42,11 +42,14 @@ output_redaction: "Include an Output redaction section for live-inspection, audi
 ```
 
 The brief must also name the concrete output directory and active result
-contract. Direct workers write `result.json` there last; managed jobs use the
-`result.md` and atomic `receipt.json` contract in [managed-jobs.md](managed-jobs.md),
-without an additional `result.json`. The path must point into that worker's own task
-directory, not only into a batch or shared directory. The default protected list
-is carried in every brief and includes:
+contract. Direct workers write `result.json` there last. For managed jobs, select
+the active contract in [managed-jobs.md](managed-jobs.md): receipt-only jobs use
+`result.md` plus an atomic `receipt.json`, without an additional `result.json`;
+jobs with `worker_result` enabled require `result.json` and every artifact it
+names, followed by an atomic `receipt.json` listing all of them. Write the receipt
+last, after the result and required artifacts are durable. The path must point
+into that worker's own task directory, not only into a batch or shared directory.
+The default protected list is carried in every brief and includes:
 
 ```text
 ~/.config/vikunja-mcp/delegation-authorized.toml

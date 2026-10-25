@@ -65,8 +65,17 @@ sed 's/=.*/=<redacted>/'
 
 Never print a raw config line as a diagnostic. If anything secret reaches your
 output anyway, report the incident without repeating its value through the
-active contract: `result.json` under `unresolved` for direct workers, or
-`result.md` and `receipt.json` under `unresolved` for managed jobs.
+active contract:
+
+- Direct workers: record it under `unresolved` in `result.json`.
+- Receipt-only managed jobs: record it in `result.md` and under `unresolved` in
+  an atomic `receipt.json`.
+- Managed jobs with `worker_result` enabled: record it under `unresolved` in
+  `result.json` and in an atomic `receipt.json`. The receipt must list
+  `result.json` and every artifact it names.
+
+For both managed contracts, write the receipt last, after the result and every
+required artifact are durable, as specified in [managed-jobs.md](managed-jobs.md).
 
 ## Calibrate the output boundary and record its version
 
