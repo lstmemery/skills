@@ -165,6 +165,8 @@ class FakeHost:
 
     def observe(self, job):
         self.event("observe", job)
+        if "observation" in self.fixture:
+            return self.fixture["observation"]
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
         if mode == "failed_start_diagnostic" and job.get("pending_effect", {}).get("action") == "start":
             diagnostic = cli_diagnostic(

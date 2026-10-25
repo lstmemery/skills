@@ -1252,6 +1252,13 @@ class Engine:
         if job["phase"] in ("pending", "split") and (pending is None or pending["action"] != "start"):
             return
         self.collect(job)
+        receipt_valid = job["collection"] is not None and job["collection_error"] is None
+        if (receipt_valid and pending is None
+                and job["phase"] in ("moved", "retry_ready", "ready")):
+            job["phase"] = "submitted"
+            job["history"].append({"action": "submitted", "attempt_id": job["attempt_id"],
+                                   "pane_id": job["pane_id"], "reconciled_by": "matching receipt",
+                                   "observed_at": now()})
         if pending and pending["action"] in ("prompt", "jail") and job["collection"] and not job["collection_error"]:
             job["phase"] = "submitted"
             job["pending_effect"] = None
@@ -1317,7 +1324,6 @@ class Engine:
             job["pending_effect"] = None
             job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
                                    "reconciled_by": "owned worker identity", "observed_at": now()})
-        receipt_valid = job["collection"] is not None and job["collection_error"] is None
         if receipt_valid or lifecycle == "exited":
             job["activity_seen"] = True
         job["settled"] = bool(job["phase"] == "submitted" and job["pending_effect"] is None
