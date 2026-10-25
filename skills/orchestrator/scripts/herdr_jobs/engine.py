@@ -867,6 +867,8 @@ class Engine:
                 "the coordinator must also record accepted, rework, or rejected after reviewing its result.\n"
             )
         prompt = (f"{instructions}{task}\n\nManaged-job output contract:\n"
+                  f"Canonical output directory: {job['worker_output']}\n"
+                  f"Collection contract output directory: {job['worker_output']}\n"
                   f"Expected result: {expectation}\n"
                   f"Output directory: {job['worker_output']}\n"
                   f"Telemetry path: {Path(job['worker_output']) / 'telemetry.json'}\n"

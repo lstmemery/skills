@@ -280,6 +280,38 @@ def paths_overlap(candidate, protected, base=None):
             return False
 
 
+def validate_task_output_paths(task, job_id, task_path):
+    """Reject task text that directs editable work or reports elsewhere."""
+    declarations = (
+        ("output directory", re.compile(
+            r"(?im)^\s*(?P<bold>\*\*|)(?:output directory|output dir)\s*:(?P=bold)\s*(?P<value>.+?)\s*$")),
+        ("editable directory", re.compile(
+            r"(?im)^\s*(?:editable directory|editable paths?)\s*:\s*(?P<value>.+?)\s*$")),
+    )
+    for label, pattern in declarations:
+        for match in pattern.finditer(task):
+            value = match.group("value").strip().strip("`\"'")
+            if value and value not in ("the output directory", "the assigned output directory"):
+                raise JobError("invalid_input", f"{job_id}: task file {task_path} declares conflicting {label}: {value!r}")
+    path_prefix = r"(?:[~/]|\.\.?/|[\w.-]+/)"
+    filename = r"[\w.-]+\.[\w-]+"
+    quoted_filename = r"[\w. -]+\.[\w-]+"
+    prose_path = re.compile(
+        r"(?im)\b(?:write|save|place|put|store|create)\s+(?:the\s+)?"
+        r"(?P<artifact_quote>[`\"']?)(?:report|result|output)(?:\.\w+)?(?P=artifact_quote)"
+        r"\s+(?:in|to|at|under)\s+(?:the\s+)?"
+        rf"(?:(?P<quote>[`\"'])(?P<quoted>{path_prefix}[^\r\n]+?|{quoted_filename})(?P=quote)|"
+        rf"(?P<bare>cwd|working directory|current directory|{path_prefix}[^\s,;]+|{filename}))"
+    )
+    for match in prose_path.finditer(task):
+        if re.search(r"\bdo\s+not\s+$", task[:match.start()], re.IGNORECASE):
+            continue
+        value = match.group("quoted")
+        if value is None:
+            value = match.group("bare").rstrip(".")
+        raise JobError("invalid_input", f"{job_id}: task file {task_path} declares conflicting output directory: {value!r}")
+
+
 def validate_protected_paths(protected_paths, editable_paths=(), base=None):
     protected_paths = protected_paths_record(protected_paths)
     editable_paths = path_list(list(editable_paths), "editable_paths")
@@ -759,6 +791,7 @@ def prepare(manifest_path, policy_path):
         task_path = absolute(job["task_file"], manifest_path.parent)
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")
+        validate_task_output_paths(task, job_id, task_path)
         cwd = absolute(job["cwd"], manifest_path.parent)
         if job["writes_repository"]:
             repository_worktree_record(job["repository_worktree"])
