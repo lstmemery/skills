@@ -69,6 +69,16 @@ accepted by the launch API.
 A trusted bootstrap checks the actual environment, identity, capabilities,
 namespace separation, root/mount inventory, read-only flags, descriptor inventory,
 and sealed input hashes **in the worker container before executing worker code**.
+Every mount must have exactly one provenance policy. Fresh tmpfs/proc/devpts
+mounts must have the expected filesystem, source and root, with distinct devices
+absent from the host mount inventory. Runtime/device binds and the pinned output
+directory must match the host filesystem, source, backing root, device and file
+identity (device, inode, file type and device-node identity). Copied input mounts
+must be regular files on the fresh root tmpfs, with Bubblewrap's deleted temporary
+file roots, as well as matching their input hashes. Missing or malformed records,
+stacked container mounts and unverifiable host bind provenance refuse launch.
+These checks deliberately depend on Bubblewrap's observed mount layout; a changed
+layout requires review and otherwise fails closed.
 It emits the first framed attestation record; the parent validates that record
 and never forwards an unverified worker stream. The attestation binds snapshot,
 worker, collector, schema, profile, bootstrap, full implementation and effective
@@ -96,6 +106,9 @@ values; cookies/equals signs; complete/unterminated PEM; WireGuard keys; headers
 and URLs; encoded/tabbed objects; split chunks; stdout/stderr; subprocess polling;
 failures/timeouts/oversize; malformed JSON/schema; direct/nested process reads;
 missing isolation; deliberately shared network; and pre-existing output secrets.
+Fault injection also substitutes host directories and host tmpfs at `/tmp`, a
+copied runtime, another output directory, and identical input bytes on a host
+mount; each must refuse before the worker writes its execution marker.
 It exercises real Bubblewrap namespaces, real OpenSSL and the public CLI.
 
 The worker is an offline Python audit process. This pilot does not launch an AI

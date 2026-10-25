@@ -15,11 +15,15 @@ STATES = {'active', 'reloading', 'inactive', 'failed', 'activating', 'deactivati
 ID = r'[a-z][a-z0-9-]{0,47}'
 
 
-def service_state(identifier, unit, runner=capture):
+def _validate_service(identifier, unit):
     if not isinstance(identifier, str) or not re.fullmatch(ID, identifier):
         raise Refusal('request-refused')
     if not isinstance(unit, str) or not re.fullmatch(r'[a-zA-Z0-9_.@-]{1,120}\.service', unit):
         raise Refusal('request-refused')
+
+
+def service_state(identifier, unit, runner=capture):
+    _validate_service(identifier, unit)
     result = runner(['/usr/bin/systemctl', 'show', '--property=ActiveState',
                      '--value', '--', unit])
     try:
@@ -73,12 +77,15 @@ def collect(plan):
             fields = {'id', 'unit'} if kind == 'services' else {'id', 'host', 'port', 'server_name'}
             if type(request) is not dict or set(request) != fields:
                 raise Refusal('request-refused')
-            if type(request['id']) is not str or not re.fullmatch(ID, request['id']):
+            if type(request['id']) is not str:
                 raise Refusal('request-refused')
             if kind == 'services':
-                if type(request['unit']) is not str or not re.fullmatch(r'[a-zA-Z0-9_.@-]{1,120}\.service', request['unit']):
+                if type(request['unit']) is not str:
                     raise Refusal('request-refused')
+                _validate_service(request['id'], request['unit'])
             else:
+                if not re.fullmatch(ID, request['id']):
+                    raise Refusal('request-refused')
                 if type(request['host']) is not str:
                     raise Refusal('request-refused')
                 try:

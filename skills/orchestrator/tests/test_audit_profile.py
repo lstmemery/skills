@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from audit_profile import collector
+from audit_profile import bootstrap
 from audit_profile import launch
 from audit_profile.launch import launch_profile
 from audit_profile.process import capture
@@ -21,6 +23,15 @@ from audit_profile.schema import validate_snapshot
 
 
 class CollectorTests(unittest.TestCase):
+    def test_invalid_later_service_refuses_before_any_collection_io(self):
+        for request in [{'id': 'INVALID', 'unit': 'example.service'},
+                        {'id': 'example', 'unit': 'example.service;cat /secret'}]:
+            plan = {'services': [{'id': 'example', 'unit': 'example.service'}, request],
+                    'certificates': []}
+            with self.subTest(request=request), patch('subprocess.Popen', side_effect=AssertionError('I/O before validation')):
+                with self.assertRaises(collector.Refusal):
+                    collector.collect(plan)
+
     def test_service_state_retains_only_a_closed_state(self):
         def systemctl(argv):
             self.assertEqual(argv, ['/usr/bin/systemctl', 'show', '--property=ActiveState',
@@ -110,7 +121,185 @@ class CertificateTests(unittest.TestCase):
                 collector.certificate_identity('example-cert', b'SYNTHETIC_invalid_DER')
 
 
+class MountVerificationTests(unittest.TestCase):
+    ROOT = '10 1 0:101 /newroot / ro,nosuid,nodev - tmpfs tmpfs rw\n'
+    TMP = '11 10 0:102 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n'
+
+    def expectation(self):
+        return {'mounts': ['/', '/tmp'], 'readonly_mounts': ['/'],
+                'fresh_mounts': {'/': ['tmpfs', 'tmpfs', '/newroot'], '/tmp': ['tmpfs', 'tmpfs', '/']},
+                'host_devices': ['0:9'], 'bind_mounts': {}, 'data_mounts': []}
+
+    def test_fresh_mounts_are_verified_from_kernel_records(self):
+        with patch.object(Path, 'read_text', return_value=self.ROOT + self.TMP):
+            self.assertTrue(bootstrap.verify_mounts(self.expectation()))
+
+    def test_missing_malformed_and_stacked_mount_records_refuse(self):
+        observations = ['', self.ROOT, self.ROOT + self.TMP + self.TMP,
+                        self.ROOT + '11 10 - tmpfs tmpfs rw\n',
+                        self.ROOT + self.TMP.replace(' /tmp ', r' /tmp\777 '),
+                        self.ROOT + self.TMP.replace('0:102', 'unknown')]
+        for index, observation in enumerate(observations):
+            with self.subTest(case=index), patch.object(Path, 'read_text', return_value=observation):
+                with self.assertRaises(ValueError):
+                    bootstrap.verify_mounts(self.expectation())
+
+    def test_fresh_mounts_refuse_wrong_type_source_root_or_reused_devices(self):
+        observations = [self.TMP.replace('- tmpfs tmpfs', '- ext4 /dev/fake'),
+                        self.TMP.replace('- tmpfs tmpfs', '- tmpfs unexpected'),
+                        self.TMP.replace(' / /tmp ', ' /host-private /tmp '),
+                        self.TMP.replace('0:102', '0:9'),
+                        self.TMP.replace('0:102', '0:101')]
+        for index, observation in enumerate(observations):
+            with self.subTest(case=index), patch.object(Path, 'read_text', return_value=self.ROOT + observation):
+                with self.assertRaises(bootstrap.CheckFailed):
+                    bootstrap.verify_mounts(self.expectation())
+
+    def test_unavailable_mount_records_refuse(self):
+        with patch.object(Path, 'read_text', side_effect=OSError):
+            with self.assertRaises(OSError):
+                bootstrap.verify_mounts(self.expectation())
+
+    def test_every_mount_requires_exactly_one_provenance_policy(self):
+        for duplicate in (False, True):
+            expected = self.expectation()
+            if duplicate:
+                expected['data_mounts'] = ['/tmp']
+            else:
+                del expected['fresh_mounts']['/tmp']
+            with self.subTest(duplicate=duplicate), patch.object(Path, 'read_text', return_value=self.ROOT + self.TMP):
+                with self.assertRaises(bootstrap.CheckFailed):
+                    bootstrap.verify_mounts(expected)
+
+
 class ConfinementTests(unittest.TestCase):
+    def test_input_from_host_mount_refuses_before_worker_executes(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+            root = Path(tmp).resolve()
+            output = root / 'out'
+
+            def misconfigured(argv, **kwargs):
+                if argv[0] == '/usr/bin/bwrap':
+                    argv = list(argv)
+                    index = next(i for i, argument in enumerate(argv[:-2])
+                                 if argument == '--ro-bind-data' and argv[i + 2] == '/input/snapshot.json')
+                    # Same bytes and read-only destination, different backing mount.
+                    original = int(argv[index + 1])
+                    substitute = root / 'snapshot.json'
+                    substitute.write_bytes(os.pread(original, 65536, 0))
+                    descriptor = os.open(substitute, os.O_PATH)
+                    try:
+                        os.dup2(descriptor, original)
+                    finally:
+                        os.close(descriptor)
+                    argv[index] = '--ro-bind-fd'
+                return capture(argv, **kwargs)
+
+            with patch.object(launch, 'capture', misconfigured):
+                with self.assertRaises(collector.Refusal):
+                    launch_profile(b'{"schema_version":1,"services":[],"certificates":[]}',
+                                   b"from pathlib import Path; Path('/out/EXECUTED').touch()", output)
+            self.assertFalse((output / 'EXECUTED').exists())
+
+    def test_substituted_output_bind_refuses_before_worker_executes(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+            root = Path(tmp).resolve()
+            private = root / 'private'
+            private.mkdir()
+            (private / 'credential').write_text('FABRICATED_ONLY_OUTPUT_SENTINEL')
+            output = root / 'out'
+
+            def misconfigured(argv, **kwargs):
+                if argv[0] == '/usr/bin/bwrap':
+                    index = argv.index('--bind-fd')
+                    descriptor = os.open(private, os.O_DIRECTORY | os.O_RDONLY)
+                    try:
+                        os.dup2(descriptor, int(argv[index + 1]))
+                    finally:
+                        os.close(descriptor)
+                return capture(argv, **kwargs)
+
+            worker = (b"from pathlib import Path; Path('/out/EXECUTED').touch(); "
+                      b"print(Path('/out/credential').read_text())")
+            with patch.object(launch, 'capture', misconfigured):
+                with self.assertRaises(collector.Refusal):
+                    launch_profile(b'{"schema_version":1,"services":[],"certificates":[]}',
+                                   worker, output)
+            self.assertFalse((output / 'EXECUTED').exists())
+            self.assertFalse((private / 'EXECUTED').exists())
+
+    def test_substituted_runtime_bind_refuses_before_worker_executes(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+            root = Path(tmp).resolve()
+            output = root / 'out'
+
+            def misconfigured(argv, **kwargs):
+                if argv[0] == '/usr/bin/bwrap':
+                    argv = list(argv)
+                    index = next(i for i, argument in enumerate(argv[:-2])
+                                 if argument == '--ro-bind' and Path(argv[i + 1]).is_dir())
+                    source = Path(argv[index + 1])
+                    substitute = root / 'runtime'
+                    shutil.copytree(source, substitute, symlinks=True,
+                                    ignore=shutil.ignore_patterns('site-packages', '__pycache__'))
+                    if (source / 'site-packages').exists():
+                        (substitute / 'site-packages').mkdir()
+                    (substitute / 'credential').write_text('FABRICATED_ONLY_RUNTIME_SENTINEL')
+                    argv[index + 1] = str(substitute)
+                return capture(argv, **kwargs)
+
+            worker = (b"from pathlib import Path; import sysconfig; "
+                      b"Path('/out/EXECUTED').touch(); "
+                      b"print((Path(sysconfig.get_path('stdlib'))/'credential').read_text())")
+            with patch.object(launch, 'capture', misconfigured):
+                with self.assertRaises(collector.Refusal):
+                    launch_profile(b'{"schema_version":1,"services":[],"certificates":[]}',
+                                   worker, output)
+            self.assertFalse((output / 'EXECUTED').exists())
+
+    def test_host_tmpfs_at_tmp_refuses_before_worker_executes(self):
+        # /dev/shm is a real host tmpfs, so type/source checks alone cannot help.
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+            output = Path(tmp).resolve() / 'out'
+
+            def misconfigured(argv, **kwargs):
+                if argv[0] == '/usr/bin/bwrap':
+                    argv = list(argv)
+                    index = next(i for i in range(len(argv) - 1)
+                                 if argv[i:i + 2] == ['--tmpfs', '/tmp'])
+                    argv[index:index + 2] = ['--bind', '/dev/shm', '/tmp']
+                return capture(argv, **kwargs)
+
+            with patch.object(launch, 'capture', misconfigured):
+                with self.assertRaises(collector.Refusal):
+                    launch_profile(b'{"schema_version":1,"services":[],"certificates":[]}',
+                                   b"from pathlib import Path; Path('/out/EXECUTED').touch()", output)
+            self.assertFalse((output / 'EXECUTED').exists())
+
+    def test_host_bind_at_tmp_refuses_before_worker_executes(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as tmp:
+            root = Path(tmp).resolve()
+            private = root / 'private'
+            private.mkdir()
+            (private / 'credential').write_text('FABRICATED_ONLY_BOUNDARY_SENTINEL')
+            output = root / 'out'
+
+            def misconfigured(argv, **kwargs):
+                if argv[0] == '/usr/bin/bwrap':
+                    argv = list(argv)
+                    index = next(i for i in range(len(argv) - 1)
+                                 if argv[i:i + 2] == ['--tmpfs', '/tmp'])
+                    argv[index:index + 2] = ['--bind', str(private), '/tmp']
+                return capture(argv, **kwargs)
+
+            worker = (b"from pathlib import Path; Path('/out/EXECUTED').touch(); "
+                      b"print(Path('/tmp/credential').read_text())")
+            with patch.object(launch, 'capture', misconfigured):
+                with self.assertRaises(collector.Refusal):
+                    launch_profile(b'{"schema_version":1,"services":[],"certificates":[]}',
+                                   worker, output)
+            self.assertFalse((output / 'EXECUTED').exists())
+
     def test_real_container_blocks_host_secrets_and_keeps_useful_snapshot(self):
         snapshot = canonical({'schema_version': 1, 'services': [{'id': 'example', 'active_state': 'active'}],
                               'certificates': []})
