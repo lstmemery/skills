@@ -7,6 +7,7 @@ import sys
 
 from .cleanup import cleanup_stale, close_workspace
 from .engine import Engine, WORKER_DISPOSITIONS
+from .edit_scope import edit_scope_warnings
 from .records import JobError, digest, effort_arguments, encoded, prepare, run_lock
 from .transport import BudgetExpired, Deadline, NativeTransport
 
@@ -164,6 +165,7 @@ def main(argv=None, transport_factory=NativeTransport):
                         "effort": (job.get("override") or {}).get("effort"),
                         "runtime_argv": preview_runtime_argv(job),
                         "model_route": job.get("model_route"), "cwd": job["cwd"],
+                        "edit_scope_warnings": edit_scope_warnings(job),
                         "effects": ["create workspace/pane", "start worker", "submit task", "collect artifacts"]}
                         for job in request["jobs"]]}
             print(encoded(result).decode())

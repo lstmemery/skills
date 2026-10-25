@@ -217,6 +217,29 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
 
+    def test_run_and_add_preview_report_symlink_scope_conflict_without_launching(self):
+        allowed = self.root / "installed"
+        allowed.mkdir()
+        target = self.root / "repo-unit.service"
+        target.write_text("fixture unit\n")
+        link = allowed / "fixture.service"
+        link.symlink_to(target)
+        self.task.write_text(f"Edit `{link}` in its backing repository.\n")
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["editable_paths"] = [str(allowed)]
+        self.manifest.write_text(json.dumps(manifest))
+
+        for operation in ("run", "add"):
+            with self.subTest(operation=operation):
+                code, result = self.call(operation, real=True, preview=True)
+                self.assertEqual((code, result["batch_state"]), (0, "preview"))
+                warnings = result["jobs"][0]["edit_scope_warnings"]
+                self.assertEqual(warnings[0]["resolved_path"], str(target))
+                self.assertEqual(warnings[0]["reason"], "symlink_outside_editable_paths")
+                self.assertFalse(self.run.exists())
+                self.assertFalse((self.root / "events.json").exists())
+                self.assertEqual(target.read_text(), "fixture unit\n")
+
     def test_claude_preview_exposes_model_and_effort_arguments(self):
         job = {"route": {"runtime": "claude-code"}, "model": "claude-opus-5-5",
                "override": {"effort": "high"}}

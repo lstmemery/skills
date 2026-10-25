@@ -165,6 +165,14 @@ also provide `required_context` entries with at least one test and one fixture;
 the helper resolves and checks each entry before the jail launcher runs, and
 the launcher repeats that check from its launch request.
 
+Offline `run --preview` and `add --preview` include per-job
+`edit_scope_warnings` when local symlinks in declared editable paths or literal
+task path references resolve outside the declared editable locations. The
+warning does not grant access or determine whether a reference is an edit.
+Follow the [worker pre-dispatch checklist](workers.md#pre-dispatch-checklist)
+to inventory every required edit and verify its destination; jail namespaces
+are reported as unverified by this host-only check.
+
 `worker_result` opts a job into the shared worker-record contract. The helper
 then asks for a `result.json` bound to that task ID and assignment revision,
 collects it and every artifact it names, and lets `finish` validate it before
