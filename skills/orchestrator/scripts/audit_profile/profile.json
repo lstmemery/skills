@@ -1,0 +1,11 @@
+{
+  "profile": "isolated-audit-v1",
+  "schema_version": 1,
+  "container_uid": 65534,
+  "network": "none",
+  "credentials": "none",
+  "runtime": "root-owned-python-stdlib-and-elf-dependencies",
+  "inputs": "sealed-schema-validated-snapshot",
+  "output": "fresh-directory",
+  "provider": "offline-only"
+}
