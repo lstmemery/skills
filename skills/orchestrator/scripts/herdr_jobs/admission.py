@@ -142,6 +142,7 @@ def _clock_reset_delay(value, now):
     if not match:
         return None
     clock_text, zone_text = match.groups()
+    clock_text = " ".join(clock_text.split())
     formats = ("%I:%M:%S %p", "%I:%M %p", "%I %p") if re.search(r"(?i)\b(?:am|pm)\b", clock_text) else (
         "%H:%M:%S", "%H:%M", "%H")
     reset_time = None
@@ -174,7 +175,9 @@ def _clock_reset_delay(value, now):
 
 
 def _natural_reset_delay(output, now):
-    match = re.search(r"(?i)\b(?:resets?|try again)\s+(at|in)\s+([^\r\n]+)", output)
+    match = re.search(
+        r"(?i)\b(?:resets?|try again)\s+(at|in)\s+"
+        r"([^\r\n]+(?:\r?\n[ \t]*(?:am|pm)\b[^\r\n]*)?)", output)
     if match is None:
         return None
     mode, value = match.groups()
@@ -238,7 +241,7 @@ def _codex_rate_limit_banner(output):
 def _usage_limit_banner(output):
     """Recognize terminal quota banners from supported interactive runtimes."""
     return bool(re.search(
-        r"(?im)^\s*(?:⚠\s*)?(?:you(?:'ve| have) hit your (?:chatgpt )?(?:usage )?limit|"
+        r"(?im)^\s*(?:[⚠■]\s*)?(?:you(?:'ve| have) hit your (?:chatgpt )?(?:usage )?limit|"
         r"usage limit reached|quota exceeded)(?:\b|[.!·])",
         output,
     ))

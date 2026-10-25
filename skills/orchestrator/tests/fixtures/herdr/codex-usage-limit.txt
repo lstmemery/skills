@@ -1,0 +1,13 @@
+╭────────────────────────────────────╮
+│ >_ OpenAI Codex                     │
+│ model: gpt-6-sol                    │
+│ directory: /work                    │
+╰────────────────────────────────────╯
+
+› Continue the assigned audit and write the report.
+
+■ You've hit your usage limit. Upgrade your plan or try again at 8:10 PM.
+
+› Summarize recent changes
+
+  ? for shortcuts
