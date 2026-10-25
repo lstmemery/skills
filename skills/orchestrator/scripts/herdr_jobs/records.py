@@ -293,11 +293,12 @@ def validate_task_output_paths(task, job_id, task_path):
                 raise JobError("invalid_input", f"{job_id}: task file {task_path} declares conflicting {label}: {value!r}")
     path_prefix = r"(?:[~/]|\.\.?/|[\w.-]+/)"
     filename = r"[\w.-]+\.[\w-]+"
+    quoted_filename = r"[\w. -]+\.[\w-]+"
     prose_path = re.compile(
         r"(?im)\b(?:write|save|place|put|store|create)\s+(?:the\s+)?"
         r"(?P<artifact_quote>[`\"']?)(?:report|result|output)(?:\.\w+)?(?P=artifact_quote)"
         r"\s+(?:in|to|at|under)\s+(?:the\s+)?"
-        rf"(?:(?P<quote>[`\"'])(?P<quoted>{path_prefix}[^\r\n]+?|{filename})(?P=quote)|"
+        rf"(?:(?P<quote>[`\"'])(?P<quoted>{path_prefix}[^\r\n]+?|{quoted_filename})(?P=quote)|"
         rf"(?P<bare>cwd|working directory|current directory|{path_prefix}[^\s,;]+|{filename}))"
     )
     for match in prose_path.finditer(task):

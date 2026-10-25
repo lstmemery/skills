@@ -217,42 +217,15 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
 
-    def test_preflight_rejects_relative_output_destinations_before_launch(self):
+    def test_preflight_rejects_output_destinations_before_launch(self):
         for task, destination in (
                 ("Save the report under ./out.", "./out"),
                 ("Write result.md to ../out.", "../out"),
-                ("Place the output in reports/review.md.", "reports/review.md")):
-            with self.subTest(task=task):
-                self.task.write_text(task)
-
-                code, result = self.call("run", preview=True)
-
-                self.assertEqual(code, 2, result)
-                self.assertEqual(result["error"], "invalid_input")
-                self.assertEqual(result["message"],
-                                 f"job0: task file {self.task} declares conflicting output directory: {destination!r}")
-                self.assertFalse(self.run.exists())
-                self.assertFalse((self.root / "events.json").exists())
-
-    def test_preflight_rejects_quoted_output_destinations_before_launch(self):
-        for task, destination in (
+                ("Place the output in reports/review.md.", "reports/review.md"),
                 ("Place the report at `/tmp/review.md`.", "/tmp/review.md"),
                 ('Save the result under "./review output/result.md".', "./review output/result.md"),
-                ("Write report.md to '~/review output/report.md'.", "~/review output/report.md")):
-            with self.subTest(task=task):
-                self.task.write_text(task)
-
-                code, result = self.call("run", preview=True)
-
-                self.assertEqual(code, 2, result)
-                self.assertEqual(result["error"], "invalid_input")
-                self.assertEqual(result["message"],
-                                 f"job0: task file {self.task} declares conflicting output directory: {destination!r}")
-                self.assertFalse(self.run.exists())
-                self.assertFalse((self.root / "events.json").exists())
-
-    def test_preflight_rejects_common_output_directives_before_launch(self):
-        for task, destination in (
+                ('Save the report to "review output.md".', "review output.md"),
+                ("Write report.md to '~/review output/report.md'.", "~/review output/report.md"),
                 ("Put the report at /tmp/review.md.", "/tmp/review.md"),
                 ("Store the output under ./out.", "./out"),
                 ("Create `result.md` in /tmp/out.", "/tmp/out"),
