@@ -300,9 +300,10 @@ def _validate_evidence(evidence, review_name, *, expected_task=_DISPOSITION_STAG
     and metadata rules. Pending dispositions are replaced before integration.
     """
     complete_bundle = expected_task is not _DISPOSITION_STAGE
-    if complete_bundle and (not isinstance(evidence, dict) or evidence.keys() != {
-        "schema_version", "task_id", "author_identity", "reviewer_identity", "capture_id", "axes"
-    }):
+    required = {"schema_version", "task_id", "author_identity", "reviewer_identity", "capture_id", "axes"}
+    if complete_bundle and (not isinstance(evidence, dict)
+                            or not required <= evidence.keys()
+                            or evidence.keys() - required - {"axis_reviewers"}):
         raise ReviewEvidenceError(f"{review_name} review evidence has unexpected fields")
     if (
         not isinstance(evidence, dict)
@@ -314,6 +315,14 @@ def _validate_evidence(evidence, review_name, *, expected_task=_DISPOSITION_STAG
         raise ReviewEvidenceError(f"invalid {EVIDENCE_NAME} schema in {review_name}")
     if complete_bundle and str(evidence["task_id"]) != str(expected_task):
         raise ReviewEvidenceError(f"{review_name} review evidence has the wrong schema or task ID")
+    if "axis_reviewers" in evidence:
+        reviewers = evidence["axis_reviewers"]
+        if (not isinstance(reviewers, dict) or set(reviewers) != set(AXES)
+                or any(not isinstance(value, str) or not value.strip() or len(value) > 512
+                       for value in reviewers.values())):
+            raise ReviewEvidenceError(f"{review_name} axis_reviewers must name both axis reviewers")
+        if evidence.get("author_identity") in reviewers.values():
+            raise ReviewEvidenceError(f"{review_name} axis reviewer is the candidate author")
     axes = evidence.get("axes")
     if not isinstance(axes, dict) or set(axes) != set(AXES):
         raise ReviewEvidenceError(f"{review_name} must record both Standards and Spec axes")
@@ -415,11 +424,16 @@ class ReviewSummary:
     finding_count: int
     markdown_compatibility: str
     legacy_precedent_sha256: str | None = None
+    axis_reviewers: tuple[tuple[str, str], ...] | None = None
 
     def to_record(self):
         record = asdict(self)
         if self.legacy_precedent_sha256 is None:
             del record["legacy_precedent_sha256"]
+        if self.axis_reviewers is None:
+            del record["axis_reviewers"]
+        else:
+            record["axis_reviewers"] = dict(self.axis_reviewers)
         return record
 
 
@@ -504,6 +518,8 @@ class ReviewBundle:
             finding_count=len(findings),
             markdown_compatibility=compatibility,
             legacy_precedent_sha256=legacy_digest,
+            axis_reviewers=(tuple(evidence["axis_reviewers"].items())
+                            if "axis_reviewers" in evidence else None),
         ))
 
     def summary(self):

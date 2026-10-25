@@ -69,6 +69,46 @@ Use a reason to make the handoff clear; deferred tasks appear in the report.
 Omitted tasks, unknown deferrals, and tasks both selected and deferred block the
 batch, while allowing the supplied candidates to proceed as a partial landing.
 
+For managed coding and review jobs, pass their run directories directly instead
+of assembling a batch roster or copying records:
+
+```sh
+python3 scripts/integration-preflight.py \
+  --repo REPO --target TARGET_BRANCH --run-dir EVIDENCE_DIR \
+  --managed-run CODING_RUN [--managed-run REVIEW_RUN] \
+  --candidate BRANCH=SHA
+```
+
+`EVIDENCE_DIR` must exist. Repeat `--managed-run` for separate runs; supply a
+shared run only once. All supplied jobs must be settled with complete,
+unresolved-free collections. Coding jobs must enable `worker_result` and collect
+their assignment-bound `result.json` with its candidate block and declared
+artifacts. Review jobs collect `review/review.md`,
+`review/review-evidence.json`, and every file of the completed `review/capture/`
+bundle in their receipt. Use `review-rN/` for delta reviews. Normal receipt
+artifact count and size limits still apply. Link each sidecar to the coding
+job's `worker_result.task_id`; the review job may have a different job/task ID.
+
+In managed review briefs, instruct the reviewer to omit `author_identity` and
+`reviewer_identity` from the sidecar. The adapter fills these from the coding
+and reviewing jobs' `agent_name` values and takes panes from helper state.
+Supplied identities must agree with that state. The adapter refuses a shared
+author/reviewer identity or pane. Omit `done.json` to have the adapter derive
+counts and capture ID from the sidecar; a supplied `done.json` is checked as
+usual. For findings, collect the coordinator-owned `review-response.md` with
+the coding job and recollect sidecars after disposition sync. The adapter never
+decides a finding's disposition.
+
+The adapter verifies receipt request/job/attempt identity, collection revision,
+artifact hashes and sizes, and worker-result assignment before using the
+collected snapshots. It writes a durable projection under
+`EVIDENCE_DIR/managed-inputs/DIGEST/` and runs the same capture, review-chain,
+disposition, candidate-head and target-head checks as the legacy layout. The
+report records `managed_input_dir` and `managed_jobs`, including original state
+digests, collection provenance, identities and panes. Managed input is explicit;
+legacy files in `EVIDENCE_DIR` are not combined with it. No job state, worker
+output, or collected evidence is rewritten.
+
 The preflight checks the worker result against the actual candidate commit and
 the candidate's merge base with the target branch. It requires a complete
 Standards and Spec review, an independent reviewer identity, current capture
@@ -97,6 +137,7 @@ must differ. Record both axes even when an axis has zero findings:
   "task_id": "1123",
   "author_identity": "worker-1123",
   "reviewer_identity": "reviewer-1123",
+  "axis_reviewers": {"standards": "/root/standards", "spec": "/root/spec"},
   "capture_id": "capture-id-from-done-and-manifest",
   "axes": {
     "standards": {
@@ -115,6 +156,16 @@ must differ. Record both axes even when an axis has zero findings:
   }
 }
 ```
+
+`axis_reviewers` is optional in schema versions 1 and 2. When supplied, it must
+map exactly `standards` and `spec` to nonblank reviewer identity strings of at
+most 512 characters; neither may be the candidate author. Review briefs must
+request identities returned by the agent helper, such as sub-agent task paths,
+and preserve them verbatim. This is per-axis attribution: sub-agents need not
+appear in `workers.txt`, and this metadata does not replace the independently
+rostered `reviewer_identity` responsible for the bundle. The preflight retains
+the attribution in its selected-review records. Omit the field when these
+identities are unavailable; do not invent names.
 
 Finding IDs must be unique within a review directory. Each must have a
 `review-response.md` line in the task directory in this form:
