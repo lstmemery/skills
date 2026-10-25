@@ -6,7 +6,9 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -191,6 +193,40 @@ class AdmissionTest(unittest.TestCase):
 
         self.assertEqual(result, {"retry_after_seconds": 3600.0, "source": "reset"})
 
+    def test_codex_error_square_banner_resets_at_the_local_evening_clock(self):
+        pane = (PACKAGE / "tests/fixtures/herdr/codex-usage-limit.txt").read_text()
+        with patch.dict(os.environ, {"TZ": "America/Vancouver"}):
+            signal = rate_limit_from_output(pane, now=1792894669.0, runtime="codex")
+
+        # 2026-10-24 20:10 PDT is 2026-10-25 03:10 UTC.
+        self.assertEqual(signal, {"retry_after_seconds": 3131.0, "source": "reset"})
+
+    def test_codex_reset_clock_can_wrap_before_the_meridiem(self):
+        pane = (PACKAGE / "tests/fixtures/herdr/codex-usage-limit.txt").read_text()
+        pane = pane.replace("8:10 PM.", "8:10\n  PM.")
+        with patch.dict(os.environ, {"TZ": "America/Vancouver"}):
+            signal = rate_limit_from_output(pane, now=1792894669.0, runtime="codex")
+
+        self.assertEqual(signal, {"retry_after_seconds": 3131.0, "source": "reset"})
+
+    def test_codex_reset_uses_the_next_local_clock_across_midnight_and_dst(self):
+        pane = (PACKAGE / "tests/fixtures/herdr/codex-usage-limit.txt").read_text()
+        cases = (
+            ("America/Vancouver", "2026-10-25T06:17:49+00:00", "8:10 PM", "2026-10-26T03:10:00+00:00"),
+            ("America/Los_Angeles", "2026-11-01T08:45:00+00:00", "1:10 AM", "2026-11-01T09:10:00+00:00"),
+            ("America/Los_Angeles", "2026-11-01T06:17:49+00:00", "8:10 PM", "2026-11-02T04:10:00+00:00"),
+        )
+        for zone, observed_at, clock, reset_at in cases:
+            with self.subTest(zone=zone, observed_at=observed_at, clock=clock), patch.dict(
+                    os.environ, {"TZ": zone}):
+                now = datetime.fromisoformat(observed_at).timestamp()
+                signal = rate_limit_from_output(
+                    pane.replace("8:10 PM", clock), now=now, runtime="codex")
+
+                self.assertEqual(signal["source"], "reset")
+                self.assertEqual(now + signal["retry_after_seconds"],
+                                 datetime.fromisoformat(reset_at).timestamp())
+
     def test_unparseable_banner_reset_keeps_the_bounded_default(self):
         signal = rate_limit_from_output(
             "You've hit your usage limit · resets at the next opportunity",
@@ -220,6 +256,8 @@ class AdmissionTest(unittest.TestCase):
             ("pi", "Please explain HTTP 429 and rate limit responses in the prompt."),
             ("codex", "The report mentions Error: 429 and says rate limit twice."),
             ("pi", 'Example from a report: Error: 429: {"code":"1302"}'),
+            ("codex", "The report says ■ You've hit your usage limit. Try again at 8:10 PM."),
+            ("codex", "› ■ You've hit your usage limit. Try again at 8:10 PM."),
         )
         for runtime, transcript in samples:
             with self.subTest(runtime=runtime, transcript=transcript):

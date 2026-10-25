@@ -13,3 +13,8 @@ the read-only sample. The `created_workspace` shape is covered with a fake
 response in the unit test, using the installed Herdr 0.9.3 `PaneMoveResult`
 schema. Capturing a live move response requires a mutating host exercise and
 remains an operator verification step.
+
+`codex-usage-limit.txt` is a synthetic, secret-free pane snapshot for the
+usage-limit banner reported in LEDGER.md at 2026-10-25T02:17:49Z. It preserves
+the Codex error-square prefix and the reported 8:10 PM reset clock; surrounding
+UI and task text are reconstructed, not a historical raw capture.

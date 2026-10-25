@@ -345,6 +345,16 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(observation["rate_limit"],
                          {"retry_after_seconds": 12.0, "source": "retry-after"})
 
+    def test_codex_usage_limit_pane_exposes_the_local_reset_to_the_lifecycle(self):
+        self.pane_output = (HERDR_FIXTURES / "codex-usage-limit.txt").read_text()
+        with patch.dict(os.environ, {"TZ": "America/Vancouver"}), patch(
+                "herdr_jobs.admission.time.time", return_value=1792894669.0):
+            observation = self.adapter.observe(self.job)
+
+        self.assertTrue(observation["identity_verified"])
+        self.assertEqual(observation["rate_limit"],
+                         {"retry_after_seconds": 3131.0, "source": "reset"})
+
     def test_transcript_mentions_of_rate_limit_are_not_provider_errors(self):
         self.spec.update(kind="pi", route={"mode": "agent", "runtime": "pi"})
         self.agent.update(agent_status="done", agent="pi")
