@@ -291,9 +291,19 @@ def validate_task_output_paths(task, job_id, task_path):
             value = match.group(1).strip().strip("`\"'")
             if value and value not in ("the output directory", "the assigned output directory"):
                 raise JobError("invalid_input", f"{job_id}: task file {task_path} declares conflicting {label}: {value!r}")
-    prose_path = re.compile(r"(?im)\b(?:write|save)\s+(?:the\s+)?(?:report|result|output)(?:\.\w+)?\s+(?:in|to)\s+(?:the\s+)?(cwd|working directory|current directory|[~/][^\s,;]+)")
+    path_prefix = r"(?:[~/]|\.\.?/|[\w.-]+/)"
+    filename = r"[\w.-]+\.[\w-]+"
+    prose_path = re.compile(
+        r"(?im)\b(?:write|save|place|put|store|create)\s+(?:the\s+)?"
+        r"(?P<artifact_quote>[`\"']?)(?:report|result|output)(?:\.\w+)?(?P=artifact_quote)"
+        r"\s+(?:in|to|at|under)\s+(?:the\s+)?"
+        rf"(?:(?P<quote>[`\"'])(?P<quoted>{path_prefix}[^\r\n]+?|{filename})(?P=quote)|"
+        rf"(?P<bare>cwd|working directory|current directory|{path_prefix}[^\s,;]+|{filename}))"
+    )
     for match in prose_path.finditer(task):
-        value = match.group(1).rstrip(".")
+        value = match.group("quoted")
+        if value is None:
+            value = match.group("bare").rstrip(".")
         raise JobError("invalid_input", f"{job_id}: task file {task_path} declares conflicting output directory: {value!r}")
 
 

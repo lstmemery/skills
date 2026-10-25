@@ -217,6 +217,74 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(self.run.exists())
         self.assertFalse((self.root / "events.json").exists())
 
+    def test_preflight_rejects_relative_output_destinations_before_launch(self):
+        for task, destination in (
+                ("Save the report under ./out.", "./out"),
+                ("Write result.md to ../out.", "../out"),
+                ("Place the output in reports/review.md.", "reports/review.md")):
+            with self.subTest(task=task):
+                self.task.write_text(task)
+
+                code, result = self.call("run", preview=True)
+
+                self.assertEqual(code, 2, result)
+                self.assertEqual(result["error"], "invalid_input")
+                self.assertEqual(result["message"],
+                                 f"job0: task file {self.task} declares conflicting output directory: {destination!r}")
+                self.assertFalse(self.run.exists())
+                self.assertFalse((self.root / "events.json").exists())
+
+    def test_preflight_rejects_quoted_output_destinations_before_launch(self):
+        for task, destination in (
+                ("Place the report at `/tmp/review.md`.", "/tmp/review.md"),
+                ('Save the result under "./review output/result.md".', "./review output/result.md"),
+                ("Write report.md to '~/review output/report.md'.", "~/review output/report.md")):
+            with self.subTest(task=task):
+                self.task.write_text(task)
+
+                code, result = self.call("run", preview=True)
+
+                self.assertEqual(code, 2, result)
+                self.assertEqual(result["error"], "invalid_input")
+                self.assertEqual(result["message"],
+                                 f"job0: task file {self.task} declares conflicting output directory: {destination!r}")
+                self.assertFalse(self.run.exists())
+                self.assertFalse((self.root / "events.json").exists())
+
+    def test_preflight_rejects_common_output_directives_before_launch(self):
+        for task, destination in (
+                ("Put the report at /tmp/review.md.", "/tmp/review.md"),
+                ("Store the output under ./out.", "./out"),
+                ("Create `result.md` in /tmp/out.", "/tmp/out"),
+                ("Save the report to review.md.", "review.md")):
+            with self.subTest(task=task):
+                self.task.write_text(task)
+
+                code, result = self.call("run", preview=True)
+
+                self.assertEqual(code, 2, result)
+                self.assertEqual(result["error"], "invalid_input")
+                self.assertEqual(result["message"],
+                                 f"job0: task file {self.task} declares conflicting output directory: {destination!r}")
+                self.assertFalse(self.run.exists())
+                self.assertFalse((self.root / "events.json").exists())
+
+    def test_preflight_accepts_source_references_and_assigned_output_directory(self):
+        for task in (
+                "Inspect the report at /tmp/input.md, then save the report in the assigned output directory.",
+                "Read ../fixtures/input.json. Write report.md in the assigned output directory.",
+                "Output directory: the assigned output directory\nEditable path: the output directory\n",
+                "Save the report in JSON.",
+                "Write result.md to the output directory."):
+            with self.subTest(task=task):
+                self.task.write_text(task)
+
+                code, result = self.call("run", real=True, preview=True)
+
+                self.assertEqual((code, result["batch_state"]), (0, "preview"))
+                self.assertFalse(self.run.exists())
+                self.assertFalse((self.root / "events.json").exists())
+
     def test_claude_preview_exposes_model_and_effort_arguments(self):
         job = {"route": {"runtime": "claude-code"}, "model": "claude-opus-5-5",
                "override": {"effort": "high"}}
@@ -449,6 +517,18 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["error"]), (2, "invalid_input"))
         self.assertIn("job0: task file", result["message"])
         self.assertIn("declares conflicting output directory: 'cwd'", result["message"])
+
+    def test_preflight_rejects_explicit_report_destination_before_launch(self):
+        self.task.write_bytes((PACKAGE / "tests/fixtures/managed-jobs/conflicting-explicit-output-task.md").read_bytes())
+
+        code, result = self.call("run", preview=True)
+
+        self.assertEqual(code, 2, result)
+        self.assertEqual(result["error"], "invalid_input")
+        self.assertEqual(result["message"],
+                         f"job0: task file {self.task} declares conflicting output directory: '/tmp/review.md'")
+        self.assertFalse(self.run.exists())
+        self.assertFalse((self.root / "events.json").exists())
 
     def test_prompt_uses_same_canonical_output_directory_in_brief_and_collection_contract(self):
         from herdr_jobs.records import prepare

@@ -187,6 +187,9 @@ collection contract. Workers must write the expected result, receipt, and
 supporting files there; the collector reads that same directory. Preflight
 rejects task text that explicitly names a different output or editable
 directory and reports the conflicting declaration and source task file.
+This includes prose such as `Place the report at /tmp/review.md` and
+`Save the report under ./out`, including quoted paths. Refer to the assigned
+output directory in task text instead of choosing a destination.
 
 Other runtimes, including Gemini CLI, reject an effort override before launch;
 the launcher does not assume every runtime accepts a generic `--effort` flag.
