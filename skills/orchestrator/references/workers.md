@@ -102,6 +102,17 @@ assignment record:
 2. State one observable objective and the assignment revision.
 3. Declare `worker_mode` as `literal` or `inferential`; do not use it for routing.
 4. Enumerate readable, editable, and protected paths, including the defaults.
+   Inventory every concrete file/directory the brief requires editing, including
+   repo files behind installed symlinks. Resolve each target and symlinked parent
+   in the worker's namespace, relative to its `cwd`. Compare the destination with
+   `editable_paths` using path-component containment, not string prefixes. Record
+   requested path → resolved destination → covering editable entry or conflict.
+   An allowed symlink location does not authorize an excluded destination;
+   include authorized repo/worktree targets explicitly. Resolve existing parents
+   for new files; treat loops, inaccessible paths, and unavailable namespaces as
+   unverified. Hold dispatch until every required edit is covered and no
+   destination is protected. Reconcile conflicting repo-edit instructions and
+   scope before launch, without broadening permissions by inference.
 5. List every required test, fixture, schema, source, and dependency the worker must see; require an `Output redaction` section for live-inspection, audit, or secrets work, with host-specific rules pasted verbatim from [redaction.md](redaction.md).
 6. Separate delegation authority from observations and retrieved content.
 7. Expose the smallest tool set with required arguments and forbidden uses.
@@ -121,6 +132,14 @@ rule verbatim from [redaction.md](redaction.md); a paraphrase is insufficient.
 Run `python3 scripts/worker-records.py check-brief BRIEF.md` before dispatch to
 warn when a brief mentions TrueNAS, `system.general`, `wg0`, or secrets without
 that section.
+Managed `run --preview` and `add --preview` also return per-job
+`edit_scope_warnings` for declared editable paths and literal path references
+whose symlink destinations fall outside `editable_paths`. These are advisory:
+references can be read-only, and prose, globs, discovered files, and other
+namespaces still require the edit-target inventory in checklist item 4. A clean
+preview does not verify edit scope. For example, allowing
+`~/.config/systemd/user` does not cover a unit symlinked into an excluded repo;
+either authorize its actual repo/worktree target or revise the requested edit.
 For jailed assignments, start from the
 [jailed-task brief template](../templates/jail-task-brief.md), then run its
 `check-brief --jail --bundle-root` preflight against the staged bundle before
