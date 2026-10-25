@@ -287,3 +287,10 @@ class InputBoundaryTests(unittest.TestCase):
                 self.assertEqual(result.stderr, b'')
                 self.assertEqual(set(json.loads(result.stdout)), {'refused'})
                 self.assertNotIn(b'SYNTHETIC', result.stdout)
+
+    def test_certificate_hosts_require_json_strings(self):
+        for host in [True, False, 1, 2130706433]:
+            plan = {'services': [], 'certificates': [{'id': 'cert', 'host': host,
+                                                     'port': 443, 'server_name': 'example.invalid'}]}
+            with self.subTest(host_type=type(host).__name__), self.assertRaises(collector.Refusal):
+                collector.collect(plan)

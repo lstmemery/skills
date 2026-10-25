@@ -79,6 +79,8 @@ def collect(plan):
                 if type(request['unit']) is not str or not re.fullmatch(r'[a-zA-Z0-9_.@-]{1,120}\.service', request['unit']):
                     raise Refusal('request-refused')
             else:
+                if type(request['host']) is not str:
+                    raise Refusal('request-refused')
                 try:
                     ipaddress.ip_address(request['host'])
                 except (ValueError, TypeError):
