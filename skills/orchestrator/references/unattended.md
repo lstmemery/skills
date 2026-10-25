@@ -180,3 +180,38 @@ commands, one-line reply). Build it from the ledger, not from worker prose:
    doc stated one item's status wrongly (F9). Also scan the compiled doc for
    secrets and account numbers. Upload only after every item matches and the
    scan is clean.
+
+## Verify behavior of human-run procedures
+
+For executable procedures delivered for a later human run, syntax and lint
+success do not establish readiness. Retain a separate behavioral review before
+presenting the procedure as ready. Exercise, with synthetic credentials and
+mocked effects, the current installed configuration shape, environment/secret
+activation, no-op or already-repaired path, partial failure, rollback, and final
+revocation ordering where applicable. A read-only selected-field probe can
+establish the installed shape without executing the procedure.
+
+Retain this matrix with the candidate hash and review record. Mark inapplicable
+rows with a reason; a missing applicable case leaves readiness unverified.
+
+| Case | Evidence to retain |
+| --- | --- |
+| Installed representation | Selected fields or source showing literal, environment, or file-backed values |
+| Activation | Mock that distinguishes persistence from reload/restart and confirms the active value |
+| Already repaired | Existing working state is retained without forced replacement |
+| Partial failure | Failed write/activation/check preserves a recoverable state and reports failure |
+| Rollback | Synthetic failure restores the prior configuration and activation state |
+| Revocation order | Old credentials remain available until the replacement's operation is verified |
+
+Give the verifier the candidate bytes and acceptance claims, require it to
+reopen the cited implementation or live selected fields, and keep its findings
+separate from the author's report. Test both positive and negative cases.
+Record exactly what remains future human execution; a mock passing does not
+prove credential rotation, notification arrival, or a future scheduled run.
+After a correction, identify the corrected artifact by absolute path and hash
+and remove superseded copies from the decision document's runnable commands.
+
+Record verifier yield as concrete confirmed defects and independent claims
+checked, alongside unknowns and duplicated work. Do not infer a general defect
+rate from one batch. Preserve checks that expose deployed behavior, such as an
+actual encoder operation, alongside HTTP and systemd health checks.

@@ -174,3 +174,22 @@ checkpoint after each material transition; bounded observation of launches and
 handoffs. **Recovery:** reconcile durable state with live identities before any
 retry; unknown ownership stops mutations. Test the handoff on the actual harness
 before relying on unattended renewal.
+
+## Evidence for quota and cost accounting
+
+For state-dependent acceptance checks, record the observed OS/package manager
+and endpoint/observer assumptions when they determine which check is valid.
+
+Launcher telemetry and the coordinator ledger have different owners. Reconcile
+external quota observations and continuations against the exact task/attempt
+before using telemetry for retrospective cost claims. Record disagreements as
+unknowns with both sources; a zero continuation count cannot negate a documented
+manual continuation. Workers must not repair launcher-owned telemetry.
+
+A submission whose delivery is unproven must keep its actual submission time
+unknown. Preserve separate launch-request, submission-confirmed, and first
+activity observations when the helper gains those fields; never invent a start
+time from a successful receipt. Null started_at values exclude reliable
+elapsed-work calculations. Report observed job counts, blocked attempts,
+artifact sizes, and timestamped waits separately from token or billing costs,
+which remain unknown without provider usage records.
