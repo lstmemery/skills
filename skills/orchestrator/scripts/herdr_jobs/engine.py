@@ -9,7 +9,7 @@ import uuid
 from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
                       ensure_local_lane_admitted, ensure_task_admitted, integer, load_json, now,
-                      parse_json, read_regular, save,
+                      parse_json, read_regular, save, validate_receipt,
                       jail_context_path, protected_paths_record, text, version)
 from .retry import prepare_pi_run_profile
 from .local_lane import local_lane_instruction
@@ -965,12 +965,8 @@ class Engine:
     def collect(self, job):
         try:
             raw = bounded_file(job["host_output"], "receipt.json", 262144)
-            receipt = fields(parse_json(raw), ["schema_version", "request_id", "job_id", "attempt_id",
-                             "outcome", "artifacts", "unresolved"], label="receipt")
-            version(receipt["schema_version"])
             expected = (self.state["request"]["request_id"], job["spec"]["job_id"], job["attempt_id"])
-            if (receipt["request_id"], receipt["job_id"], receipt["attempt_id"]) != expected:
-                raise JobError("conflict", "receipt belongs to a different request/job/attempt")
+            receipt, _ = validate_receipt(raw, expected)
             if receipt["outcome"] not in ("complete", "partial", "blocked", "failed"):
                 raise JobError("invalid_input", "invalid receipt outcome")
             if not isinstance(receipt["unresolved"], list) or not all(isinstance(item, str) for item in receipt["unresolved"]):
@@ -991,7 +987,7 @@ class Engine:
             if bounded_file(job["host_output"], "receipt.json", 262144) != raw:
                 raise JobError("conflict", "receipt changed during collection")
             hashes = [{"source": path, "sha256": digest(data)} for path, data in payloads]
-            revision = digest(raw + encoded(hashes))
+            _, revision = validate_receipt(raw, expected, hashes)
             destination = self.root / "collected" / job["spec"]["job_id"] / revision
             copied = []
             for index, (path, data) in enumerate(payloads):
