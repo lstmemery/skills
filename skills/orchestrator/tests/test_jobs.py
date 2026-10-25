@@ -22,7 +22,7 @@ from herdr_jobs.cli import preview_runtime_argv
 from herdr_jobs.admission import AdmissionStore
 from herdr_jobs.store import CoordinatorCheckpointStore
 from support import isolate_admission_state
-from herdr_jobs.records import JobError, digest, encoded
+from herdr_jobs.records import JobError, digest, encoded, prepare
 
 
 class JobsTest(unittest.TestCase):
@@ -219,6 +219,9 @@ class JobsTest(unittest.TestCase):
 
     def test_preflight_rejects_output_destinations_before_launch(self):
         for task, destination in (
+                ("Place the report at /tmp/review.md.", "/tmp/review.md"),
+                ("Write report.md in ./reports/.", "./reports/"),
+                ("Do not write report.md in cwd. Write report.md in /tmp/elsewhere.", "/tmp/elsewhere"),
                 ("Save the report under ./out.", "./out"),
                 ("Write result.md to ../out.", "../out"),
                 ("Place the output in reports/review.md.", "reports/review.md"),
@@ -257,6 +260,40 @@ class JobsTest(unittest.TestCase):
                 self.assertEqual((code, result["batch_state"]), (0, "preview"))
                 self.assertFalse(self.run.exists())
                 self.assertFalse((self.root / "events.json").exists())
+
+    def test_preflight_accepts_negated_conflicting_destination(self):
+        self.task.write_text("Do not write report.md in cwd. Write it in the assigned output directory.")
+
+        code, result = self.call("run", real=True, preview=True)
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["batch_state"], "preview")
+        self.assertFalse(self.run.exists())
+        self.assertFalse((self.root / "events.json").exists())
+
+    def test_preflight_rejects_plural_editable_paths_before_launch(self):
+        self.task.write_text("Editable paths: /tmp/elsewhere")
+
+        code, result = self.call("run", preview=True)
+
+        self.assertEqual(code, 2, result)
+        self.assertEqual(result["error"], "invalid_input")
+        self.assertEqual(result["message"],
+                         f"job0: task file {self.task} declares conflicting editable directory: '/tmp/elsewhere'")
+        self.assertFalse(self.run.exists())
+        self.assertFalse((self.root / "events.json").exists())
+
+    def test_preflight_rejects_markdown_output_directory_before_launch(self):
+        self.task.write_text("**Output directory:** /tmp/elsewhere")
+
+        code, result = self.call("run", preview=True)
+
+        self.assertEqual(code, 2, result)
+        self.assertEqual(result["error"], "invalid_input")
+        self.assertEqual(result["message"],
+                         f"job0: task file {self.task} declares conflicting output directory: '/tmp/elsewhere'")
+        self.assertFalse(self.run.exists())
+        self.assertFalse((self.root / "events.json").exists())
 
     def test_claude_preview_exposes_model_and_effort_arguments(self):
         job = {"route": {"runtime": "claude-code"}, "model": "claude-opus-5-5",
@@ -504,7 +541,6 @@ class JobsTest(unittest.TestCase):
         self.assertFalse((self.root / "events.json").exists())
 
     def test_prompt_uses_same_canonical_output_directory_in_brief_and_collection_contract(self):
-        from herdr_jobs.records import prepare
         request = prepare(self.manifest, self.policy)
         engine = Engine(self.run, None, None)
         engine.state = {"request": request}

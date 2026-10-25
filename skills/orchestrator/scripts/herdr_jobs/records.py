@@ -283,12 +283,14 @@ def paths_overlap(candidate, protected, base=None):
 def validate_task_output_paths(task, job_id, task_path):
     """Reject task text that directs editable work or reports elsewhere."""
     declarations = (
-        ("output directory", re.compile(r"(?im)^\s*(?:output directory|output dir)\s*:\s*(.+?)\s*$")),
-        ("editable directory", re.compile(r"(?im)^\s*(?:editable directory|editable path)\s*:\s*(.+?)\s*$")),
+        ("output directory", re.compile(
+            r"(?im)^\s*(?P<bold>\*\*|)(?:output directory|output dir)\s*:(?P=bold)\s*(?P<value>.+?)\s*$")),
+        ("editable directory", re.compile(
+            r"(?im)^\s*(?:editable directory|editable paths?)\s*:\s*(?P<value>.+?)\s*$")),
     )
     for label, pattern in declarations:
         for match in pattern.finditer(task):
-            value = match.group(1).strip().strip("`\"'")
+            value = match.group("value").strip().strip("`\"'")
             if value and value not in ("the output directory", "the assigned output directory"):
                 raise JobError("invalid_input", f"{job_id}: task file {task_path} declares conflicting {label}: {value!r}")
     path_prefix = r"(?:[~/]|\.\.?/|[\w.-]+/)"
@@ -302,6 +304,8 @@ def validate_task_output_paths(task, job_id, task_path):
         rf"(?P<bare>cwd|working directory|current directory|{path_prefix}[^\s,;]+|{filename}))"
     )
     for match in prose_path.finditer(task):
+        if re.search(r"\bdo\s+not\s+$", task[:match.start()], re.IGNORECASE):
+            continue
         value = match.group("quoted")
         if value is None:
             value = match.group("bare").rstrip(".")
