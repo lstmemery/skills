@@ -1,0 +1,20 @@
+{
+  "standards": [
+    {
+      "id": "S1",
+      "disposition": "pending",
+      "confidence": "high",
+      "evidence": "Synthetic captured code repeats validation at two boundaries.",
+      "unresolved_assumption": "No failing behavior established; coordinator must adjudicate the maintenance suggestion."
+    }
+  ],
+  "spec": [
+    {
+      "id": "P1",
+      "disposition": "pending",
+      "confidence": "high",
+      "evidence": "Synthetic captured code repeats validation at two boundaries.",
+      "unresolved_assumption": "No failing behavior established; coordinator must adjudicate the maintenance suggestion."
+    }
+  ]
+}

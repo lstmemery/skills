@@ -127,6 +127,69 @@ digests, collection provenance, identities and panes. Managed input is explicit;
 legacy files in `EVIDENCE_DIR` are not combined with it. No job state, worker
 output, or collected evidence is rewritten.
 
+### Prepare older managed-job outputs
+
+When the author job collected only a report (no `worker_result`), or reviewers
+left loose output directories instead of receipt-pinned review artifacts, use
+the staging helper. Prefer `--managed-run` above for jobs that already satisfy
+that contract; this fallback reads mutable local review output and does not
+claim receipt-verified provenance for it.
+
+```sh
+python3 scripts/worker-records.py prepare-preflight \
+  --managed-run AUTHOR_RUN --job-id AUTHOR_JOB --task-id CODING_TASK \
+  --repo REPO --target TARGET_BRANCH --candidate BRANCH=SHA \
+  --review-output INITIAL_REVIEW_OUTPUT \
+  --review-output DELTA_REVIEW_OUTPUT \
+  --output NEW_BATCH_DIR
+```
+
+`AUTHOR_RUN` contains managed `state.json`; select exactly one author job with
+`--job-id`. It must be settled with a complete, unresolved-free collection.
+`--task-id` is the coding task ID in every review sidecar, which may differ
+from the managed job ID. Repeat `--review-output` in round order; each path is
+either a review directory containing `review-evidence.json`, `review.md` and
+`capture/`, or a job output directory containing those under `review/`.
+The helper names them `review`, `review-r1`, etc. It supports delta captures
+and full-branch re-reviews, requires ordered coverage through the candidate,
+and verifies each completed capture's payload. A bare commit SHA also works
+as `--candidate`; prefer `BRANCH=SHA` to detect a moved branch.
+
+The helper creates a **new** batch with `workers.txt`, a minimal gate-facing
+`result.json` candidate block, review bundles, regenerated `done.json` counts,
+`review-response.md`, and `assembly.json` source/state provenance. This
+`result.json` is assembly metadata, not a fabricated full worker report or a
+substitute for worker-result validation. Author identity/pane come from managed
+state; reviewer identities come from the supplied sidecars. Sidecar task and
+author must match, and a reviewer cannot be the author. The final gate retains
+its independent-review checks. `axis_reviewers` is preserved. Existing outputs
+are refused, source evidence is unchanged, links are refused, and failures do
+not publish a partial batch. Unrelated probes and report files are excluded.
+
+A successful command prints `outcome: prepared`, which is **not** integration
+readiness. With findings, the response contains commented finding references
+and leaves all dispositions untouched. The coordinator writes the explicit
+`review/FINDING` and `review-rN/FINDING` decisions using the response grammar
+below, then reruns preparation into another new directory with
+`--review-response COORDINATOR_RESPONSE.md`. The helper copies that response,
+applies only its recorded decisions through the shared disposition validator,
+and recalculates initial counts or delta `new_findings`/`unfixed` counts.
+Missing, unknown or malformed decisions fail preparation. Without that flag,
+no dispositions or rationale are inferred, even if the sidecar is already
+terminal. Pending findings continue to block the gate.
+
+Finally run the existing gate against the generated batch:
+
+```sh
+python3 scripts/integration-preflight.py \
+  --repo REPO --target TARGET_BRANCH --run-dir NEW_BATCH_DIR \
+  --candidate BRANCH=SHA
+```
+
+Only `outcome: ready` from this command establishes readiness. It still checks
+Markdown/sidecar agreement, terminal dispositions, counts, capture ancestry,
+and live target/candidate heads. No merge or disposition decision is automated.
+
 The preflight checks the worker result against the actual candidate commit and
 the candidate's merge base with the target branch. It requires a complete
 Standards and Spec review, an independent reviewer identity, current capture

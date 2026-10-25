@@ -9,6 +9,7 @@ import re
 import sys
 
 from . import records
+from . import preflight_batch
 from . import review_dispositions
 from . import jail_brief
 
@@ -585,6 +586,19 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    prepare_parser = commands.add_parser(
+        "prepare-preflight", help="stage legacy managed-job review outputs for integration preflight"
+    )
+    prepare_parser.add_argument("--managed-run", type=Path, required=True)
+    prepare_parser.add_argument("--job-id", required=True)
+    prepare_parser.add_argument("--task-id", required=True)
+    prepare_parser.add_argument("--repo", type=Path, required=True)
+    prepare_parser.add_argument("--target", default="main")
+    prepare_parser.add_argument("--candidate", required=True)
+    prepare_parser.add_argument("--review-output", type=Path, action="append", required=True)
+    prepare_parser.add_argument("--output", type=Path, required=True)
+    prepare_parser.add_argument("--review-response", type=Path)
+
     schema_parser = commands.add_parser(
         "schema", help="print the current worker result contract"
     )
@@ -642,6 +656,9 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "prepare-preflight":
+            print(json.dumps(preflight_batch.prepare(args), sort_keys=True))
+            return 0
         if args.command == "schema":
             print(result_schema_markdown(), end="")
             return 0
