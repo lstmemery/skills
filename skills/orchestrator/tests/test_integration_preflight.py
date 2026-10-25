@@ -1,10 +1,12 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +20,8 @@ CAPTURE_CLI = SKILL_DIR.parent / "code-review" / "scripts" / "capture.py"
 PREFLIGHT_SPEC = importlib.util.spec_from_file_location("integration_preflight", CLI)
 PREFLIGHT = importlib.util.module_from_spec(PREFLIGHT_SPEC)
 PREFLIGHT_SPEC.loader.exec_module(PREFLIGHT)
+from herdr_jobs.engine import Engine
+from herdr_jobs.records import save
 
 
 class IntegrationPreflightTests(unittest.TestCase):
@@ -175,6 +179,243 @@ class IntegrationPreflightTests(unittest.TestCase):
             *additional_rows,
         ]
         (self.run_dir / "workers.txt").write_text("\n".join(rows) + "\n")
+
+    def managed_fixture(self, *, standards_findings=None, bundle_capture=False,
+                        capture_transform=None):
+        """Collect actual job outputs, without assembling the preflight layout."""
+        self.write_review(schema_version=2, standards_findings=standards_findings)
+        evidence_path = self.task_dir / "review/review-evidence.json"
+        evidence = json.loads(evidence_path.read_text())
+        del evidence["author_identity"]
+        del evidence["reviewer_identity"]
+        evidence_path.write_text(json.dumps(evidence))
+        (self.task_dir / "review/done.json").unlink()
+        result = json.loads((self.task_dir / "result.json").read_text())
+        result.update(assignment_revision=1, summary="Candidate ready.",
+                      artifacts=[{"path": "result.md", "kind": "report"}],
+                      checks=[], unresolved=[], next_action="Review candidate.")
+        roots = []
+        jobs = []
+        for index, (job_id, writer) in enumerate((("coder", True), ("reviewer", False))):
+            root = self.root / ("managed-" + job_id)
+            engine = Engine(root, None, None)
+            request = {"request_id": "fixture-" + job_id}
+            spec = {"job_id": job_id, "writes_repository": writer,
+                    "route": {"mode": "agent", "runtime": "codex"}}
+            if writer:
+                spec["worker_result"] = {"task_id": "task-1", "assignment_revision": 1}
+            job = engine.new_job(spec, request, {"models": {}}, attempt_id=str(index + 1) * 32)
+            job.update(pane_id=f"w-fixture:p{index + 1}", settled=True)
+            output = Path(job["host_output"])
+            output.mkdir(parents=True)
+            if writer:
+                save(output / "result.json", result)
+                (output / "result.md").write_text("Candidate ready.\n")
+                shutil.copy2(self.task_dir / "review-response.md", output / "review-response.md")
+            else:
+                shutil.copytree(self.task_dir / "review", output / "review")
+                if bundle_capture:
+                    capture = output / "review/capture"
+                    if capture_transform is not None:
+                        capture_transform(capture)
+                    with tarfile.open(output / "review/capture.tar", "w") as archive:
+                        archive.add(capture, arcname="capture")
+                    shutil.rmtree(capture)
+            artifacts = sorted(str(path.relative_to(output)) for path in output.rglob("*") if path.is_file())
+            save(output / "receipt.json", {
+                "schema_version": 1, "request_id": request["request_id"], "job_id": job_id,
+                "attempt_id": job["attempt_id"], "outcome": "complete",
+                "artifacts": artifacts, "unresolved": [],
+            })
+            engine.state = {"schema_version": 1, "request": request, "jobs": [job]}
+            engine.collect(job)
+            self.assertIsNone(job["collection_error"])
+            save(root / "state.json", engine.state)
+            roots.append(root)
+            jobs.append(job)
+        shutil.rmtree(self.task_dir)
+        (self.run_dir / "workers.txt").unlink()
+        return roots, jobs
+
+    def test_managed_large_capture_passes_as_one_collected_bundle(self):
+        self.git("-C", str(self.repo), "switch", "orch/task-1")
+        for index in range(295):
+            (self.repo / f"module_{index}.py").write_text(f"VALUE = {index}\n")
+        self.git("-C", str(self.repo), "add", ".")
+        self.git("-C", str(self.repo), "commit", "-m", "representative repository capture")
+        self.head = self.git("-C", str(self.repo), "rev-parse", "HEAD")
+        self.git("-C", str(self.repo), "switch", "main")
+        self.write_result()
+        roots, jobs = self.managed_fixture(bundle_capture=True)
+        self.assertEqual(len(jobs[1]["collection"]["artifacts"]), 3)
+        # Preflight must depend only on immutable collected artifacts.
+        for job in jobs:
+            shutil.rmtree(job["host_output"])
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(Path(json.loads(result.stdout)["evidence"]).read_text())
+        snapshot = Path(report["managed_input_dir"])
+        captures = list(snapshot.glob("task-*/review/capture"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(sum(path.is_file() for path in captures[0].rglob("*")), 301)
+
+    def test_managed_bundle_payload_still_requires_manifest_verification(self):
+        roots, _ = self.managed_fixture(
+            bundle_capture=True,
+            capture_transform=lambda capture: (capture / "diff.patch").write_text("tampered\n"),
+        )
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_managed_bundle_missing_payload_is_refused(self):
+        roots, _ = self.managed_fixture(
+            bundle_capture=True,
+            capture_transform=lambda capture: (capture / "commits.txt").unlink(),
+        )
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("capture payload verification failed", result.stdout)
+
+    def test_managed_bundle_refuses_unsafe_and_duplicate_members(self):
+        roots, jobs = self.managed_fixture(bundle_capture=True)
+        bundle = Path(jobs[1]["host_output"]) / "review/capture.tar"
+        original = bundle.read_bytes()
+        cases = (
+            ("../escaped", tarfile.REGTYPE, "", b"bad", "unsafe member"),
+            ("/tmp/escaped", tarfile.REGTYPE, "", b"bad", "unsafe member"),
+            ("capture/../review.md", tarfile.REGTYPE, "", b"bad", "unsafe member"),
+            ("capture/blobs/" + "0" * 64, tarfile.SYMTYPE, "/tmp/escaped", b"", "unsafe member"),
+            ("capture/blobs/" + "0" * 64, tarfile.LNKTYPE, "capture/diff.patch", b"", "unsafe member"),
+            ("capture/blobs/" + "0" * 64, tarfile.FIFOTYPE, "", b"", "unsafe member"),
+            ("capture/manifest.json", tarfile.REGTYPE, "", b"{}", "repeats a path"),
+        )
+        for name, kind, link, data, diagnostic in cases:
+            with self.subTest(member=name, kind=kind):
+                bundle.write_bytes(original)
+                member = tarfile.TarInfo(name)
+                member.type, member.linkname, member.size = kind, link, len(data)
+                with tarfile.open(bundle, "a") as archive:
+                    archive.addfile(member, io.BytesIO(data))
+                engine = Engine(roots[1], None, None)
+                engine.state = json.loads((roots[1] / "state.json").read_text())
+                engine.collect(engine.state["jobs"][0])
+                self.assertIsNone(engine.state["jobs"][0]["collection_error"])
+                save(roots[1] / "state.json", engine.state)
+
+                result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(diagnostic, result.stderr)
+
+    def test_managed_coder_and_reviewer_pass_without_manual_assembly(self):
+        roots, jobs = self.managed_fixture()
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(Path(json.loads(result.stdout)["evidence"]).read_text())
+        review = report["candidates"][0]["reviews"][0]
+        self.assertEqual(review["author_identity"], jobs[0]["agent_name"])
+        self.assertEqual(review["reviewer_identity"], jobs[1]["agent_name"])
+        self.assertEqual([item["pane_id"] for item in report["managed_jobs"]],
+                         ["w-fixture:p1", "w-fixture:p2"])
+        self.assertFalse((self.run_dir / "workers.txt").exists())
+
+    def test_managed_evidence_refuses_a_tampered_candidate_head(self):
+        roots, _ = self.managed_fixture(bundle_capture=True)
+        self.git("-C", str(self.repo), "switch", "orch/task-1")
+        (self.repo / "README.md").write_text("Unreviewed change.\n")
+        self.git("-C", str(self.repo), "commit", "-am", "unreviewed")
+        self.git("-C", str(self.repo), "switch", "main")
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]),
+                              candidate=f"orch/task-1={self.head}")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("no longer points", result.stdout)
+
+        unpinned = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+        self.assertEqual(unpinned.returncode, 1, unpinned.stdout + unpinned.stderr)
+        self.assertIn("expected one worker result", unpinned.stdout)
+
+    def test_managed_collection_tampering_is_refused(self):
+        roots, jobs = self.managed_fixture()
+        artifact = Path(jobs[1]["collection"]["artifacts"][0]["path"])
+        artifact.write_bytes(artifact.read_bytes() + b"tampered")
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("managed artifact digest or size mismatch", result.stderr)
+
+    def test_managed_review_requires_a_settled_independent_worker(self):
+        roots, jobs = self.managed_fixture()
+        state_path = roots[1] / "state.json"
+        original = state_path.read_text()
+        for change, diagnostic in (
+            ({"settled": False}, "not settled"),
+            ({"pane_id": jobs[0]["pane_id"]}, "shares its pane"),
+            ({"agent_name": jobs[0]["agent_name"]}, "does not match its attempt"),
+        ):
+            with self.subTest(change=change):
+                state = json.loads(original)
+                state["jobs"][0].update(change)
+                save(state_path, state)
+                result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(diagnostic, result.stderr)
+
+    def test_managed_duplicate_coding_assignments_are_ambiguous(self):
+        roots, _ = self.managed_fixture()
+        state_path = roots[0] / "state.json"
+        state = json.loads(state_path.read_text())
+        state["jobs"].append(state["jobs"][0])
+        save(state_path, state)
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("multiple managed coding jobs", result.stderr)
+
+    def test_managed_review_preserves_the_disposition_gate(self):
+        finding = {"id": "S1", "disposition": "unresolved", "reason": "Awaiting decision.",
+                   "confidence": "high", "reproducer": "Run the failing focused check."}
+        roots, _ = self.managed_fixture(standards_findings=[finding])
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("no terminal disposition", result.stdout)
+
+    def test_managed_review_with_recorded_fixed_findings_passes(self):
+        finding = {"id": "S1", "disposition": "fixed", "reason": "Added the guard.",
+                   "confidence": "high", "reproducer": "Run the now passing focused check."}
+        roots, _ = self.managed_fixture(standards_findings=[finding])
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_managed_snapshot_refuses_injected_evidence_on_reuse(self):
+        roots, _ = self.managed_fixture()
+        args = ("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+        first = self.command(*args)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        report = json.loads(Path(json.loads(first.stdout)["evidence"]).read_text())
+        snapshot = Path(report["managed_input_dir"])
+        (snapshot / "injected-evidence.json").write_text("{}\n")
+
+        result = self.command(*args)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("managed evidence snapshot was modified", result.stderr)
 
     def add_roster_only_candidate(self):
         self.write_workers(["task-2 coder-2 w3:p1 codex test-model max working"])

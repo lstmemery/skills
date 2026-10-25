@@ -81,6 +81,14 @@ skill's `references/review.md`; when amending the fields — or to check the exa
 enforcement and backward-compatibility rules — read it and keep this paragraph
 aligned with it.
 
+When recording per-axis reviewer identities, use the optional top-level
+`axis_reviewers` object with exactly `standards` and `spec` string values, as
+specified in that same contract. Take identities from helper-returned agent
+records; omit the field if unavailable. This attribution does not replace the
+independent reviewer responsible for the bundle. For managed review jobs,
+follow the managed brief instructions there: the preflight adapter derives
+author/reviewer identities and panes from job state.
+
 For either axis, retain the complete finding list. If it fits under about 400
 words, return it whole. Otherwise save it under the active profile's output root
 and include its path in the returned result/report beside a summary of at most

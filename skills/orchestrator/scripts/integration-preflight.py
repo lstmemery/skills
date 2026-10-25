@@ -21,6 +21,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from herdr_jobs import review_evidence
+from herdr_jobs.managed_preflight import materialize_runs
 # Keep historical parser imports available to callers; the domain owns their rules.
 from herdr_jobs.review_evidence import (
     AXES,
@@ -116,6 +117,8 @@ def parse_args(argv=None):
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--target", required=True, help="local target branch")
     parser.add_argument("--run-dir", required=True, type=Path, help="batch run directory")
+    parser.add_argument("--managed-run", action="append", default=[], type=Path,
+                        help="managed job run to adapt from collected evidence (repeatable)")
     parser.add_argument(
         "--candidate",
         action="append",
@@ -561,13 +564,17 @@ def main(argv=None):
         if Path(top).resolve() != repo:
             raise PreflightError("--repo must name the git working tree root")
         target_head = resolve_commit(repo, target_ref)
-        workers_path = run_dir / "workers.txt"
+        input_dir = run_dir
+        managed_jobs = None
+        if args.managed_run:
+            input_dir, managed_jobs = materialize_runs(args.managed_run, run_dir)
+        workers_path = input_dir / "workers.txt"
         if len(set(args.candidate)) != len(args.candidate):
             raise PreflightError("candidate arguments must be unique")
         deferred = parse_deferred(args.defer)
-        discovered_tasks = discover_candidate_tasks(run_dir, workers_path)
+        discovered_tasks = discover_candidate_tasks(input_dir, workers_path)
         candidates = [
-            candidate_report(repo, run_dir, workers_path, target_head, spec)
+            candidate_report(repo, input_dir, workers_path, target_head, spec)
             for spec in args.candidate
         ]
         selected_task_ids = [
@@ -621,6 +628,8 @@ def main(argv=None):
             ],
             "batch_issues": batch_issues,
         }
+        if managed_jobs is not None:
+            report.update(managed_jobs=managed_jobs, managed_input_dir=str(input_dir))
         evidence_path = write_report(run_dir, report)
         output = {"outcome": outcome, "evidence": str(evidence_path)}
         if outcome == "blocked":

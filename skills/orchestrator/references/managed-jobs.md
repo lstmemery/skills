@@ -179,7 +179,21 @@ collects it and every artifact it names, and lets `finish` validate it before
 writing `disposition.json`. Jobs without `worker_result` keep the original
 receipt contract (`result.md` plus `receipt.json`) and remain valid with
 existing manifests and receipts. `finish` reports that worker-result
-validation was not requested for these receipt-only jobs. Effort overrides are
+validation was not requested for these receipt-only jobs.
+
+For integration evidence, enable `worker_result` on coding jobs and have review
+jobs collect their `review/` (or `review-rN/`) Markdown, sidecar and completed
+capture as a single uncompressed `capture.tar` artifact. This avoids consuming
+one receipt slot per capture file; the usual artifact size limits still apply.
+Run `integration-preflight.py --managed-run RUN_DIR` once per source
+run, with the usual `--repo`, `--target`, `--run-dir` evidence destination and
+`--candidate` arguments. The managed adapter generates the roster, derives
+author/reviewer identities and panes from helper state, and checks collected
+snapshots directly. Follow [the managed review brief contract](review.md) for
+sidecar task IDs, omitted identity fields, completion counts and dispositions;
+receipt-only coding jobs do not supply the required candidate record.
+
+Effort overrides are
 validated against each runtime's supported values and mapped to that runtime's
 native argument:
 

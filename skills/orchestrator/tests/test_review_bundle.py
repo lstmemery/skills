@@ -106,6 +106,34 @@ class ReviewBundleTests(unittest.TestCase):
                 record["finding_count"] = 99
                 self.assertEqual(bundle.summary().to_record(), expected)
 
+    def test_per_axis_reviewer_attribution_is_retained(self):
+        self.bundle_inputs("empty")
+        self.evidence["axis_reviewers"] = {"standards": "/root/standards", "spec": "/root/spec"}
+        self.save_records()
+
+        summary = self.read().summary()
+        record = summary.to_record()
+
+        self.assertEqual(record["axis_reviewers"],
+                         {"standards": "/root/standards", "spec": "/root/spec"})
+        record["axis_reviewers"]["spec"] = "changed"
+        self.assertEqual(summary.to_record()["axis_reviewers"]["spec"], "/root/spec")
+
+    def test_per_axis_reviewer_attribution_cannot_be_malformed_or_name_the_author(self):
+        for reviewers in (None, {}, {"standards": "reviewer-1"},
+                          {"standards": "reviewer-1", "spec": " "},
+                          {"standards": "reviewer-1", "spec": 1},
+                          {"standards": "coder-1", "spec": "reviewer-1"},
+                          {"standards": "reviewer-1", "spec": "reviewer-1", "extra": "other"}):
+            with self.subTest(reviewers=reviewers):
+                self.bundle_inputs("empty")
+                self.evidence["axis_reviewers"] = reviewers
+                self.save_records()
+                with self.assertRaisesRegex(domain.ReviewEvidenceError, "axis.review"):
+                    self.read()
+                with self.assertRaisesRegex(domain.ReviewEvidenceError, "axis.review"):
+                    domain.read_disposition_evidence(self.directory, filesystem=self.files)
+
     def test_bundle_rejects_golden_invalid_evidence(self):
         for invalid in golden("review")["invalid"]:
             with self.subTest(case=invalid["name"]):
