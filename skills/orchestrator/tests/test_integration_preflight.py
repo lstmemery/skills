@@ -287,6 +287,240 @@ class IntegrationPreflightTests(unittest.TestCase):
                 self.assertEqual((source / relative).read_bytes(), data)
                 self.assertEqual((batch / "review" / relative).read_bytes(), data)
 
+    def assembly_state(self):
+        managed = self.root / "managed-assembly"
+        managed.mkdir(exist_ok=True)
+        if not (managed / "state.json").exists():
+            state = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/author-state.json").read_text())
+            state["jobs"][0].update(host_output=str(self.root / "author-output"))
+            state["jobs"].append({
+                "spec": {"job_id": "reviewer", "cwd": str(self.root),
+                         "editable_paths": ["run/task-1"]},
+                "agent_name": "reviewer-1", "pane_id": "w1:p2",
+                "host_output": str(self.root / "unused-canonical-output"),
+            })
+            (managed / "state.json").write_text(json.dumps(state))
+        return managed / "state.json"
+
+    def prepare_jobs(self, *, response=None, aliases=(), reviews=("reviewer",)):
+        managed = self.assembly_state().parent
+        command = [sys.executable, str(SKILL_DIR / "scripts/worker-records.py"),
+                   "prepare-preflight", "--managed-run", str(managed),
+                   "--job-id", "author", "--task-id", "task-1", "--repo", str(self.repo),
+                   "--candidate", f"orch/task-1={self.head}", "--output", str(self.root / "batch")]
+        for job in reviews:
+            command.extend(["--review-job", job])
+        for job in aliases:
+            command.extend(["--author-alias-job", job])
+        if response:
+            command.extend(["--review-response", str(response)])
+        return subprocess.run(command, capture_output=True, text=True, timeout=20)
+
+    def test_prepare_selects_review_job_and_normalizes_v2_envelope(self):
+        self.write_review(schema_version=2)
+        source = self.task_dir / "review/review-evidence.json"
+        evidence = json.loads(source.read_text())
+        evidence["axis_reviewers"] = {"standards": "/root/standards", "spec": "/root/spec"}
+        source.write_text(json.dumps(evidence))
+        before = source.read_bytes()
+        (self.task_dir / "report.md").write_text("Verdict: approve.\n")
+
+        prepared = self.prepare_jobs()
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        task = self.root / "batch/task-1"
+        assembled = json.loads((task / "review/review-evidence.json").read_text())
+        self.assertEqual(set(assembled), {"schema_version", "task_id", "author_identity",
+                                         "reviewer_identity", "capture_id", "axes"})
+        self.assertEqual(assembled["schema_version"], 2)
+        self.assertEqual((self.root / "batch/workers.txt").read_text().splitlines(),
+                         ["task-1 coder-1 w1:p1", "task-1 reviewer-1 w1:p2"])
+        self.assertEqual(json.loads((task / "review/done.json").read_text())["verdict"], "approve")
+        self.assertEqual(source.read_bytes(), before)
+        gate = self.batch_gate()
+        self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+
+    def test_prepare_normalizes_explicit_fix_author_and_unique_truncated_reviewer(self):
+        self.write_review(schema_version=2, head=self.base)
+        self.write_review("review-r1", schema_version=2)
+        (self.task_dir / "report.md").write_text("Verdict: approve.\n")
+        state_path = self.assembly_state()
+        state = json.loads(state_path.read_text())
+        state["jobs"][1]["spec"]["editable_paths"] = ["first-review"]
+        shutil.move(self.task_dir / "review", self.root / "first-review")
+        state["jobs"].extend([
+            {"spec": {"job_id": "fixer"}, "agent_name": "fix-author", "pane_id": "w1:p4"},
+            {"spec": {"job_id": "delta", "cwd": str(self.root),
+                      "editable_paths": ["run/task-1/review-r1"]},
+             "agent_name": "c9-1234567890abcdef12345678", "pane_id": "w1:p3"},
+        ])
+        state_path.write_text(json.dumps(state))
+        source = self.task_dir / "review-r1/review-evidence.json"
+        evidence = json.loads(source.read_text())
+        evidence.update(author_identity="fix-author", reviewer_identity="c9-1234567890abcdef1234567")
+        source.write_text(json.dumps(evidence))
+        (self.root / "first-review/done.json").write_text(json.dumps({"verdict": "approve"}))
+        (self.task_dir / "review-r1/done.json").write_text(json.dumps({"verdict": "approve"}))
+        before = source.read_bytes()
+
+        prepared = self.prepare_jobs(aliases=("fixer",), reviews=("reviewer", "delta"))
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        assembled = json.loads((self.root / "batch/task-1/review-r1/review-evidence.json").read_text())
+        self.assertEqual(assembled["author_identity"], "coder-1")
+        self.assertEqual(assembled["reviewer_identity"], "c9-1234567890abcdef12345678")
+        self.assertEqual(source.read_bytes(), before)
+        gate = self.batch_gate()
+        self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+
+    def test_prepare_refuses_two_review_jobs_resolving_to_same_source(self):
+        self.write_review(schema_version=2)
+        (self.task_dir / "report.md").write_text("Verdict: approve.\n")
+        state_path = self.assembly_state()
+        state = json.loads(state_path.read_text())
+        duplicate = json.loads(json.dumps(state["jobs"][1]))
+        duplicate["spec"]["job_id"] = "duplicate"
+        state["jobs"].append(duplicate)
+        state_path.write_text(json.dumps(state))
+
+        prepared = self.prepare_jobs(reviews=("reviewer", "duplicate"))
+
+        self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+        self.assertIn("same review source", prepared.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_job_assembly_refuses_ambiguous_or_conflicting_inputs_without_publication(self):
+        self.write_review(schema_version=2)
+        state_path = self.assembly_state()
+        original_state = state_path.read_text()
+        evidence_path = self.task_dir / "review/review-evidence.json"
+        original_evidence = evidence_path.read_text()
+        done_path = self.task_dir / "review/done.json"
+        original_done = done_path.read_text()
+        report = self.task_dir / "report.md"
+        cases = ("unknown-job", "duplicate-job", "duplicate-state-job", "multiple-sources",
+                 "missing-verdict", "conflicting-verdict", "undeclared-fix-author",
+                 "ambiguous-identity", "self-review", "shared-pane", "old-schema", "wrong-capture")
+        for case in cases:
+            with self.subTest(case=case):
+                state = json.loads(original_state)
+                evidence = json.loads(original_evidence)
+                done = json.loads(original_done)
+                report.write_text("Verdict: approve.\n")
+                reviews = ("reviewer",)
+                extra = self.root / "unused-canonical-output"
+                if case == "unknown-job":
+                    reviews = ("unknown",)
+                elif case == "duplicate-job":
+                    reviews = ("reviewer", "reviewer")
+                elif case == "duplicate-state-job":
+                    state["jobs"].append(state["jobs"][1])
+                elif case == "multiple-sources":
+                    shutil.copytree(self.task_dir / "review", extra)
+                elif case == "missing-verdict":
+                    report.unlink()
+                elif case == "conflicting-verdict":
+                    done["verdict"] = "changes-requested"
+                elif case == "undeclared-fix-author":
+                    state["jobs"].append({"spec": {"job_id": "fixer"}, "agent_name": "fix-author"})
+                    evidence["author_identity"] = "fix-author"
+                elif case == "ambiguous-identity":
+                    state["jobs"][1]["agent_name"] = "c9-1234567890abcdef12345678"
+                    state["jobs"].append({"spec": {"job_id": "other"},
+                                          "agent_name": "c9-1234567890abcdef12345679"})
+                    evidence["reviewer_identity"] = "c9-1234567890abcdef1234567"
+                elif case == "self-review":
+                    state["jobs"][1]["agent_name"] = "coder-1"
+                elif case == "shared-pane":
+                    state["jobs"][1]["pane_id"] = "w1:p1"
+                elif case == "old-schema":
+                    evidence["schema_version"] = 1
+                elif case == "wrong-capture":
+                    done["capture_id"] = "wrong"
+                state_path.write_text(json.dumps(state))
+                evidence_path.write_text(json.dumps(evidence))
+                done_path.write_text(json.dumps(done))
+
+                prepared = self.prepare_jobs(reviews=reviews)
+
+                self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+                self.assertFalse((self.root / "batch").exists())
+                self.assertNotIn("Traceback", prepared.stderr)
+                if extra.exists():
+                    shutil.rmtree(extra)
+
+    def test_job_assembly_syncs_only_explicit_response_and_preserves_pending_source(self):
+        findings = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/round-findings.json").read_text())
+        self.write_review(schema_version=2, standards_findings=findings["standards"])
+        (self.task_dir / "report.md").write_text("Verdict: changes-requested.\n")
+        response = self.root / "response.md"
+        response.write_text("- `review/S1`: fixed — Guard restored and verified.\n")
+        source = self.task_dir / "review/review-evidence.json"
+        original = source.read_bytes()
+
+        prepared = self.prepare_jobs(response=response)
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        task = self.root / "batch/task-1"
+        finding = json.loads((task / "review/review-evidence.json").read_text())["axes"]["standards"]["findings"][0]
+        self.assertEqual(finding["disposition"], "fixed")
+        self.assertEqual(finding["reason"], "Guard restored and verified.")
+        self.assertEqual((task / "review-response.md").read_bytes(), response.read_bytes())
+        self.assertTrue((task / "review/review-evidence.json.pre-disposition-sync").exists())
+        self.assertEqual(source.read_bytes(), original)
+        gate = self.batch_gate()
+        self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+
+    def test_job_assembly_refuses_missing_unknown_or_malformed_dispositions(self):
+        findings = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/round-findings.json").read_text())
+        self.write_review(schema_version=2, standards_findings=findings["standards"])
+        (self.task_dir / "report.md").write_text("Verdict: changes-requested.\n")
+        response = self.root / "response.md"
+        for text in ("", "- `review/unknown`: fixed — Unknown.\n", "- `review/S1`: fixed - Malformed.\n"):
+            with self.subTest(response=text):
+                response.write_text(text)
+                prepared = self.prepare_jobs(response=response)
+                self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+                self.assertFalse((self.root / "batch").exists())
+
+    def test_job_assembly_requires_response_when_review_has_findings(self):
+        findings = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/round-findings.json").read_text())
+        self.write_review(schema_version=2, standards_findings=findings["standards"])
+        (self.task_dir / "report.md").write_text("Verdict: changes-requested.\n")
+
+        prepared = self.prepare_jobs()
+
+        self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+        self.assertIn("missing disposition", prepared.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_job_assembly_refuses_reviewer_who_is_an_explicit_fix_author(self):
+        self.write_review(schema_version=2)
+        (self.task_dir / "report.md").write_text("Verdict: approve.\n")
+        source = self.task_dir / "review/review-evidence.json"
+        evidence = json.loads(source.read_text())
+        evidence["author_identity"] = "reviewer-1"
+        source.write_text(json.dumps(evidence))
+
+        prepared = self.prepare_jobs(aliases=("reviewer",))
+
+        self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+        self.assertIn("author", prepared.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_prepare_preserves_explicit_reviewer_verdict_in_done(self):
+        self.write_review()
+        source = self.task_dir / "review/done.json"
+        done = json.loads(source.read_text())
+        done["verdict"] = "approve"
+        source.write_text(json.dumps(done))
+
+        prepared = self.prepare_batch(self.task_dir)
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        assembled = json.loads((self.root / "batch/task-1/review/done.json").read_text())
+        self.assertEqual(assembled.get("verdict"), "approve")
+
     def test_prepare_orders_delta_rounds_and_leaves_dispositions_to_coordinator(self):
         findings = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/round-findings.json").read_text())
         initial = self.head

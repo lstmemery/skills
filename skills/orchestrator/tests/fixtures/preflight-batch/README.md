@@ -8,6 +8,12 @@ Synthetic, credential-free records model the two coordinator assemblies:
   directories, legacy initial-round done keys in the delta output, version-2
   findings and coordinator-owned dispositions.
 
+Job-ID assembly tests also model `integration-d9/ASSEMBLY.md` (an explicit fix
+author alias, a uniquely shortened reviewer identity, a full review followed by a
+delta, and synchronized dispositions) and `integration-g3/ASSEMBLY.md` (extra
+top-level sidecar fields and an explicit verdict available only in the report).
+They exercise ambiguity refusals without copying historical identities or paths.
+
 `author-state.json` contains only the managed-state fields used by this staging
 boundary. `round-findings.json` leaves decisions pending. Integration tests
 create a real Git history and capture payloads at runtime, so review-chain and

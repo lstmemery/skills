@@ -144,6 +144,63 @@ python3 scripts/worker-records.py prepare-preflight \
   --output NEW_BATCH_DIR
 ```
 
+For a single managed run, select reviewers by job ID instead of looking up
+output directories and repairing sidecars by hand:
+
+```sh
+python3 scripts/worker-records.py prepare-preflight \
+  --managed-run MANAGED_RUN --job-id AUTHOR_JOB --task-id CODING_TASK \
+  --repo REPO --target TARGET_BRANCH --candidate BRANCH=SHA \
+  --review-job INITIAL_REVIEW_JOB --review-job DELTA_REVIEW_JOB \
+  --review-response COORDINATOR_RESPONSE.md --output NEW_BATCH_DIR
+```
+
+Repeat `--review-job` in review order; it cannot be combined with
+`--review-output`. Each job ID must resolve exactly once in managed state.
+The helper looks only in that job's `host_output` and declared `editable_paths`
+(relative paths use the job's `cwd`), directly or under `review/` or `review-r*/`.
+Exactly one sidecar directory must exist per job; multiple matching directories,
+duplicate job IDs and two jobs resolving to one directory are refused. Loose
+review outputs need not have been collected, so this remains the mutable-local
+fallback, without receipt-verified provenance. The author's existing settled,
+complete collection requirement still applies.
+
+This mode requires v2 evidence and writes exactly `schema_version`, `task_id`,
+`author_identity`, `reviewer_identity`, `capture_id`, and `axes`. Top-level
+extensions, including `axis_reviewers`, are omitted from the normalized copy;
+finding evidence is retained and validated. Missing author/reviewer identities
+come from managed state. A shortened identity is expanded only when it has at
+least 16 characters and uniquely prefixes a known managed identity. Other
+identity disagreements are refused. If a delta sidecar names a known fix author
+instead of the task author, explicitly add `--author-alias-job FIX_AUTHOR_JOB`;
+repeat for additional fix authors. These aliases authorize only that identity
+normalization. Reviewers must have distinct identities and panes from the task
+author and every declared fix author. The assembly provenance records source
+identities and alias job IDs.
+
+Every generated `done.json` includes task ID, capture ID, regenerated round
+counts, and the reviewer's explicit verdict. The verdict must appear in the
+source `done.json`, or as a standalone `Verdict: approve.` (also
+`approve-with-nits` or `changes-requested`) line in `review.md` or the output's
+`report.md`. Missing or conflicting verdicts, and supplied task/capture IDs that
+disagree with the sidecar, are refused. Verdicts retain the reviewer's judgment
+even after findings are fixed.
+
+The job-ID mode always runs the same `sync-dispositions` implementation as
+`worker-records.py sync-dispositions` before publishing. If any review has
+findings, supply `--review-response` with every decision in this exact form:
+
+```md
+- `review/P1`: fixed — explanation
+```
+
+Use `rejected` for a rejection and `review-rN/ID` for later rounds.
+Missing, duplicate, unknown or malformed decisions refuse publication; no
+disposition is inferred. A clean review can omit the response
+file. Source files remain unchanged; the new batch retains disposition-sync
+backups and provenance. Run the gate below afterward: `prepared` still does not
+establish readiness.
+
 `AUTHOR_RUN` contains managed `state.json`; select exactly one author job with
 `--job-id`. It must be settled with a complete, unresolved-free collection.
 `--task-id` is the coding task ID in every review sidecar, which may differ
@@ -160,10 +217,11 @@ The helper creates a **new** batch with `workers.txt`, a minimal gate-facing
 `review-response.md`, and `assembly.json` source/state provenance. This
 `result.json` is assembly metadata, not a fabricated full worker report or a
 substitute for worker-result validation. Author identity/pane come from managed
-state; reviewer identities come from the supplied sidecars. Sidecar task and
+state; with `--review-output`, reviewer identities come from the supplied
+sidecars. Sidecar task and
 author must match, and a reviewer cannot be the author. The final gate retains
-its independent-review checks. `axis_reviewers` is preserved. Existing outputs
-are refused, source evidence is unchanged, links are refused, and failures do
+its independent-review checks. `--review-output` preserves `axis_reviewers`.
+Existing outputs are refused, source evidence is unchanged, links are refused, and failures do
 not publish a partial batch. Unrelated probes and report files are excluded.
 
 A successful command prints `outcome: prepared`, which is **not** integration
@@ -175,8 +233,9 @@ below, then reruns preparation into another new directory with
 applies only its recorded decisions through the shared disposition validator,
 and recalculates initial counts or delta `new_findings`/`unfixed` counts.
 Missing, unknown or malformed decisions fail preparation. Without that flag,
-no dispositions or rationale are inferred, even if the sidecar is already
-terminal. Pending findings continue to block the gate.
+the path-based mode infers no dispositions or rationale, even if the sidecar is
+already terminal. Pending findings continue to block the gate. The job-ID mode
+requires explicit decisions before publication, as described above.
 
 Finally run the existing gate against the generated batch:
 
