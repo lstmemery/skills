@@ -109,6 +109,10 @@ missing isolation; deliberately shared network; and pre-existing output secrets.
 Fault injection also substitutes host directories and host tmpfs at `/tmp`, a
 copied runtime, another output directory, and identical input bytes on a host
 mount; each must refuse before the worker writes its execution marker.
+This refusal covers accidental runtime substitution only: the in-container
+self-check cannot detect deliberate host-side tampering with the copied runtime
+that changes the verifier. Review finding R1 identifies the coordinator,
+root-owned runtime, and Bubblewrap as part of the trusted computing base.
 It exercises real Bubblewrap namespaces, real OpenSSL and the public CLI.
 
 The worker is an offline Python audit process. This pilot does not launch an AI
