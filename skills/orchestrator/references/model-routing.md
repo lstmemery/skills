@@ -6,6 +6,11 @@ verbatim from the user's `~/Documents/model-ladder.csv` on 2026-10-25. The
 [launch policy](../launch-policy.json) references that packaged file and defaults
 to level 1. Future CSV changes are reviewable repository changes; do not mutate
 the source CSV, maintain a second tuple table in prose, or edit runtime defaults.
+The source and packaged copies drifted before 2026-10-25. The
+`test_packaged_ladder_matches_documents_copy_when_present` regression test
+compares them when `/home/deadhand/Documents/model-ladder.csv` is available,
+and reports a unified diff on drift; it skips when that optional local copy is
+absent (such as in CI).
 OpenCode Go was retired on 2026-10-25 and is no longer a primary or fallback
 route in the packaged ladder.
 

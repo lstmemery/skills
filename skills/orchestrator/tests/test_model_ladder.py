@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import shutil
+import difflib
 from unittest.mock import patch
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -176,6 +177,17 @@ class LadderTest(unittest.TestCase):
         default = self.prepared()
         self.assertEqual(default["model_route"]["level"], 1)
         self.assertNotIn("0,", self.csv.read_text().splitlines())
+
+    def test_packaged_ladder_matches_documents_copy_when_present(self):
+        document_copy = Path("/home/deadhand/Documents/model-ladder.csv")
+        if not document_copy.exists():
+            self.skipTest(f"optional source copy not present: {document_copy}")
+        packaged = PACKAGE / "model-ladder.csv"
+        expected = packaged.read_text().splitlines(keepends=True)
+        actual = document_copy.read_text().splitlines(keepends=True)
+        diff = "".join(difflib.unified_diff(
+            expected, actual, fromfile=str(packaged), tofile=str(document_copy)))
+        self.assertEqual(actual, expected, f"model ladder copies have drifted:\n{diff}")
 
     def test_existing_admission_backoff_is_recorded_once_in_quota_telemetry(self):
         class ExistingBackoff:
