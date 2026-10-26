@@ -1935,7 +1935,7 @@ class JobsTest(unittest.TestCase):
     def test_four_blocked_workers_hold_slots(self):
         self.write_jobs(5)
         self.configure(jobs={f"job{index}": "blocked" for index in range(4)})
-        code, result = self.call()
+        code, result = self.call(wait_seconds=1)
         self.assertEqual((code, result["batch_state"]), (6, "unresolved_effect"))
         self.assertEqual(result["active_jobs"], 4)
         self.assertEqual(result["jobs"][4]["phase"], "pending")

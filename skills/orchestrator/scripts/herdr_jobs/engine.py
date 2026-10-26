@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 
+from .continuation import record_continuation_working
 from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
                       ensure_local_lane_admitted, ensure_task_admitted, integer, load_json, now,
@@ -535,6 +536,9 @@ class Engine:
                 self.telemetry_grade_tampering.add(spec["job_id"])
                 job["telemetry"]["coordinator_grade"] = "pending"
             validate_task_telemetry(job["telemetry"], expected_telemetry["route"])
+            # Sidecars commit before state.json; a crash must not restore a spent recovery budget.
+            if job["telemetry"]["continuation_count"] >= 1:
+                job["rate_limit_recoveries"] = 1
             if job["start_diagnostic"] is not None:
                 diagnostic = fields(job["start_diagnostic"], ["command", "exit_code", "stdout", "stderr"],
                                     label="managed start diagnostic")
@@ -605,7 +609,7 @@ class Engine:
             if job["pending_effect"] is not None:
                 fields(job["pending_effect"], ["action", "started_at"], label="pending effect")
                 if job["pending_effect"]["action"] not in (
-                        "split", "move", "retry_setup", "start", "prompt", "jail", "workspace_close"):
+                        "split", "move", "retry_setup", "start", "prompt", "jail", "workspace_close", "continue"):
                     raise JobError("conflict", "unknown pending effect")
             for flag in ("settled", "activity_seen"):
                 if type(job[flag]) is not bool:
@@ -1260,7 +1264,8 @@ class Engine:
             job["history"].append({"action": "submitted", "attempt_id": job["attempt_id"],
                                    "pane_id": job["pane_id"], "reconciled_by": "matching receipt",
                                    "observed_at": now()})
-        if pending and pending["action"] in ("prompt", "jail") and job["collection"] and not job["collection_error"]:
+        if (pending and pending["action"] in ("prompt", "jail", "continue")
+                and job["collection"] and not job["collection_error"]):
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["issue"] = None
@@ -1287,6 +1292,13 @@ class Engine:
             job["settled"] = False
             return
         lifecycle = observation["state"]
+        if job["pending_effect"] and job["pending_effect"]["action"] == "continue":
+            if lifecycle == "working" and observation.get("prompt_verified") is True:
+                record_continuation_working(job, observation)
+            else:
+                job["issue"] = "continuation delivery is unproven; inspect the owned pane before further action"
+                job["settled"] = False
+                return
         rate_limit = observation.get("rate_limit")
         if rate_limit is not None:
             self.note_rate_limit(job, rate_limit)
