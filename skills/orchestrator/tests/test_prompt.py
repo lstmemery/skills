@@ -13,6 +13,15 @@ class PromptTest(unittest.TestCase):
         self.assertFalse(has_active_turn_status("The prompt says Working here."))
         self.assertFalse(has_active_turn_status("Working\nFinished"))
 
+    def test_timed_status_does_not_match_old_transcript_content(self):
+        self.assertFalse(has_active_turn_status(
+            "• Working (48s • esc to interrupt)\nFinished"))
+
+    def test_timed_status_accepts_elapsed_time_and_the_codex_footer(self):
+        self.assertTrue(has_active_turn_status(
+            "• Working (1m 2s • esc to interrupt)\n› Ask Codex to do anything\nGPT-6.1-Sol"))
+        self.assertTrue(has_active_turn_status("• Working (48s • esc to int…"))
+
     def test_submits_once_and_waits_for_verified_working(self):
         events = []
         observations = iter([

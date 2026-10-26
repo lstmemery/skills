@@ -811,6 +811,21 @@ class TransportTest(unittest.TestCase):
                 self.assertFalse(any(call[:2] == ["herdr", "agent"] and call[2] == "send-keys" for call in fake.calls))
                 self.assertFalse(any(call[:3] == ["herdr", "agent", "get"] for call in fake.calls))
 
+    def test_codex_timeout_is_delivered_when_timed_activity_precedes_the_tui_footer(self):
+        snapshot = ("• Ran a command\n"
+                    "• Working (48s • esc to int…\n\n"
+                    "› Ask Codex to do anything\n\n"
+                    "  GPT-6.1-Sol high · ~/work…\n  ? for shortcuts  ⚠ 2 · f2\n")
+        fake = FakeHerdr(state="working", output=snapshot, start_code=1)
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("start", self.job, "Assigned work")
+
+        self.assertTrue(result["prompt_submitted"])
+        self.assertEqual(result["start_diagnostic"]["exit_code"], 1)
+        self.assertEqual(sum(call[:3] == ["herdr", "agent", "start"] for call in fake.calls), 1)
+        self.assertFalse(any(call[:3] == ["herdr", "agent", "prompt"] for call in fake.calls))
+
     def test_working_state_without_visible_working_text_does_not_prove_prompt_delivery(self):
         fake = FakeHerdr(state="working", output="Codex session is starting")
         self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)

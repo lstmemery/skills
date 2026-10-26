@@ -1297,12 +1297,14 @@ class Engine:
             job["activity_seen"] = True
         pending = job["pending_effect"]
         codex_start = self.is_codex_pending_start(job, pending)
-        if codex_start and observation.get("prompt_verified"):
+        if codex_start and (observation.get("prompt_verified") or lifecycle == "done"):
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
-                                   "reconciled_by": "observed Codex Working state", "observed_at": now()})
+                                   "reconciled_by": ("owned Codex completed turn" if lifecycle == "done"
+                                                     else "observed Codex Working state"),
+                                   "observed_at": now()})
         elif (pending and pending["action"] == "prompt" and observation.get("prompt_verified")
               and job["spec"]["route"]["mode"] == "agent"):
             job["phase"] = "submitted"
@@ -1347,7 +1349,8 @@ class Engine:
             job["issue"] = "worker activity is unknown"
         elif lifecycle == "exited" and observation["exit_code"] != 0:
             job["issue"] = f"jail launcher exited {observation['exit_code']}"
-        elif job["phase"] == "submitted" and not job["settled"]:
+        elif (job["phase"] == "submitted" and not job["settled"]
+              and not self.has_verified_working_activity(job)):
             if job["spec"]["route"]["mode"] == "agent":
                 job["issue"] = ("prompt delivery is unverified; a matching receipt or visible Working marker is needed; "
                                  "inspect the owned pane before retrying")

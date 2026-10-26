@@ -1779,6 +1779,80 @@ class JobsTest(unittest.TestCase):
         self.policy.write_text(json.dumps(policy))
         self.assertEqual(self.call()[0], 3)
 
+    def test_resume_reconciles_late_codex_activity_then_settles_without_replaying(self):
+        self.configure(jobs={"job0": "ambiguous"})
+        code, result = self.call()
+        self.assertEqual(code, 6)
+        self.assertEqual(result["jobs"][0]["pending_effect"]["action"], "start")
+
+        self.configure(jobs={"job0": "ambiguous"}, observation={
+            "state": "working", "identity_verified": True, "prompt_verified": True,
+        })
+        code, result = self.call("resume")
+        self.assertEqual((code, result["batch_state"]), (0, "active"))
+        job = result["jobs"][0]
+        self.assertEqual(job["phase"], "submitted")
+        self.assertIsNone(job["pending_effect"])
+        self.assertIsNone(job["issue"])
+        self.assertFalse(job["settled"])
+        self.assertTrue(job["admission_acquired"])
+
+        self.configure(jobs={"job0": "ambiguous"}, observation={
+            "state": "done", "identity_verified": True, "prompt_verified": False,
+        })
+        code, result = self.call("resume")
+        job = result["jobs"][0]
+        self.assertTrue(job["settled"])
+        self.assertFalse(job["admission_acquired"])
+        self.assertIsNone(job["collection"])
+        self.assertFalse(result["collection_complete"])
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
+    def test_resume_reconciles_codex_done_before_activity_was_observed(self):
+        self.configure(jobs={"job0": "ambiguous"})
+        self.assertEqual(self.call()[0], 6)
+        self.configure(jobs={"job0": "ambiguous"}, observation={
+            "state": "done", "identity_verified": True, "prompt_verified": False,
+        })
+
+        code, result = self.call("resume")
+
+        job = result["jobs"][0]
+        self.assertEqual(job["phase"], "submitted")
+        self.assertIsNone(job["pending_effect"])
+        self.assertIsNone(job["issue"])
+        self.assertTrue(job["settled"])
+        self.assertFalse(job["admission_acquired"])
+        self.assertEqual(result["active_jobs"], 0)
+        self.assertIsNone(job["collection"])
+        self.assertEqual((code, result["batch_state"]), (10, "partial"))
+        self.call("resume")
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
+    def test_unproven_codex_start_observations_never_replay_or_settle(self):
+        self.configure(jobs={"job0": "ambiguous"})
+        self.assertEqual(self.call()[0], 6)
+        for observation in (
+            {"state": "idle", "identity_verified": True},
+            {"state": "unknown", "identity_verified": True},
+            {"state": "blocked", "identity_verified": True},
+            {"state": "working", "identity_verified": True, "prompt_verified": False},
+            {"state": "done", "identity_verified": False},
+            {"state": "working", "identity_verified": False, "prompt_verified": True},
+        ):
+            with self.subTest(observation=observation):
+                self.configure(jobs={"job0": "ambiguous"}, observation=observation)
+                code, result = self.call("resume")
+                job = result["jobs"][0]
+                self.assertEqual((code, result["batch_state"]), (6, "unresolved_effect"))
+                self.assertEqual(job["phase"], "moved")
+                self.assertEqual(job["pending_effect"]["action"], "start")
+                self.assertFalse(job["settled"])
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+        self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
     def test_prompt_timeout_reconciles_receipt_without_resubmission(self):
         self.configure(jobs={"job0": "prompt_timeout"})
         code, result = self.call()

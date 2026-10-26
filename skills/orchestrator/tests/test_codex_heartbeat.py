@@ -35,10 +35,15 @@ elif name == 'herdr-jobs.py':
         if c.get('status_error'):
             print('{"error":"unavailable"}')
             sys.exit(1)
-        print('job | pane | state | disposition | lease')
-        print('----+------+-------+-------------+------')
-        for j, p in c['rows']:
-            print(f'{j} | {p} | running | - | -')
+        if '--summary' in a:
+            print('job | pane | state | disposition | lease')
+            print('----+------+-------+-------------+------')
+            for j, p in c['rows']:
+                print(f'{j} | {p} | running | - | -')
+        else:
+            print(c.get('status_output', json.dumps({'jobs': [
+                {'job_id': j, 'pane_id': None if p == '-' else p} for j, p in c['rows']
+            ]})))
         sys.exit(c.get('status_exit', 0))
     else:
         print(c.get(op + '_output', json.dumps({'jobs': [{'job_id': 'a', 'pane_id': 'ws:1', 'workspace_closed': True}], 'finish_complete': True})))
@@ -203,6 +208,78 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay(RESET + 400)
         self.assertFalse((self.run / 'quota-a.until').exists())
         self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
+
+    def test_observed_alive_unresolved_starts_allow_backlog_with_spare_capacity(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        (self.run / 'run/state.json').write_text(
+            '{"request_id":"replay","request":{"concurrency":2}}')
+        alive = {
+            'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
+            'route': {'mode': 'agent', 'runtime': 'codex'},
+            'pending_effect': {'action': 'start'},
+            'issue': 'effect delivery remains unproven; it will not be replayed',
+            'observed': {'state': 'working', 'identity_verified': True, 'prompt_verified': False},
+        }
+        payload = json.dumps({'batch_state': 'unresolved_effect', 'jobs': [alive]})
+        self.config.update(resume_exit=6, status_exit=6,
+                           resume_output=payload, status_output=payload)
+
+        self.replay()
+
+        self.assertEqual(len(self.calls('add')), 1)
+        self.assertEqual(json.loads((self.run / 'add-b.json').read_text())['concurrency'], 2)
+        self.assertNotIn('resume-failed', (self.run / 'heartbeat.log').read_text())
+
+    def test_mixed_unknown_effects_veto_backlog_even_with_an_observed_alive_start(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        (self.run / 'run/state.json').write_text(
+            '{"request_id":"replay","request":{"concurrency":4}}')
+        alive = {
+            'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
+            'route': {'mode': 'agent', 'runtime': 'codex'},
+            'pending_effect': {'action': 'start'}, 'issue': None,
+            'observed': {'state': 'working', 'identity_verified': True},
+        }
+        for observation in ({'state': 'unknown', 'identity_verified': False},
+                            {'state': 'working', 'identity_verified': False},
+                            {'state': 'idle', 'identity_verified': True},
+                            {'state': 'blocked', 'identity_verified': True}):
+            for operation in ('resume', 'status'):
+                with self.subTest(observation=observation, operation=operation):
+                    unknown = dict(alive, job_id='unknown', pane_id='ws:2', observed=observation)
+                    payload = json.dumps({'batch_state': 'unresolved_effect', 'jobs': [alive, unknown]})
+                    self.config.update(resume_exit=0, status_exit=0)
+                    self.config[operation + '_exit'] = 6
+                    self.config[operation + '_output'] = payload
+                    self.replay()
+                    self.assertFalse(self.calls('add'))
+
+    def test_observed_alive_fallback_still_obeys_capacity_and_effect_type(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        alive = {
+            'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
+            'route': {'mode': 'agent', 'runtime': 'codex'},
+            'pending_effect': {'action': 'start'}, 'issue': None,
+            'observed': {'state': 'working', 'identity_verified': True},
+        }
+        payload = json.dumps({'batch_state': 'unresolved_effect', 'jobs': [alive]})
+        self.config.update(resume_exit=6, status_exit=6,
+                           resume_output=payload, status_output=payload)
+        self.replay()
+        self.assertFalse(self.calls('add'))  # The verified live start fills cap=1.
+
+        (self.run / 'run/state.json').write_text(
+            '{"request_id":"replay","request":{"concurrency":3}}')
+        for action in ('prompt', 'jail', 'split', 'move'):
+            with self.subTest(action=action):
+                alive['pending_effect'] = {'action': action}
+                payload = json.dumps({'batch_state': 'unresolved_effect', 'jobs': [alive]})
+                self.config.update(resume_output=payload, status_output=payload)
+                self.replay()
+                self.assertFalse(self.calls('add'))
 
     def test_failed_resume_does_not_feed_backlog(self):
         self.backlog()
