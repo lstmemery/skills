@@ -36,6 +36,7 @@ elif name == 'herdr-jobs.py':
         print('----+------+-------+-------------+------')
         for j, p in c['rows']:
             print(f'{j} | {p} | running | - | -')
+        sys.exit(c.get('status_exit', 0))
     else:
         print(c.get(op + '_output', json.dumps({'jobs': [{'job_id': 'a', 'pane_id': 'ws:1', 'workspace_closed': True}], 'finish_complete': True})))
         sys.exit(c.get(op + '_exit', 0))
@@ -250,3 +251,63 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'quota-a.until.sent').touch()
         self.replay()
         self.assertEqual(len(self.calls('add')), 1)
+
+    def test_partial_helper_results_preserve_supervision_without_new_launches(self):
+        self.backlog()
+        self.config['rows'] = [['a', '-'], ['running', 'ws:2']]
+        (self.run / 'run/state.json').write_text(
+            '{"request_id":"replay","request":{"concurrency":3}}')
+        self.pane('complete.txt')
+        for operation in ('resume', 'status'):
+            for code in (6, 10):
+                with self.subTest(operation=operation, code=code):
+                    self.config.update(resume_exit=0, status_exit=0)
+                    self.config[operation + '_exit'] = code
+                    self.config['resume_output'] = json.dumps({
+                        'batch_state': 'partial' if code == 10 else 'unresolved_effect',
+                        'jobs': [{'job_id': 'running', 'pane_id': 'ws:2'}],
+                    })
+                    (self.run / 'out-a/.woke').unlink(missing_ok=True)
+                    self.replay(RESET + 300)
+                    self.assertEqual((self.run / 'quota-running.until').read_text().strip(), str(RESET))
+                    self.assertTrue((self.run / 'quota-running.until.sent').exists())
+                    self.assertTrue((self.run / 'out-a/.woke').exists())
+                    self.assertFalse(self.calls('add'))
+                    # Once the banner clears, spare capacity must still not admit backlog.
+                    (self.root / 'pane.txt').write_text('Working (1s)')
+                    self.replay(RESET + 301)
+                    self.assertFalse(self.calls('add'))
+                    self.pane('complete.txt')
+
+    def test_partial_helper_outcomes_can_finish_completed_runs(self):
+        (self.run / 'out-a/DONE').touch()
+        for code in (6, 10):
+            with self.subTest(code=code):
+                (self.sup / 'active-runs.txt').write_text(str(self.run) + '\n')
+                self.config.update(resume_exit=code, status_exit=code, finish_exit=code)
+                self.config['resume_output'] = json.dumps({'batch_state': 'partial', 'jobs': []})
+                self.replay()
+                self.assertEqual((self.sup / 'active-runs.txt').read_text(), '')
+
+    def test_finish_requires_explicit_job_fields_before_removal(self):
+        (self.run / 'out-a/DONE').touch()
+        for job in ({}, {'workspace_closed': True}, {'pane_id': None}):
+            with self.subTest(job=job):
+                (self.sup / 'active-runs.txt').write_text(str(self.run) + '\n')
+                self.config['finish_output'] = json.dumps({'finish_complete': True, 'jobs': [job]})
+                self.replay()
+                self.assertIn(str(self.run), (self.sup / 'active-runs.txt').read_text())
+
+    def test_echoed_continuation_does_not_schedule_another_reset(self):
+        self.pane('complete.txt')
+        self.replay(RESET + 300)
+        self.assertTrue((self.run / 'quota-a.until.sent').exists())
+        (self.root / 'pane.txt').write_text(
+            'The usage limit has reset. Continue the task from where you stopped; '
+            'do not repeat changes already made.')
+        self.replay(RESET + 301)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.replay(RESET + 7200)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)

@@ -49,14 +49,22 @@ except (KeyError,IndexError,TypeError,ValueError,AssertionError): print(-1)') ||
   elif [ "${qleft:--1}" -gt 30 ]; then rm -f "$SUP/quota-gate.notified"
   fi
   CAP=$(python3 -c 'import json; c=json.load(open("run/state.json"))["request"]["concurrency"]; assert type(c) is int and c > 0; print(c)' 2>/dev/null) || { log "invalid stored concurrency"; continue; }
+  launches_ok=1
   # resume can launch pending jobs, so it must obey the same quota gate as add.
   if [ "$qleft" -gt 10 ]; then
     if ! python3 "$H" resume --run-dir run --wait-seconds 20 > last-resume.json 2>&1 ||
        ! python3 -c 'import json,sys;d=json.load(open("last-resume.json"));sys.exit(0 if isinstance(d,dict) and not d.get("error") and isinstance(d.get("jobs"),list) else 1)'; then
-      log "resume-failed (see last-resume.json)"; continue
+      log "resume-failed (see last-resume.json); observing existing jobs only"; launches_ok=0
     fi
   fi
-  S=$(python3 "$H" status --run-dir run --summary --wait-seconds 0 2>&1) || { log "status-failed"; continue; }
+  status_rc=0
+  S=$(python3 "$H" status --run-dir run --summary --wait-seconds 0 2>&1) || status_rc=$?
+  # Partial/unresolved outcomes still contain a usable summary for unaffected jobs.
+  case "$status_rc" in
+    0) ;;
+    6|10) launches_ok=0 ;;
+    *) log "status-failed"; continue ;;
+  esac
   echo "$S" | grep -q '^job ' || { log "status-failed: $(echo $S | head -c 120)"; continue; }
   rows=$(echo "$S" | awk -F'|' 'NR>2 {gsub(/ /,"",$1);gsub(/ /,"",$2);print $1,$2}')
   active=0; now=${HEARTBEAT_NOW:-$(date -u +%s)}
@@ -72,7 +80,7 @@ except (KeyError,IndexError,TypeError,ValueError,AssertionError): print(-1)') ||
     grep -qx "$w" labeled 2>/dev/null || { "$HERDR" workspace rename "$w" "codex · $name $j" >/dev/null && echo "$w" >> labeled; }
     txt=$("$HERDR" pane read "$p" --source recent-unwrapped --lines 15 2>/dev/null)
     txt=$(printf '%s\n' "$txt" | tr '\n\r' '  ' | tr -s '[:space:]' ' ')
-    if echo "$txt" | grep -qiE "usage limit|hit your usage" && ! echo "$txt" | grep -q "Working ("; then
+    if echo "$txt" | grep -qiE "you've hit your usage( limit)?([[:space:].]|$)" && ! echo "$txt" | grep -q "Working ("; then
       until_f="quota-$j.until"
       if [ ! -f "$until_f" ]; then
         when=$(echo "$txt" | tr '\n' ' ' | grep -oE "try again at [^.]*[AP]M" | tail -1 | sed -e 's/try again at //' -e 's/\([0-9]\)\(st\|nd\|rd\|th\),/\1/')
@@ -93,7 +101,7 @@ except (KeyError,IndexError,TypeError,ValueError,AssertionError): print(-1)') ||
       rm -f "quota-$j.until" "quota-$j.until.sent"
     fi
   done <<< "$rows"
-  if [ -f ORDER ] && ! ls quota-*.until >/dev/null 2>&1 && [ "${qleft:--1}" -gt 10 ]; then
+  if [ "$launches_ok" -eq 1 ] && [ -f ORDER ] && ! ls quota-*.until >/dev/null 2>&1 && [ "${qleft:--1}" -gt 10 ]; then
     for j in $(cat ORDER); do
       [ "$active" -ge "$CAP" ] && break
       echo "$rows" | awk '{print $1}' | grep -qx "$j" && continue
@@ -116,13 +124,19 @@ PY
       log "added $j"; active=$((active+1))
     done
   fi
-  rows=$(python3 "$H" status --run-dir run --summary --wait-seconds 0 2>&1 | awk -F'|' 'NR>2 {gsub(/ /,"",$1);print $1}')
+  status_rc=0
+  S=$(python3 "$H" status --run-dir run --summary --wait-seconds 0 2>&1) || status_rc=$?
+  case "$status_rc" in 0|6|10) ;; *) log "status-failed before finish"; continue ;; esac
+  echo "$S" | grep -q '^job ' || { log "status-failed before finish"; continue; }
+  rows=$(echo "$S" | awk -F'|' 'NR>2 {gsub(/ /,"",$1);print $1}')
   n=0; t=0; for j in $rows; do t=$((t+1)); { [ -f "out-$j/DONE" ] || [ -f "out-$j/CANCELLED" ]; } && n=$((n+1)); done
   pend=0; [ -f ORDER ] && for j in $(cat ORDER); do echo "$rows" | grep -qx "$j" || pend=1; done
   log "done=$n/$t active=$active backlog_pending=$pend"
   if [ "$pend" -eq 0 ] && [ "$n" -ge "$t" ] && [ "$t" -gt 0 ]; then
-    if ! python3 "$H" finish --run-dir run --host-contract "$HC" --wait-seconds 10 > last-finish.json 2>&1 ||
-       ! python3 -c 'import json,sys;d=json.load(open("last-finish.json"));j=d.get("jobs",[]);sys.exit(0 if not d.get("error") and d.get("finish_complete") is True and j and all(x.get("workspace_closed") is True or not x.get("pane_id") for x in j) else 1)'; then
+    finish_rc=0
+    python3 "$H" finish --run-dir run --host-contract "$HC" --wait-seconds 10 > last-finish.json 2>&1 || finish_rc=$?
+    if { [ "$finish_rc" -ne 0 ] && [ "$finish_rc" -ne 6 ] && [ "$finish_rc" -ne 10 ]; } ||
+       ! python3 -c 'import json,sys;d=json.load(open("last-finish.json"));j=d["jobs"];sys.exit(0 if not d.get("error") and d["finish_complete"] is True and isinstance(j,list) and j and all(isinstance(x,dict) and "pane_id" in x and "workspace_closed" in x and (x["workspace_closed"] is True or x["pane_id"] is None) for x in j) else 1)'; then
       log "finish left open workspaces; retrying next pass"; continue
     fi
     log "finished; removed from active-runs"; wake "all $t jobs DONE and finished — review reports"
