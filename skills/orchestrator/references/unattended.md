@@ -147,7 +147,7 @@ For each enrolled run root, the current script:
    a missing summary header skip the run. It appends to `heartbeat.log`.
 3. Clears `quota-<job-id>.until` and its `.sent` marker for `DONE` or `CANCELLED`
    jobs. Cancelled jobs consume no active slot and receive no pane reads,
-   labels, quota continuation, or per-job DONE wake. DONE jobs queue a wake once,
+   labels, quota/capacity continuation, or per-job DONE wake. DONE jobs queue a wake once,
    tracked by `out-<job-id>/.woke`. Other jobs with a pane are counted as active;
    their workspaces are renamed `codex · <run-basename> <job-id>` once, tracked
    by the run's `labeled` file.
@@ -165,6 +165,17 @@ For each enrolled run root, the current script:
    remain while the banner persists, preventing repeated successful sends for
    that stored reset. They clear when the banner disappears, Working appears,
    or the job becomes terminal. A later banner can create another reset.
+   The same idle-pane check also recognizes `Selected model is at capacity.
+   Please try a different model.` after whitespace normalization. For this
+   transient provider stall it stores the observation time in the same
+   `quota-<job-id>.until` file and waits **five minutes** before one same-pane
+   continuation; it does not change the selected model. The same `.until.sent`
+   marker suppresses further successful sends while the banner persists, and
+   clears on progress, banner disappearance, or a terminal marker. Failed
+   delivery remains eligible on later passes. Capacity continuation text says
+   the provider retry wait has elapsed and omits the detected banner, so its
+   own echoed prompt cannot schedule another continuation. This also means a
+   capacity wait blocks backlog admission through the existing wait-file gate.
 5. Feeds `backlog/task-<job-id>.md` in `ORDER` order only when launches remain
    allowed, quota exceeds 10%, no `quota-*.until` files remain, and the active
    pane count is below the **stored concurrency**. It copies the brief into the
@@ -237,8 +248,9 @@ change the live target.
   canonical heartbeat and the matching live copy still use their own grep.
   The remaining follow-up is wiring the heartbeat to
   `herdr_jobs.admission.rate_limit_from_output(..., source="pane", runtime="codex")`
-  and validating recovery before an authorized deployment. This rebase keeps
-  n3's script unchanged and does not deploy that follow-up.
+  and validating recovery before an authorized deployment. The capacity-banner
+  branch also uses the local pane grep; adding it does not deploy the script
+  or integrate that shared detector.
 - This is a desktop Codex/Claude bridge, not a generic scheduler. Bash, GNU
   `date`, `flock`, Python, `quota-axi`, the installed helper/Herdr contract, and
   a running systemd user manager are prerequisites. Suspend, logout/user-manager shutdown,
