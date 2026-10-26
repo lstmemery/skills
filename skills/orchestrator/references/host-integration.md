@@ -19,6 +19,18 @@ Set `verified: true` only after those facts are established. It is an operator a
 
 ## Exercise the integration
 
+Claude support in the adapter does not enable it on an unverified host. Stage
+the proposed `supported_kinds` addition separately from the live contract, and
+keep that live contract unchanged until the operator verification above passes.
+For each enabled exact Claude model, verify discovery includes the exact ID and
+supported effort metadata; a partial alias catalog still refuses launch. Claude
+efforts above `xhigh` are refused even if the catalog advertises them. Before
+enabling Haiku, also verify `herdr pane run` exports persist into a later agent
+start in the same pane, and that the attempt-specific compaction readback is
+raw terminal output. A Haiku start must inherit
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`; setting it only on the Herdr client is
+insufficient. No unmanaged production fallback is authorized by this proposal.
+
 Use a small authorized ordinary-agent job, a jail job, and then a mixed batch. Verify the results through the public helper command:
 
 - retained pane IDs match actual moves;
@@ -26,6 +38,8 @@ Use a small authorized ordinary-agent job, a jail job, and then a mixed batch. V
 - a Codex start carries the prompt in argv, verifies owned identity plus visible `Working` before observation, and sends no separate prompt;
 - trust and resume/session dialogs fail closed, with no automated dialog input and no selection of **Use session directory**;
 - workers write the expected artifacts and attempt-bound receipts;
+- a Claude job verifies idle startup identity before a single prompt, collects a
+  receipt-listed `DONE` artifact, and uses Claude admission independently of Codex;
 - jail output is collected on the host after the launcher exits;
 - a prompt timeout followed by resume does not submit again;
 - an exited jail job releases a slot, while missing output remains incomplete;

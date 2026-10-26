@@ -13,7 +13,7 @@ import time
 import tomllib
 
 from .records import (JobError, digest, fields, integer, load_json, parse_json, save, text,
-                      effort_arguments, validate_protected_paths, validate_required_context,
+                      effort_arguments, validate_effort, validate_protected_paths, validate_required_context,
                       validate_writer_intent, version)
 from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
@@ -330,6 +330,8 @@ class NativeTransport:
             if runtime == "codex":
                 codex_config = _codex_config()
             requested_effort = _effort_for({"spec": job})
+            if runtime == "claude-code" and requested_effort is not None:
+                validate_effort(runtime, requested_effort)
             if (runtime in ("pi", "claude-code") and requested_effort is not None
                     and requested_model is None):
                 raise JobError("unavailable_capability",
@@ -469,6 +471,9 @@ class NativeTransport:
     def effect(self, action, job, prompt):
         pane = job["pane_id"]
         spec = job["spec"]
+        if spec["route"]["runtime"] == "claude-code" and action in ("start", "prompt"):
+            if spec["kind"] != "claude" or "claude" not in self.binding["supported_kinds"]:
+                raise JobError("unavailable_capability", "Herdr kind is not verified as installed: claude")
         local_environment = None
         if spec.get("local_lane") is True and action in ("start", "prompt"):
             local_environment = local_lane_environment(pane_id=pane)
@@ -541,6 +546,9 @@ class NativeTransport:
                     shlex.join([sys.executable, str(runner), "--request", str(launch_request)])]
         else:
             raise ValueError(f"unknown effect: {action}")
+        if (action == "start" and spec["route"]["runtime"] == "claude-code"
+                and "haiku" in (job["resolved_model"] or "").lower()):
+            self.configure_haiku_environment(job)
         if codex_prompt_start:
             # A prompt-bearing Codex invocation makes Herdr's startup timeout
             # expected. Trust only a verified worker identity and live Working
@@ -633,6 +641,30 @@ class NativeTransport:
             raise
         except (BudgetExpired, JobError, UnicodeError) as error:
             raise EffectUnknown(f"{action}: response unavailable or unverified; reconcile before repeating") from error
+
+    def configure_haiku_environment(self, job):
+        # Herdr starts the runtime in the pane's shell. Setting the Herdr
+        # client's environment alone would leave the worker unchanged.
+        pane = job["pane_id"]
+        marker = f"__ORCH_CLAUDE_ENV_{job['attempt_id']}__"
+        commands = [
+            "export CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000",
+            f"printf '\\n{marker}%s\\n' \"$CLAUDE_CODE_AUTO_COMPACT_WINDOW\"",
+        ]
+        try:
+            for shell_command in commands:
+                code, _, _ = command([self.herdr, "pane", "run", pane, shell_command], self.deadline)
+                if code:
+                    raise EffectUnknown("Haiku environment setup was rejected; inspect the owned pane")
+            while self.deadline.remaining():
+                terminal = self.read_terminal([self.herdr, "pane", "read", pane,
+                                               "--source", "recent-unwrapped", "--lines", "100"])
+                if marker + "100000" in self.terminal_output(terminal).splitlines():
+                    return
+                time.sleep(min(0.1, self.deadline.remaining()))
+        except (BudgetExpired, JobError, UnicodeError) as error:
+            raise EffectUnknown("Haiku environment could not be verified; inspect the owned pane") from error
+        raise EffectUnknown("Haiku environment did not persist in the owned pane; inspect before retrying")
 
     def configure_pi_retry_environment(self, job, profile):
         pane = job["pane_id"]
@@ -820,7 +852,7 @@ class NativeTransport:
                 return dialog
         text_lower = output.casefold()
         if any(phrase in text_lower for phrase in (
-            "continue without trusting", "trust and continue", "trust this folder",
+            "do you trust", "continue without trusting", "trust and continue", "trust this folder",
             "trust this directory", "trust this project", "press enter to confirm",
             "authentication required", "sign in to continue",
         )):

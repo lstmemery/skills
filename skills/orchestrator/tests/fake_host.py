@@ -59,6 +59,9 @@ class FakeHost:
         else:
             (output / "result.md").write_text("Independent fixture result.\n")
             artifact_paths = ["result.md"]
+        if self.fixture.get("done_marker"):
+            (output / "DONE").write_text("ready\n")
+            artifact_paths.append("DONE")
         receipt = {"schema_version": 1, "request_id": self.fixture["request_id"],
                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
                    "outcome": "complete", "artifacts": artifact_paths, "unresolved": []}

@@ -44,7 +44,7 @@ RUNTIME_EFFORT_CAPABILITIES = {
               "flag": None},
     "pi": {"values": frozenset(("off", "minimal", "low", "medium", "high", "xhigh", "max")),
            "flag": "--thinking"},
-    "claude-code": {"values": frozenset(("low", "medium", "high", "xhigh", "max")),
+    "claude-code": {"values": frozenset(("low", "medium", "high", "xhigh")),
                     "flag": "--effort"},
     "omp": {"values": frozenset(("off", "minimal", "low", "medium", "high", "xhigh", "max", "auto")),
             "flag": "--thinking"},
