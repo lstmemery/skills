@@ -1831,6 +1831,31 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
 
+    def test_unproven_effect_reason_tracks_current_observation(self):
+        self.configure(jobs={"job0": "ambiguous"})
+        code, result = self.call()
+        self.assertEqual(code, 6)
+        job = result["jobs"][0]
+        self.assertIn("issue_code", job)
+        self.assertEqual(job["issue_code"], "effect_delivery_unproven")
+
+        # Checkpoints written before issue_code existed must remain readable.
+        state = self.state()
+        del state["jobs"][0]["issue_code"]
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+
+        for observation, expected_code in (
+            ({"state": "blocked", "identity_verified": True}, None),
+            ({"state": "working", "identity_verified": False}, None),
+            ({"state": "working", "identity_verified": True}, "effect_delivery_unproven"),
+            ({"state": "done", "identity_verified": True}, None),
+        ):
+            with self.subTest(observation=observation):
+                self.configure(jobs={"job0": "ambiguous"}, observation=observation)
+                _, result = self.call("status")
+                self.assertEqual(result["jobs"][0]["issue_code"], expected_code)
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
+
     def test_unproven_codex_start_observations_never_replay_or_settle(self):
         self.configure(jobs={"job0": "ambiguous"})
         self.assertEqual(self.call()[0], 6)

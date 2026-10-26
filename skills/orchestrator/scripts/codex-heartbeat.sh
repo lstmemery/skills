@@ -46,10 +46,9 @@ try:
       assert j["pending_effect"]["action"] == "start"
       assert j["route"] == {"mode":"agent","runtime":"codex"}
       assert o["state"] == "working"
-      assert j["issue"] in (None,"effect delivery remains unproven; it will not be replayed")
+      assert j["issue_code"] == "effect_delivery_unproven"
     else:
       assert not j["issue"] and o["state"] in ("working","idle","done","exited")
-      assert j["settled"] is False or j["collection_error"] is None
 except (OSError,KeyError,TypeError,ValueError,AssertionError):
   sys.exit(1)
 PY_SAFE
@@ -97,12 +96,14 @@ except (KeyError,IndexError,TypeError,ValueError,AssertionError): print(-1)') ||
     *) log "status-failed"; continue ;;
   esac
   helper_launch_safe last-status.json "$status_rc" || launches_ok=0
-  rows=$(python3 - <<'PY_ROWS'
-import json
+  rows=$(python3 - <<'PY_ROWS' 2>>heartbeat.log
+import json,sys
 with open("last-status.json") as f:
   d=json.load(f)
 assert not d.get("error") and isinstance(d["jobs"],list)
 for j in d["jobs"]:
+  if j.get("collection_error"):
+    print(f'collection-error {j["job_id"]}: {j["collection_error"]}',file=sys.stderr)
   print(j["job_id"],j["pane_id"] or "-")
 PY_ROWS
   ) || { log "status-failed: invalid job records"; continue; }

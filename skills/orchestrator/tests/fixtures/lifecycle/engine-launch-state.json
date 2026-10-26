@@ -36,6 +36,7 @@
       ],
       "host_output": "$RUN_DIR/workers/compatibility-job/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "issue": null,
+      "issue_code": null,
       "observed": null,
       "pane_id": "pane-new",
       "pending_effect": null,
