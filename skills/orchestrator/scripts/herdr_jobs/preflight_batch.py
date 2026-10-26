@@ -51,7 +51,7 @@ def resolve_identity(value, state):
 
 
 def review_source(job):
-    """Use only managed output roots and explicitly declared editable directories."""
+    """Select a review directory and its unambiguous declared report root."""
     roots = set()
     if job.get("host_output"):
         roots.add(Path(job["host_output"]))
@@ -72,13 +72,13 @@ def review_source(job):
             if (path / "review-evidence.json").exists():
                 if path.is_symlink():
                     records.invalid("review source must not be a symlink")
-                sources.add(path.absolute())
+                sources.add((path.absolute(), root.absolute()))
     if len(sources) != 1:
-        records.invalid(f"review job {spec['job_id']} needs exactly one review source")
+        records.invalid(f"review job {spec['job_id']} needs exactly one review source and report root")
     return sources.pop()
 
 
-def reviewer_verdict(source, evidence, *, required):
+def reviewer_verdict(source, evidence, *, required, report_root):
     verdicts = set()
     if (source / "done.json").exists():
         done = records.parse_json(records.bounded_file(source, "done.json"))
@@ -90,7 +90,7 @@ def reviewer_verdict(source, evidence, *, required):
                 records.invalid("invalid reviewer verdict")
             verdicts.add(done["verdict"])
     if required:
-        for root, filename in ((source, "review.md"), (source.parent, "report.md")):
+        for root, filename in ((source, "review.md"), (report_root, "report.md")):
             if (root / filename).exists():
                 text = records.bounded_file(root, filename).decode()
                 verdicts.update(re.findall(
@@ -136,14 +136,15 @@ def _prepare(args):
         author_aliases = {safe_token(job["agent_name"]) for job in alias_jobs}
         author_panes = {pane, *(safe_token(job["pane_id"]) for job in alias_jobs)}
         review_jobs = [select_job(state, job_id) for job_id in args.review_job]
-        review_paths = [review_source(job) for job in review_jobs]
+        review_locations = [review_source(job) for job in review_jobs]
+        review_paths = [source for source, _ in review_locations]
         if len(set(review_paths)) != len(review_paths):
             records.invalid("multiple jobs resolve to the same review source")
     else:
         if args.author_alias_job:
             records.invalid("author aliases require --review-job")
         review_jobs = []
-        review_paths = args.review_output
+        review_locations = [(path, None) for path in args.review_output]
     branch, separator, requested_head = args.candidate.partition("=")
     if separator:
         head = git(repo, "rev-parse", "--verify", f"{requested_head}^{{commit}}")
@@ -164,7 +165,7 @@ def _prepare(args):
         sources = []
         reviewed_head = base
         response = ["# Review response\n\n", "Coordinator: record a disposition for every finding below.\n\n"]
-        for index, path in enumerate(review_paths):
+        for index, (path, report_root) in enumerate(review_locations):
             source = path if (path / "review-evidence.json").is_file() else path / "review"
             name = "review" if index == 0 else f"review-r{index}"
             if source.is_symlink():
@@ -236,7 +237,8 @@ def _prepare(args):
                     response.append(f"<!-- `{name}/{finding['id']}`: choose disposition and rationale -->\n")
             roster.append(f"{task_id} {reviewer}" + (f" {reviewer_pane}" if managed_reviews else "") + "\n")
             source_record = {"round": name, "directory": str(source.resolve())}
-            verdict = reviewer_verdict(source, evidence, required=managed_reviews)
+            verdict = reviewer_verdict(source, evidence, required=managed_reviews,
+                                       report_root=report_root)
             if verdict:
                 source_record["verdict"] = verdict
             if managed_reviews:

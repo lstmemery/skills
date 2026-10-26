@@ -244,17 +244,24 @@ class IntegrationPreflightTests(unittest.TestCase):
             SKILL_DIR / "tests/fixtures/preflight-batch/author-state.json",
             managed / "state.json",
         )
+        options = []
+        for review_output in outputs:
+            options.extend(["--review-output", str(review_output)])
+        return self.run_prepare_command(
+            managed, *options, candidate=candidate, response=response, output=output,
+        )
+
+    def run_prepare_command(self, managed, *options, candidate=None, response=None, output=None):
         command = [
             sys.executable, str(SKILL_DIR / "scripts/worker-records.py"),
             "prepare-preflight", "--managed-run", str(managed),
             "--job-id", "author", "--task-id", "task-1", "--repo", str(self.repo),
             "--target", "main", "--candidate", candidate or f"orch/task-1={self.head}",
             "--output", str(output or self.root / "batch"),
+            *options,
         ]
         if response is not None:
             command.extend(["--review-response", str(response)])
-        for output in outputs:
-            command.extend(["--review-output", str(output)])
         return subprocess.run(command, capture_output=True, text=True, timeout=20)
 
     def batch_gate(self):
@@ -304,17 +311,12 @@ class IntegrationPreflightTests(unittest.TestCase):
 
     def prepare_jobs(self, *, response=None, aliases=(), reviews=("reviewer",)):
         managed = self.assembly_state().parent
-        command = [sys.executable, str(SKILL_DIR / "scripts/worker-records.py"),
-                   "prepare-preflight", "--managed-run", str(managed),
-                   "--job-id", "author", "--task-id", "task-1", "--repo", str(self.repo),
-                   "--candidate", f"orch/task-1={self.head}", "--output", str(self.root / "batch")]
+        options = []
         for job in reviews:
-            command.extend(["--review-job", job])
+            options.extend(["--review-job", job])
         for job in aliases:
-            command.extend(["--author-alias-job", job])
-        if response:
-            command.extend(["--review-response", str(response)])
-        return subprocess.run(command, capture_output=True, text=True, timeout=20)
+            options.extend(["--author-alias-job", job])
+        return self.run_prepare_command(managed, *options, response=response)
 
     def test_prepare_selects_review_job_and_normalizes_v2_envelope(self):
         self.write_review(schema_version=2)
@@ -339,6 +341,68 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), before)
         gate = self.batch_gate()
         self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+
+    def direct_review_output(self, verdict):
+        self.write_review(schema_version=2)
+        state_path = self.assembly_state()
+        direct = self.root / "direct-output"
+        shutil.move(self.task_dir / "review", direct)
+        (direct / "report.md").write_text(f"Verdict: {verdict}.\n")
+        state = json.loads(state_path.read_text())
+        state["jobs"][1]["host_output"] = str(direct)
+        state["jobs"][1]["spec"]["editable_paths"] = []
+        state_path.write_text(json.dumps(state))
+        return direct
+
+    def test_prepare_accepts_direct_output_report_only_verdict(self):
+        direct = self.direct_review_output("approve")
+        (direct / "done.json").unlink()
+
+        prepared = self.prepare_jobs()
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        done = json.loads((self.root / "batch/task-1/review/done.json").read_text())
+        self.assertEqual(done["verdict"], "approve")
+        gate = self.batch_gate()
+        self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+
+    def test_prepare_preserves_direct_output_verdict_despite_unrelated_parent_report(self):
+        direct = self.direct_review_output("changes-requested")
+        (direct.parent / "report.md").write_text("Verdict: approve.\n")
+
+        prepared = self.prepare_jobs()
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        done = json.loads((self.root / "batch/task-1/review/done.json").read_text())
+        self.assertEqual(done["verdict"], "changes-requested")
+
+    def test_prepare_refuses_conflicting_direct_output_report_and_done_verdicts(self):
+        direct = self.direct_review_output("changes-requested")
+        done_path = direct / "done.json"
+        done = json.loads(done_path.read_text())
+        done["verdict"] = "approve"
+        done_path.write_text(json.dumps(done))
+
+        prepared = self.prepare_jobs()
+
+        self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+        self.assertIn("unambiguous explicit verdict", prepared.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_prepare_refuses_ambiguous_report_roots_for_one_review(self):
+        self.write_review(schema_version=2)
+        state_path = self.assembly_state()
+        state = json.loads(state_path.read_text())
+        state["jobs"][1]["host_output"] = str(self.task_dir / "review")
+        state_path.write_text(json.dumps(state))
+        (self.task_dir / "report.md").write_text("Verdict: approve.\n")
+        (self.task_dir / "review/report.md").write_text("Verdict: changes-requested.\n")
+
+        prepared = self.prepare_jobs()
+
+        self.assertEqual(prepared.returncode, 2, prepared.stdout + prepared.stderr)
+        self.assertIn("exactly one review source and report root", prepared.stderr)
+        self.assertFalse((self.root / "batch").exists())
 
     def test_prepare_normalizes_explicit_fix_author_and_unique_truncated_reviewer(self):
         self.write_review(schema_version=2, head=self.base)
