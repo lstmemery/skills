@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import sys
 
 from . import records
 from . import preflight_batch
 from . import review_dispositions
+from . import review_evidence
 from . import jail_brief
 
 
@@ -582,6 +584,30 @@ def positive_integer(value):
     return parsed
 
 
+def validate_review(directory, kind, task_id, author_identity, reviewer_identity):
+    """Check reviewer output using the gate's bundle and capture validators."""
+    expected_name = directory.name == "review" if kind == "full" else bool(
+        re.fullmatch(r"review-r[1-9][0-9]*", directory.name)
+    )
+    if not expected_name:
+        records.invalid("full reviews require review/; delta reviews require review-rN/ (N >= 1)")
+    preflight = runpy.run_path(str(Path(__file__).resolve().parents[1] / "integration-preflight.py"))
+    try:
+        response_path = directory.parent / "review-response.md"
+        try:
+            response_text = response_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            response_text = ""
+        response = review_evidence.parse_review_response(response_text)
+        review_evidence.ReviewBundle.read(
+            directory, task_id, [author_identity, reviewer_identity], response=response,
+            reviewer_output=True,
+            capture_verifier=preflight["SubprocessCaptureVerifier"](),
+        )
+    except (OSError, UnicodeError, review_evidence.ReviewEvidenceError) as error:
+        records.invalid(str(error))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -598,6 +624,15 @@ def build_parser():
     prepare_parser.add_argument("--review-output", type=Path, action="append", required=True)
     prepare_parser.add_argument("--output", type=Path, required=True)
     prepare_parser.add_argument("--review-response", type=Path)
+
+    review_parser = commands.add_parser(
+        "validate-review", help="validate reviewer output before DONE (not integration readiness)"
+    )
+    review_parser.add_argument("review_dir", type=Path)
+    review_parser.add_argument("--kind", choices=("full", "delta"), required=True)
+    review_parser.add_argument("--task-id", required=True)
+    review_parser.add_argument("--author-identity", required=True)
+    review_parser.add_argument("--reviewer-identity", required=True)
 
     schema_parser = commands.add_parser(
         "schema", help="print the current worker result contract"
@@ -658,6 +693,11 @@ def main(argv=None):
     try:
         if args.command == "prepare-preflight":
             print(json.dumps(preflight_batch.prepare(args), sort_keys=True))
+            return 0
+        if args.command == "validate-review":
+            validate_review(args.review_dir, args.kind, args.task_id,
+                            args.author_identity, args.reviewer_identity)
+            print(f"VALID REVIEW: {args.review_dir} (reviewer output; not integration readiness)")
             return 0
         if args.command == "schema":
             print(result_schema_markdown(), end="")

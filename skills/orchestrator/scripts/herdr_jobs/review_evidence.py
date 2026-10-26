@@ -377,9 +377,11 @@ def _validate_identities(evidence, review_name, worker_roster):
         )
 
 
-def _validate_terminal_dispositions(findings, response):
+def _validate_terminal_dispositions(findings, response, *, allow_unresolved=False):
     for (review_name, finding_id), finding in findings.items():
         disposition = finding["disposition"]
+        if allow_unresolved and disposition == "unresolved":
+            continue
         if not isinstance(disposition, str) or disposition not in {"fixed", "rejected"}:
             raise ReviewEvidenceError(f"{review_name}/{finding_id} has no terminal disposition")
         reason = finding.get("reason", "")
@@ -448,13 +450,15 @@ class ReviewBundle:
         cls, directory, expected_task, worker_roster, *, response,
         capture_verifier: CaptureVerifier,
         legacy_precedent: LegacyPrecedent | None = None,
-        filesystem=None,
+        filesystem=None, reviewer_output=False,
     ):
         """Validate a full review without resolving Git refs or writing files.
 
         ``response`` comes from parse_review_response. ``worker_roster`` keeps
         the candidate author first. CaptureVerifier guarantees complete verified
         coverage; legacy_precedent can authorize only exact historical bytes.
+        reviewer_output permits unresolved findings before coordinator disposition;
+        the default integration gate still requires recorded terminal decisions.
         """
         filesystem = LocalReviewFiles() if filesystem is None else filesystem
         directory = Path(directory)
@@ -473,7 +477,7 @@ class ReviewBundle:
             _validate_done(done, name, expected_task, capture_id, axis_ids)
         except KeyError as error:
             raise ReviewEvidenceError(str(error)) from error
-        _validate_terminal_dispositions(findings, response)
+        _validate_terminal_dispositions(findings, response, allow_unresolved=reviewer_output)
         markdown_raw, markdown = _read_markdown(directory, filesystem)
         digests = {
             "review_evidence_sha256": hashlib.sha256(evidence_raw).hexdigest(),

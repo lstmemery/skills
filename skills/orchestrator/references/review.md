@@ -203,6 +203,106 @@ the manifest, completion marker, source blobs, diff, and history must pass their
 recorded digest checks, and the verified capture ID and complete coverage must
 match the review records.
 
+### Copyable review-worker brief (full or delta)
+
+Include this block in every independent review assignment, filling the pinned
+identities and paths before dispatch:
+
+```text
+Review kind: FULL (directory TASK_DIR/review/) or DELTA (TASK_DIR/review-rN/, N >= 1).
+Task ID: TASK_ID. Candidate author: AUTHOR_ID. Responsible reviewer: REVIEWER_ID.
+Use the supplied pinned candidate base/head and independent reviewer identity.
+For DELTA, inspect the change since the preceding reviewed head, including whether
+prior fixes hold; report new findings and any still-unfixed prior findings.
+
+Write review.md, review-evidence.json, done.json, and one completed capture under
+that review directory. Preserve the actual capture_id from capture/manifest.json
+in BOTH JSON records. Capture evidence must include capture/COMPLETE and every
+payload required by capture.py verify. Do not fabricate or repair capture metadata.
+Use the exact Markdown grammar and JSON fields below; counts must match findings.
+Review findings start unresolved; the coordinator owns terminal dispositions.
+
+Before emitting DONE, run from the orchestrator skill directory:
+python3 scripts/worker-records.py validate-review REVIEW_DIR --kind full|delta --task-id TASK_ID --author-identity AUTHOR_ID --reviewer-identity REVIEWER_ID
+Choose one literal kind, full or delta. Retain the command, exit code, and output
+in the worker's evidence. Emit DONE only after exit 0; fix and rerun on failure.
+If prior delta findings remain unfixed, report the blocker rather than claiming
+unfixed=0. This validator checks reviewer output, not integration readiness.
+```
+
+Use these minimal records for a full review with zero findings. Substitute the
+actual task, identities, capture ID and counts; do not copy placeholder values:
+
+`review/done.json`:
+
+```json
+{
+  "task_id": "TASK_ID",
+  "capture_id": "CAPTURE_ID",
+  "standards_findings": 0,
+  "spec_findings": 0
+}
+```
+
+For a delta review, replace the full count fields with exactly these delta
+fields in `review-rN/done.json`:
+
+```json
+{
+  "task_id": "TASK_ID",
+  "capture_id": "CAPTURE_ID",
+  "new_findings": 0,
+  "unfixed": 0
+}
+```
+
+Both kinds use the same `review-evidence.json` envelope:
+
+```json
+{
+  "schema_version": 2,
+  "task_id": "TASK_ID",
+  "author_identity": "AUTHOR_ID",
+  "reviewer_identity": "REVIEWER_ID",
+  "capture_id": "CAPTURE_ID",
+  "axes": {
+    "standards": {"status": "complete", "findings": []},
+    "spec": {"status": "complete", "findings": []}
+  }
+}
+```
+
+The minimal `review.md` for either kind is:
+
+```markdown
+## Standards
+
+No findings.
+Summary: findings=0; worst=none.
+
+## Spec
+
+No findings.
+Summary: findings=0; worst=none.
+```
+
+For nonempty axes, use the finding records and Markdown grammar below, increasing
+the corresponding full count or delta total. Required envelope fields are exactly
+those in the sidecar example; `axis_reviewers` is the only optional envelope
+field. It belongs in the sidecar, not in a finding or axis record. Each axis
+record has exactly `status` and `findings`. The current preflight does not require
+or inspect a `verdict` field in `done.json`; the required fields are the task,
+capture ID, and the counts for the chosen kind. A prose verdict cannot replace
+these fields. Additional done-record metadata is not validated.
+
+The command reuses the preflight's `ReviewBundle` checks and capture verifier.
+It permits `disposition: "unresolved"` for reviewer-owned findings before
+coordinator response. Terminal findings still need matching recorded responses.
+It never edits the bundle or syncs dispositions. The supplied author/reviewer
+identities are checked against the sidecar; integration separately verifies the
+actual `workers.txt` roster, author consistency, capture ancestry, candidate heads,
+and terminal dispositions. A successful reviewer check cannot authorize integration.
+
 ### Machine-readable review evidence
 
 Each `review/` or `review-rN/` directory used for integration needs a
