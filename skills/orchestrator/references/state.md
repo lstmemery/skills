@@ -126,6 +126,19 @@ only if a tested runtime mechanism provides it. State the actual guarantee. For
 a run that continues while the user is away, [unattended runs](unattended.md)
 owns the out-of-session supervision requirement and its recorded gap.
 
+On Matt's desktop, record `codex-heartbeat.timer`, the absolute enrolled run
+root, and the last observed timer/pass health in `Supervision`; see the
+[heartbeat contract](unattended.md#desktop-codex-heartbeat) for its files and
+limits. During an authorized coordinator transfer, the successor also updates
+`/home/deadhand/.local/share/orchestrator/supervision/coordinator.json` atomically
+with its observed `pane_id`, `agent`, and `agent_session.value` (stored as
+`session`), then verifies the live match. Do this after ownership activation and
+before supervision acceptance. The heartbeat also uses this pane and its
+workspace prefix as the origin for worker splits because systemd has no current
+pane. The recorded target is not the ownership ledger;
+an idle matching session is required for queued delivery, and the heartbeat
+cannot start a replacement coordinator.
+
 ## Renew early
 
 Check a reliable harness context indicator at task boundaries. Use the user's

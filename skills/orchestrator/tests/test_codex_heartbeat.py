@@ -27,6 +27,9 @@ elif name == 'quota-axi':
     print(json.dumps(c['quota']))
     sys.exit(c.get('quota_exit', 0))
 elif name == 'herdr-jobs.py':
+    (root / 'helper-environment.json').write_text(json.dumps({
+        key: os.environ[key] for key in ('HERDR_PANE_ID', 'HERDR_WORKSPACE_ID')
+    }))
     op = a[0]
     if op == 'status':
         if c.get('status_error'):
@@ -117,6 +120,24 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay()
         self.assertEqual(len(self.calls('add')), 1)
         self.assertEqual(json.loads((self.run / 'add-b.json').read_text())['concurrency'], 1)
+
+    def test_worker_quota_wait_blocks_backlog_with_spare_capacity(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        (self.run / 'run/state.json').write_text(
+            '{"request_id":"replay","request":{"concurrency":3}}')
+        self.pane('complete.txt')
+        self.replay(RESET - 1)
+        self.assertEqual((self.run / 'quota-a.until').read_text().strip(), str(RESET))
+        self.assertFalse(self.calls('add'))
+
+    def test_existing_active_worker_counts_toward_stored_concurrency(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        # The active worker fills the durable cap even if the manifest allows more.
+        (self.run / 'manifest.json').write_text('{"concurrency":4}')
+        self.replay()
+        self.assertFalse(self.calls('add'))
 
     def test_add_failure_is_never_logged_as_added(self):
         self.backlog()
@@ -311,3 +332,81 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay(RESET + 7200)
         self.assertFalse((self.run / 'quota-a.until').exists())
         self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)
+
+    def test_recorded_coordinator_is_split_origin_and_workspaces_are_labeled_once(self):
+        self.env.update(HERDR_PANE_ID='stale:1', HERDR_WORKSPACE_ID='stale')
+        self.replay()
+        self.replay()
+        environment = json.loads((self.root / 'helper-environment.json').read_text())
+        self.assertEqual(environment, {
+            'HERDR_PANE_ID': 'coordinator:1', 'HERDR_WORKSPACE_ID': 'coordinator',
+        })
+        self.assertEqual(self.calls('workspace'), [
+            ['workspace', 'rename', 'ws', 'codex · managed a'],
+        ])
+
+    def test_cancelled_job_skips_pane_supervision_and_done_wake_then_finishes(self):
+        (self.run / 'out-a/CANCELLED').touch()
+        (self.run / 'quota-a.until').write_text(str(RESET))
+        (self.run / 'quota-a.until.sent').touch()
+        self.pane('complete.txt')
+        self.config['finish_output'] = json.dumps({
+            'finish_complete': False,
+            'jobs': [{'pane_id': 'ws:1', 'workspace_closed': False}],
+        })
+        self.replay()
+        self.assertFalse(self.calls('pane'))
+        self.assertFalse(self.calls('workspace'))
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertFalse((self.run / 'out-a/.woke').exists())
+        self.assertFalse((self.sup / 'wake-queue.txt').exists())
+        self.assertIn('active=0', (self.run / 'heartbeat.log').read_text())
+        self.assertIn(str(self.run), (self.sup / 'active-runs.txt').read_text())
+        del self.config['finish_output']
+        self.replay()
+        self.assertEqual(len(self.calls('finish')), 2)
+        self.assertEqual((self.sup / 'active-runs.txt').read_text(), '')
+
+    def test_panelless_job_needs_terminal_marker_then_no_workspace_closure(self):
+        self.config['rows'] = [['a', '-']]
+        self.config['finish_output'] = json.dumps({
+            'finish_complete': True,
+            'jobs': [{'pane_id': None, 'workspace_closed': False}],
+        })
+        self.replay()
+        self.assertFalse(self.calls('finish'))
+        self.assertIn(str(self.run), (self.sup / 'active-runs.txt').read_text())
+        (self.run / 'out-a/DONE').touch()
+        self.replay()
+        self.assertFalse(self.calls('pane'))
+        self.assertFalse(self.calls('workspace'))
+        self.assertEqual((self.sup / 'active-runs.txt').read_text(), '')
+
+    def test_finish_retries_without_repeating_job_done_wake(self):
+        (self.run / 'out-a/DONE').touch()
+        self.config['finish_output'] = json.dumps({
+            'finish_complete': False,
+            'jobs': [{'pane_id': 'ws:1', 'workspace_closed': False}],
+        })
+        self.replay()
+        self.assertIn(str(self.run), (self.sup / 'active-runs.txt').read_text())
+        self.assertTrue((self.run / 'out-a/.woke').exists())
+        del self.config['finish_output']
+        self.replay()
+        self.assertEqual((self.sup / 'active-runs.txt').read_text(), '')
+        self.assertEqual(len(self.calls('finish')), 2)
+        self.assertEqual((self.sup / 'wake-queue.txt').read_text().count('a DONE'), 1)
+
+    def test_continuation_uses_default_two_second_delay_before_enter(self):
+        sleep = self.bin / 'sleep'
+        sleep.write_text(STUB)
+        sleep.chmod(0o755)
+        del self.env['HEARTBEAT_SEND_DELAY']
+        self.pane('complete.txt')
+        self.replay(RESET + 300)
+        calls = list(map(json.loads, (self.root / 'calls.jsonl').read_text().splitlines()))
+        index = next(i for i, (_, args) in enumerate(calls) if args[:2] == ['pane', 'send-text'])
+        self.assertEqual(calls[index][1][2], 'ws:1')
+        self.assertEqual(calls[index + 1], ['sleep', ['2']])
+        self.assertEqual(calls[index + 2], ['herdr', ['pane', 'send-keys', 'ws:1', 'Enter']])
