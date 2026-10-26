@@ -27,6 +27,35 @@ exec 9>"$SUP/codex-heartbeat.lock"; flock -n 9 || exit 0
 log() { echo "$(date -u +%FT%TZ) $*" >> "$R/heartbeat.log"; }
 wake() { echo "$(date -u +%H:%MZ) $(basename "$R"): $*" >> "$SUP/wake-queue.txt"; }
 
+# Exit 6 can mean a delivered start whose acknowledgement was lost. It must
+# still reserve capacity, but need not block unrelated backlog. Never replay it.
+helper_launch_safe() {
+  python3 - "$1" "$2" <<'PY_SAFE'
+import json,sys
+try:
+  d=json.load(open(sys.argv[1]))
+  rc=int(sys.argv[2])
+  assert isinstance(d,dict) and not d.get("error") and isinstance(d["jobs"],list)
+  if rc == 0:
+    sys.exit(0)
+  assert rc == 6 and d["batch_state"] == "unresolved_effect" and d["jobs"]
+  assert any(j["pending_effect"] is not None for j in d["jobs"])
+  for j in d["jobs"]:
+    o=j["observed"]
+    assert o["identity_verified"] is True and not o.get("rate_limit")
+    assert isinstance(j["pane_id"],str) and j["pane_id"]
+    if j["pending_effect"] is not None:
+      assert j["pending_effect"]["action"] == "start"
+      assert j["route"] == {"mode":"agent","runtime":"codex"}
+      assert o["state"] == "working"
+      assert j["issue_code"] == "effect_delivery_unproven"
+    else:
+      assert not j["issue"] and o["state"] in ("working","idle","done","exited")
+except (OSError,KeyError,TypeError,ValueError,AssertionError):
+  sys.exit(1)
+PY_SAFE
+}
+
 [ -f "$SUP/active-runs.txt" ] || exit 0
 while IFS= read -r R || [ -n "$R" ]; do
   [ -d "$R/run" ] || continue
@@ -54,21 +83,32 @@ except (KeyError,IndexError,TypeError,ValueError,AssertionError): print(-1)') ||
   launches_ok=1
   # resume can launch pending jobs, so it must obey the same quota gate as add.
   if [ "$qleft" -gt 10 ]; then
-    if ! python3 "$H" resume --run-dir run --wait-seconds 20 > last-resume.json 2>&1 ||
-       ! python3 -c 'import json,sys;d=json.load(open("last-resume.json"));sys.exit(0 if isinstance(d,dict) and not d.get("error") and isinstance(d.get("jobs"),list) else 1)'; then
+    resume_rc=0
+    python3 "$H" resume --run-dir run --wait-seconds 20 > last-resume.json 2>&1 || resume_rc=$?
+    if ! helper_launch_safe last-resume.json "$resume_rc"; then
       log "resume-failed (see last-resume.json); observing existing jobs only"; launches_ok=0
     fi
   fi
   status_rc=0
-  S=$(python3 "$H" status --run-dir run --summary --wait-seconds 0 2>&1) || status_rc=$?
-  # Partial/unresolved outcomes still contain a usable summary for unaffected jobs.
+  python3 "$H" status --run-dir run --wait-seconds 0 > last-status.json 2>&1 || status_rc=$?
+  # Use current structured observations for admission; the human summary omits
+  # identity and pending-effect evidence. Partial results still allow supervision.
   case "$status_rc" in
-    0) ;;
-    6|10) launches_ok=0 ;;
+    0|6|10) ;;
     *) log "status-failed"; continue ;;
   esac
-  echo "$S" | grep -q '^job ' || { log "status-failed: $(echo $S | head -c 120)"; continue; }
-  rows=$(echo "$S" | awk -F'|' 'NR>2 {gsub(/ /,"",$1);gsub(/ /,"",$2);print $1,$2}')
+  helper_launch_safe last-status.json "$status_rc" || launches_ok=0
+  rows=$(python3 - <<'PY_ROWS' 2>>heartbeat.log
+import json,sys
+with open("last-status.json") as f:
+  d=json.load(f)
+assert not d.get("error") and isinstance(d["jobs"],list)
+for j in d["jobs"]:
+  if j.get("collection_error"):
+    print(f'collection-error {j["job_id"]}: {j["collection_error"]}',file=sys.stderr)
+  print(j["job_id"],j["pane_id"] or "-")
+PY_ROWS
+  ) || { log "status-failed: invalid job records"; continue; }
   active=0; now=${HEARTBEAT_NOW:-$(date -u +%s)}
   while read -r j p; do
     [ -n "$j" ] && [ -n "$p" ] || continue

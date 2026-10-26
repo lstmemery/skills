@@ -13,6 +13,7 @@
       "collection": null,
       "collection_error": null,
       "issue": null,
+      "issue_code": null,
       "job_id": "compatibility-job",
       "model": "default",
       "observed": null,

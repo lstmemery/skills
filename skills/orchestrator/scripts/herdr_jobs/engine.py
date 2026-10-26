@@ -484,7 +484,7 @@ class Engine:
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
                     "worker_disposition", "worker_disposition_override", "admission_wait", "start_diagnostic",
-                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted"],
+                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted", "issue_code"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -498,6 +498,7 @@ class Engine:
             job["admission_model"] = normalize_model(job["admission_model"])
             text(job["admission_lease_id"], "stored admission_lease_id", 512)
             job.setdefault("admission_acquired", False)
+            job.setdefault("issue_code", None)
             job.setdefault("rate_limit_seen", False)
             job.setdefault("rate_limit_until", None)
             job.setdefault("rate_limit_exhausted", False)
@@ -693,7 +694,7 @@ class Engine:
                 "pending_effect": None, "history": [], "observed": None,
                 "activity_seen": False, "settled": False, "collection": None,
                 "collection_error": None, "host_output": host_output,
-                "worker_output": worker_output, "issue": None, "start_diagnostic": None,
+                "worker_output": worker_output, "issue": None, "issue_code": None, "start_diagnostic": None,
                 "telemetry": task_telemetry(spec, resolved_model, provider),
                 "exit_record": str(self.root / "lifecycle" / spec["job_id"] / "exit.json")}
 
@@ -885,6 +886,7 @@ class Engine:
         Path(job["host_output"]).mkdir(parents=True, exist_ok=True, mode=0o700)
         job["pending_effect"] = {"action": action, "started_at": now()}
         job["issue"] = None
+        job["issue_code"] = None
         self.checkpoint()
         try:
             result = self.transport.effect(action, job, prompt)
@@ -1238,6 +1240,7 @@ class Engine:
                     and job["spec"]["route"]["runtime"] == "codex")
 
     def observe(self, job):
+        job["issue_code"] = None
         if job.get("workspace_closed", False):
             return
         if job["pending_effect"] and job["pending_effect"]["action"] == "workspace_close":
@@ -1297,12 +1300,14 @@ class Engine:
             job["activity_seen"] = True
         pending = job["pending_effect"]
         codex_start = self.is_codex_pending_start(job, pending)
-        if codex_start and observation.get("prompt_verified"):
+        if codex_start and (observation.get("prompt_verified") or lifecycle == "done"):
             job["phase"] = "submitted"
             job["pending_effect"] = None
             job["activity_seen"] = True
             job["history"].append({"action": "start", "attempt_id": job["attempt_id"],
-                                   "reconciled_by": "observed Codex Working state", "observed_at": now()})
+                                   "reconciled_by": ("owned Codex completed turn" if lifecycle == "done"
+                                                     else "observed Codex Working state"),
+                                   "observed_at": now()})
         elif (pending and pending["action"] == "prompt" and observation.get("prompt_verified")
               and job["spec"]["route"]["mode"] == "agent"):
             job["phase"] = "submitted"
@@ -1341,13 +1346,15 @@ class Engine:
                 job["issue"] = observation.get("launch_issue", "Codex startup is blocked; effect delivery remains unproven")
             else:
                 job["issue"] = "effect delivery remains unproven; it will not be replayed"
+                job["issue_code"] = "effect_delivery_unproven"
         elif lifecycle == "blocked":
             job["issue"] = observation.get("launch_issue", "worker needs input; approval dialogs remain with the coordinator")
         elif lifecycle == "unknown":
             job["issue"] = "worker activity is unknown"
         elif lifecycle == "exited" and observation["exit_code"] != 0:
             job["issue"] = f"jail launcher exited {observation['exit_code']}"
-        elif job["phase"] == "submitted" and not job["settled"]:
+        elif (job["phase"] == "submitted" and not job["settled"]
+              and not self.has_verified_working_activity(job)):
             if job["spec"]["route"]["mode"] == "agent":
                 job["issue"] = ("prompt delivery is unverified; a matching receipt or visible Working marker is needed; "
                                  "inspect the owned pane before retrying")
@@ -1421,6 +1428,7 @@ class Engine:
                          "attempt_id": job["attempt_id"], "resolved_model": job["resolved_model"],
                          "observed": job["observed"], "settled": job["settled"],
                          "pending_effect": job["pending_effect"], "issue": job["issue"],
+                         "issue_code": job["issue_code"],
                          "start_diagnostic": job.get("start_diagnostic"),
                          "workspace_id": job.get("workspace_id"),
                          "workspace_closed": job.get("workspace_closed", False),

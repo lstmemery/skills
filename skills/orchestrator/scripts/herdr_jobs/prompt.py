@@ -13,13 +13,26 @@ ACTIVE_TURN_STATUS = re.compile(
 )
 
 
+# Codex keeps its timed status above the input and model footer. Narrow panes
+# truncate the interrupt hint, including the closing parenthesis.
+TIMED_ACTIVE_TURN_STATUS = re.compile(
+    r"^[•✳✴✢⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒|/\\-]\s*"
+    r"working\s+\((?:\d+[hms]\s*)+\s*[•·]\s*esc to "
+    r"(?:interrupt\)|int(?:e|er|err|erru|errup|errupt)?…)$",
+    re.IGNORECASE,
+)
+
+
 def has_active_turn_status(output):
-    """Return whether the last visible line is Herdr's active-turn marker."""
+    """Recognize a standalone active-turn marker, including Codex's timed TUI status."""
     if isinstance(output, bytes):
         output = output.decode("utf-8", "replace")
     clean = ANSI_ESCAPE.sub("", str(output))
     lines = [line.strip() for line in clean.splitlines() if line.strip()]
-    return bool(lines and ACTIVE_TURN_STATUS.fullmatch(lines[-1]))
+    return bool((lines and ACTIVE_TURN_STATUS.fullmatch(lines[-1]))
+                or any(TIMED_ACTIVE_TURN_STATUS.fullmatch(line)
+                       and (index == len(lines) - 1 or lines[index + 1].startswith("›"))
+                       for index, line in enumerate(lines)))
 
 
 class PromptNotStarted(RuntimeError):
