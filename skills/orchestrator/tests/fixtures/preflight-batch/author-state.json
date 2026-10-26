@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "request": {
+    "request_id": "fixture-legacy"
+  },
+  "jobs": [
+    {
+      "spec": {
+        "job_id": "author"
+      },
+      "agent_name": "coder-1",
+      "pane_id": "w1:p1",
+      "settled": true,
+      "pending_effect": null,
+      "collection_error": null,
+      "collection": {
+        "outcome": "complete",
+        "unresolved": []
+      }
+    }
+  ]
+}

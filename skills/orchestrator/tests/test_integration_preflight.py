@@ -237,6 +237,162 @@ class IntegrationPreflightTests(unittest.TestCase):
         (self.run_dir / "workers.txt").unlink()
         return roots, jobs
 
+    def prepare_batch(self, *outputs, candidate=None, response=None, output=None):
+        managed = self.root / "legacy-managed"
+        managed.mkdir(exist_ok=True)
+        shutil.copyfile(
+            SKILL_DIR / "tests/fixtures/preflight-batch/author-state.json",
+            managed / "state.json",
+        )
+        command = [
+            sys.executable, str(SKILL_DIR / "scripts/worker-records.py"),
+            "prepare-preflight", "--managed-run", str(managed),
+            "--job-id", "author", "--task-id", "task-1", "--repo", str(self.repo),
+            "--target", "main", "--candidate", candidate or f"orch/task-1={self.head}",
+            "--output", str(output or self.root / "batch"),
+        ]
+        if response is not None:
+            command.extend(["--review-response", str(response)])
+        for output in outputs:
+            command.extend(["--review-output", str(output)])
+        return subprocess.run(command, capture_output=True, text=True, timeout=20)
+
+    def batch_gate(self):
+        return subprocess.run([
+            sys.executable, str(CLI), "--repo", str(self.repo), "--target", "main",
+            "--run-dir", str(self.root / "batch"), "--candidate", f"orch/task-1={self.head}",
+        ], capture_output=True, text=True, timeout=20)
+
+    def test_prepare_legacy_clean_batch_passes_existing_gate(self):
+        self.write_review()
+        source = self.task_dir / "review"
+        evidence = json.loads((source / "review-evidence.json").read_text())
+        evidence["axis_reviewers"] = {"standards": "/root/standards", "spec": "/root/spec"}
+        (source / "review-evidence.json").write_text(json.dumps(evidence))
+        original = {str(p.relative_to(source)): p.read_bytes()
+                    for p in source.rglob("*") if p.is_file()}
+        (source / "done.json").unlink()
+
+        prepared = self.prepare_batch(self.task_dir)
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        result = self.batch_gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        batch = self.root / "batch/task-1"
+        self.assertEqual(json.loads((batch / "result.json").read_text())["candidate"], {
+            "repo": str(self.repo), "branch": "orch/task-1", "base": self.base, "head": self.head,
+        })
+        for relative, data in original.items():
+            if relative != "done.json":
+                self.assertEqual((source / relative).read_bytes(), data)
+                self.assertEqual((batch / "review" / relative).read_bytes(), data)
+
+    def test_prepare_orders_delta_rounds_and_leaves_dispositions_to_coordinator(self):
+        findings = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/round-findings.json").read_text())
+        initial = self.head
+        self.write_review(schema_version=2, standards_findings=findings["standards"])
+        self.git("-C", str(self.repo), "switch", "orch/task-1")
+        (self.repo / "README.md").write_text("fixed candidate\n")
+        self.git("-C", str(self.repo), "commit", "-am", "fix")
+        self.head = self.git("-C", str(self.repo), "rev-parse", "HEAD")
+        self.git("-C", str(self.repo), "switch", "main")
+        self.write_review("review-r1", schema_version=2, base=initial, spec_findings=findings["spec"])
+        # Historical reviewers emitted initial-round keys even for delta reviews.
+        (self.task_dir / "review-r1/done.json").write_text(json.dumps({
+            "task_id": "task-1", "standards_findings": 0, "spec_findings": 1,
+        }))
+
+        prepared = self.prepare_batch(self.task_dir / "review", self.task_dir / "review-r1")
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        task = self.root / "batch/task-1"
+        done = json.loads((task / "review-r1/done.json").read_text())
+        self.assertEqual(done["new_findings"], 1)
+        self.assertEqual(done["unfixed"], 1)
+        self.assertNotIn("spec_findings", done)
+        response = (task / "review-response.md").read_text()
+        self.assertIn("review/S1", response)
+        self.assertIn("review-r1/P1", response)
+        self.assertNotIn(": fixed", response)
+        self.assertNotIn(": rejected", response)
+        self.assertEqual(self.batch_gate().returncode, 1)
+
+    def test_prepare_applies_only_supplied_coordinator_dispositions_and_recounts_delta(self):
+        findings = json.loads((SKILL_DIR / "tests/fixtures/preflight-batch/round-findings.json").read_text())
+        self.write_review(head=self.base)
+        self.write_review("review-r1", schema_version=2, standards_findings=findings["standards"])
+        response = self.root / "coordinator-response.md"
+        response.write_text("- `review-r1/S1`: rejected — Approved bounded follow-up.\n")
+
+        prepared = self.prepare_batch(
+            self.task_dir / "review", self.task_dir / "review-r1", response=response,
+        )
+
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        result = self.batch_gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        task = self.root / "batch/task-1"
+        self.assertEqual((task / "review-response.md").read_bytes(), response.read_bytes())
+        self.assertEqual(json.loads((task / "review-r1/done.json").read_text())["unfixed"], 0)
+        original = json.loads((self.task_dir / "review-r1/review-evidence.json").read_text())
+        self.assertEqual(original["axes"]["standards"]["findings"][0]["disposition"], "pending")
+
+    def test_prepare_refuses_damaged_capture_without_publishing_batch(self):
+        self.write_review()
+        (self.task_dir / "review/capture/diff.patch").write_text("tampered\n")
+
+        result = self.prepare_batch(self.task_dir)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("capture", result.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_prepare_refuses_capture_links_without_following_them(self):
+        self.write_review()
+        capture = self.task_dir / "review/capture"
+        external = self.root / "external.patch"
+        (capture / "diff.patch").rename(external)
+        (capture / "diff.patch").symlink_to(external)
+
+        result = self.prepare_batch(self.task_dir)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("symlink", result.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_prepare_refuses_review_chain_that_does_not_reach_candidate(self):
+        self.write_review(head=self.base)
+
+        result = self.prepare_batch(self.task_dir)
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("candidate", result.stderr)
+        self.assertFalse((self.root / "batch").exists())
+
+    def test_prepare_refuses_mismatched_task_author_and_self_review(self):
+        self.write_review()
+        path = self.task_dir / "review/review-evidence.json"
+        original = json.loads(path.read_text())
+        for key, value in (("task_id", "other-task"), ("author_identity", "other-author"),
+                           ("reviewer_identity", "coder-1")):
+            with self.subTest(key=key):
+                path.write_text(json.dumps({**original, key: value}))
+                result = self.prepare_batch(self.task_dir)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertFalse((self.root / "batch").exists())
+
+    def test_prepare_refuses_moved_pin_and_existing_output(self):
+        self.write_review()
+        moved = self.prepare_batch(self.task_dir, candidate=f"orch/task-1={self.base}")
+        self.assertEqual(moved.returncode, 2, moved.stdout + moved.stderr)
+        self.assertFalse((self.root / "batch").exists())
+        prepared = self.prepare_batch(self.task_dir, candidate=self.head)
+        self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+        before = (self.root / "batch/workers.txt").read_bytes()
+        repeated = self.prepare_batch(self.task_dir)
+        self.assertEqual(repeated.returncode, 2, repeated.stdout + repeated.stderr)
+        self.assertEqual((self.root / "batch/workers.txt").read_bytes(), before)
+
     def test_managed_large_capture_passes_as_one_collected_bundle(self):
         self.git("-C", str(self.repo), "switch", "orch/task-1")
         for index in range(295):
