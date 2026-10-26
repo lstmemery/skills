@@ -308,15 +308,18 @@ Ordinary runtime/model/effort defaults come from the configured CSV ladder, as d
 
 For desktop unattended fleets, the tested out-of-session driver is
 [`codex-heartbeat.timer`](unattended.md#desktop-codex-heartbeat). It calls
-`resume`, labels workspaces, and feeds an approved `ORDER` backlog at cap 4.
+`resume` when quota permits, labels workspaces, and feeds an approved `ORDER`
+backlog up to the run's stored concurrency.
 It uses the recorded coordinator pane as the worker split origin and retries
 `finish` until every returned job either has a closed workspace or no pane.
 `DONE` and `CANCELLED` markers count as terminal for this feeder; cancelled jobs
 are skipped during pane supervision. JSON add errors stop feeding for the pass
 and queue a wake. These markers and wakes do not replace receipts, acceptance, or
-`check-closeout`. The vendored snapshot pins a Codex route and concurrency;
-check those constraints before enrolling another run. It is separate from the
-helper's own recovery and does not install itself when this skill is loaded.
+`check-closeout`. The canonical heartbeat uses per-job route files (defaulting
+to Codex `gpt-6-luna`/low) and requires fresh quota above 10% in every reported
+window before launching; check routes and authorization before enrolling a run.
+It is separate from the helper's own recovery and does not install itself when
+this skill is loaded.
 
 The explicit run directory contains `state.json`, a per-run lock, worker output directories, immutable collection revisions, and (for jail work) launcher requests and exit records. Files are written through temporary files and atomic replacement. State retains request/policy digests, attempts, returned IDs, observations, and pending effects. The same request and run directory resume; altered content conflicts. Different directories are independent runs, even if the caller reuses a request ID. Provider admission is the shared exception: all launch paths use the locked host file `~/.local/state/orchestrator/provider-admission.json` and its adjacent lock.
 
