@@ -106,6 +106,89 @@ class HeartbeatReplayTest(unittest.TestCase):
         sent = [a[1] for a in self.calls('pane') if a[1].startswith('send-')]
         self.assertEqual(sent, ['send-text', 'send-keys'])
 
+    def test_capacity_stall_continues_once_after_five_minute_backoff(self):
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay()
+        self.replay(RESET + 299)
+        self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
+        self.replay(RESET + 300)
+        self.replay(RESET + 3600)
+        sent = [a for a in self.calls('pane') if a[1].startswith('send-')]
+        self.assertEqual([a[1] for a in sent], ['send-text', 'send-keys'])
+        self.assertEqual(sent[0][2], 'ws:1')
+        self.assertTrue((self.run / 'quota-a.until.sent').exists())
+
+    def test_wrapped_capacity_banner_is_detected(self):
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at\ncapacity. Please try a different\nmodel.')
+        self.replay()
+        self.replay(RESET + 300)
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)
+
+    def test_capacity_continuation_echo_does_not_schedule_another_stall(self):
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay()
+        self.replay(RESET + 300)
+        sent = [a for a in self.calls('pane') if a[1] == 'send-text']
+        self.assertEqual(len(sent), 1)
+        (self.root / 'pane.txt').write_text('› ' + sent[0][3])
+        self.replay(RESET + 301)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.replay(RESET + 7200)
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)
+
+    def test_capacity_stall_rearms_only_after_banner_clears(self):
+        banner = 'Selected model is at capacity. Please try a different model.'
+        (self.root / 'pane.txt').write_text(banner)
+        self.replay()
+        self.replay(RESET + 300)
+        (self.root / 'pane.txt').write_text(banner + '\nWorking (2s)')
+        self.replay(RESET + 301)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        (self.root / 'pane.txt').write_text(banner)
+        self.replay(RESET + 400)
+        self.replay(RESET + 699)
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)
+        self.replay(RESET + 700)
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 2)
+
+    def test_busy_capacity_pane_never_schedules_continuation(self):
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.\nWorking (2s)')
+        self.replay()
+        self.replay(RESET + 3600)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
+
+    def test_done_capacity_job_clears_wait_without_reading_or_continuing(self):
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay()
+        (self.run / 'out-a/DONE').touch()
+        self.replay(RESET + 300)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'read']), 1)
+        self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
+
+    def test_failed_capacity_send_retries_without_marking_success(self):
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay()
+        self.config['send_exit'] = 1
+        self.replay(RESET + 300)
+        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertNotIn('continued a', (self.run / 'heartbeat.log').read_text())
+        self.config['send_exit'] = 0
+        self.replay(RESET + 420)
+        self.replay(RESET + 540)
+        self.assertTrue((self.run / 'quota-a.until.sent').exists())
+        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 2)
+
     def backlog(self):
         (self.run / 'backlog').mkdir(exist_ok=True)
         (self.run / 'ORDER').write_text('a\nb\nc\n')

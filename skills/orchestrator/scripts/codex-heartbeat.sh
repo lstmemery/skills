@@ -5,6 +5,7 @@
 #   - resumes the helper, labels new panes "codex · <run> <job>"
 #   - on a Codex usage-limit banner records the reset time, and at reset+5 min sends ONE
 #     same-pane continuation (text, 2 s pause, Enter — immediate Enter does not submit)
+#   - on an idle Codex model-capacity banner sends ONE continuation after a 5 min backoff
 #   - feeds backlog/task-<job>.md files (ORDER file) up to the stored run concurrency
 #   - runs finish when every job has DONE, then drops the run from active-runs.txt
 set -uo pipefail
@@ -16,6 +17,7 @@ WAKE_COORDINATOR=${WAKE_COORDINATOR:-$SUP/wake-coordinator.py}
 HC=${HC:-/home/deadhand/.config/orchestrator/host-contract.json}
 P=${P:-/home/deadhand/.claude/skills/orchestrator/launch-policy.json}
 MSG="The usage limit has reset. Continue the task from where you stopped; do not repeat changes already made."
+CAPACITY_MSG="The provider retry wait has elapsed. Continue the task from where you stopped; do not repeat changes already made."
 export HERDR_SOCKET_PATH=/home/deadhand/.config/herdr/herdr.sock HERDR_ENV=1
 export PATH=${HEARTBEAT_PATH:-/home/deadhand/.local/bin:/home/deadhand/.local/npm-global/bin:/usr/local/bin:/usr/bin:/bin}:${PATH:-}
 # herdr-jobs splits the *current* pane to create workers; systemd has none, so use the coordinator's.
@@ -80,19 +82,34 @@ except (KeyError,IndexError,TypeError,ValueError,AssertionError): print(-1)') ||
     grep -qx "$w" labeled 2>/dev/null || { "$HERDR" workspace rename "$w" "codex · $name $j" >/dev/null && echo "$w" >> labeled; }
     txt=$("$HERDR" pane read "$p" --source recent-unwrapped --lines 15 2>/dev/null)
     txt=$(printf '%s\n' "$txt" | tr '\n\r' '  ' | tr -s '[:space:]' ' ')
-    if echo "$txt" | grep -qiE "you've hit your usage( limit)?([[:space:].]|$)" && ! echo "$txt" | grep -q "Working ("; then
+    stall=""
+    if ! echo "$txt" | grep -q "Working ("; then
+      if echo "$txt" | grep -qiE "you've hit your usage( limit)?([[:space:].]|$)"; then
+        stall=quota
+      elif echo "$txt" | grep -qiF "Selected model is at capacity. Please try a different model."; then
+        stall=capacity
+      fi
+    fi
+    if [ -n "$stall" ]; then
       until_f="quota-$j.until"
+      continue_msg=$MSG
+      [ "$stall" = capacity ] && continue_msg=$CAPACITY_MSG
       if [ ! -f "$until_f" ]; then
-        when=$(echo "$txt" | tr '\n' ' ' | grep -oE "try again at [^.]*[AP]M" | tail -1 | sed -e 's/try again at //' -e 's/\([0-9]\)\(st\|nd\|rd\|th\),/\1/')
-        t=""
-        [ -n "$when" ] && t=$(date -d "$when" +%s 2>/dev/null)
-        [ -n "$t" ] || t=$((now+3600))
-        [ "$t" -lt "$((now-600))" ] && t=$((t+86400))
-        echo "$t" > "$until_f"; log "BANNER $j $p reset=$(date -u -d @$t +%FT%TZ) ($when)"; wake "$j hit Codex usage limit, auto-continue at $(date -u -d @$((t+300)) +%H:%MZ)"
+        if [ "$stall" = capacity ]; then
+          # Share the quota sent-marker lifecycle; now+300 is the capacity retry time.
+          echo "$now" > "$until_f"; log "CAPACITY $j $p backoff=300s"; wake "$j hit Codex model capacity, auto-continue in five minutes"
+        else
+          when=$(echo "$txt" | tr '\n' ' ' | grep -oE "try again at [^.]*[AP]M" | tail -1 | sed -e 's/try again at //' -e 's/\([0-9]\)\(st\|nd\|rd\|th\),/\1/')
+          t=""
+          [ -n "$when" ] && t=$(date -d "$when" +%s 2>/dev/null)
+          [ -n "$t" ] || t=$((now+3600))
+          [ "$t" -lt "$((now-600))" ] && t=$((t+86400))
+          echo "$t" > "$until_f"; log "BANNER $j $p reset=$(date -u -d @$t +%FT%TZ) ($when)"; wake "$j hit Codex usage limit, auto-continue at $(date -u -d @$((t+300)) +%H:%MZ)"
+        fi
       fi
       if [ ! -f "$until_f.sent" ] && [ "$now" -ge "$(( $(cat "$until_f") + 300 ))" ]; then
-        if "$HERDR" pane send-text "$p" "$MSG" && sleep "${HEARTBEAT_SEND_DELAY:-2}" && "$HERDR" pane send-keys "$p" Enter; then
-          touch "$until_f.sent"; log "continued $j $p"; wake "$j continued after quota reset"
+        if "$HERDR" pane send-text "$p" "$continue_msg" && sleep "${HEARTBEAT_SEND_DELAY:-2}" && "$HERDR" pane send-keys "$p" Enter; then
+          touch "$until_f.sent"; log "continued $j $p"; wake "$j continued after $stall wait"
         else
           log "continue-failed $j $p"
         fi
