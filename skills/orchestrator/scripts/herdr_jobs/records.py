@@ -925,3 +925,20 @@ def bounded_file(root, relative, limit=16777216):
         return data
     finally:
         os.close(descriptor)
+
+
+def validate_receipt(raw, expected, hashes=None, *, label="receipt", identity_error=None):
+    """Validate attempt identity and optionally bind receipt bytes to artifact hashes.
+
+    Callers retain their own outcome policy and independently read artifact bytes.
+    Collection validates before reading artifacts, then supplies hashes once read.
+    """
+    receipt = fields(parse_json(raw), ["schema_version", "request_id", "job_id", "attempt_id",
+                                     "outcome", "artifacts", "unresolved"], label=label)
+    version(receipt["schema_version"])
+    if (receipt["request_id"], receipt["job_id"], receipt["attempt_id"]) != expected:
+        if identity_error is not None:
+            raise identity_error
+        raise JobError("conflict", "receipt belongs to a different request/job/attempt")
+    revision = None if hashes is None else digest(raw + encoded(hashes))
+    return receipt, revision

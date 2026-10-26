@@ -46,14 +46,11 @@ def collected_files(root, request_id, job):
     raw = records.bounded_file(root, str(receipt_path.relative_to(root)), 262144)
     if records.digest(raw) != collection["receipt_sha256"]:
         raise ReviewEvidenceError("managed receipt digest mismatch")
-    receipt = records.parse_json(raw)
-    records.fields(receipt, ["schema_version", "request_id", "job_id", "attempt_id",
-                             "outcome", "artifacts", "unresolved"], label="managed receipt")
-    records.version(receipt["schema_version"])
-    if ((receipt["request_id"], receipt["job_id"], receipt["attempt_id"])
-            != (request_id, job_id, attempt)
-            or receipt["outcome"] != "complete" or receipt["unresolved"]):
-        raise ReviewEvidenceError("managed receipt identity or outcome mismatch")
+    identity_error = ReviewEvidenceError("managed receipt identity or outcome mismatch")
+    receipt, _ = records.validate_receipt(
+        raw, (request_id, job_id, attempt), label="managed receipt", identity_error=identity_error)
+    if receipt["outcome"] != "complete" or receipt["unresolved"]:
+        raise identity_error
     artifacts = collection["artifacts"]
     if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 32:
         raise ReviewEvidenceError("managed collection needs 1–32 artifacts")
@@ -76,8 +73,10 @@ def collected_files(root, request_id, job):
             raise ReviewEvidenceError("managed artifact digest or size mismatch")
         files[source] = data
         hashes.append({"source": source, "sha256": digest})
-    if (receipt["artifacts"] != list(files)
-            or records.digest(raw + records.encoded(hashes)) != revision):
+    _, actual_revision = records.validate_receipt(
+        raw, (request_id, job_id, attempt), hashes,
+        label="managed receipt", identity_error=identity_error)
+    if receipt["artifacts"] != list(files) or actual_revision != revision:
         raise ReviewEvidenceError("managed collection revision does not match its receipt and artifacts")
     return files
 
