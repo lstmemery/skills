@@ -79,6 +79,13 @@ closes only jobs that are settled and have a valid collected receipt. A missing
 workspace ID or failed worker-result validation leaves the job open with an
 actionable issue.
 
+A matching receipt and collected artifacts also prove submission after manual
+continuation in the same pane, even if the checkpoint still says `moved`,
+`retry_ready`, or `ready` with no pending effect. Observation records this
+reconciliation before `resume` can launch again. Settlement still requires a
+verified owned pane in `idle`, `done`, or `exited`; unresolved resource effects
+and invalid receipts do not authorize closure. A `DONE` file alone is insufficient.
+
 Preview validates the request, policy, and prompts offline; it does not read the host contract and cannot report a missing or unverified binding. Before the first live call, confirm the contract's `jail_export` is non-null, `verified`, and bound to the child's output root; a preview success is not evidence the binding exists.
 
 Execute the returned `next_action.argv` as an argument array. A next action of `inspect` requires reading the per-job issues before continuing; it is not permission to repeat an unresolved effect. `status` performs observations and local checkpoints but never launches or prompts. `resume` may launch queued work or continue a proven-safe startup step.

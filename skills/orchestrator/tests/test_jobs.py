@@ -843,6 +843,164 @@ class JobsTest(unittest.TestCase):
         self.assertIn("not settled", result["finish"]["jobs"]["job0"]["issue"])
         self.assertFalse(any(event["action"] == "workspace_close" for event in self.events()))
 
+    def manual_continuation_fixture(self, phase="moved", pending_action=None):
+        self.configure(jobs={"job0": "working"})
+        self.call()
+        state = self.state()
+        job = state["jobs"][0]
+        pending = {"action": pending_action, "started_at": state["updated_at"]} if pending_action else None
+        job.update(phase=phase, pending_effect=pending, settled=False, activity_seen=False,
+                   rate_limit_seen=True, rate_limit_recoveries=1, rate_limit_until=0,
+                   issue="provider usage limit persisted after the single bounded recovery")
+        engine = Engine(self.run, None, None)
+        engine.state = state
+        (self.run / "state.json").write_bytes(encoded(state) + b"\n")
+        engine.coordinator_checkpoint_store.append(engine.coordinator_checkpoint_summary(), "checkpoint")
+        output = Path(job["host_output"])
+        (output / "result.md").write_text("Completed by hand in the same owned pane.\n")
+        (output / "DONE").touch()
+        (output / "receipt.json").write_text(json.dumps({
+            "schema_version": 1, "request_id": "test-request", "job_id": "job0",
+            "attempt_id": job["attempt_id"], "outcome": "complete",
+            "artifacts": ["result.md"], "unresolved": [],
+        }))
+        self.configure()
+        return job
+
+    def test_finish_settles_manual_continuation_without_an_extra_resume(self):
+        before = self.manual_continuation_fixture()
+        events_before = len(self.events())
+
+        code, result = self.call("finish")
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual((code, result["finish_complete"]), (0, True))
+        job = self.state()["jobs"][0]
+        self.assertEqual(job["phase"], "submitted")
+        self.assertTrue(job["settled"])
+        self.assertTrue(job["workspace_closed"])
+        self.assertFalse(job["admission_acquired"])
+        self.assertEqual(job["attempt_id"], before["attempt_id"])
+        telemetry = json.loads((Path(job["host_output"]) / "telemetry.json").read_text())
+        self.assertIsNotNone(telemetry["ended_at"])
+        self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS
+                             for event in self.events()[events_before:]))
+
+    def test_resume_settles_manual_continuation_without_relaunching(self):
+        before = self.manual_continuation_fixture()
+        events_before = len(self.events())
+
+        code, result = self.call("resume")
+
+        self.assertEqual((code, result["batch_state"]), (0, "collected"))
+        job = self.state()["jobs"][0]
+        self.assertTrue(job["settled"])
+        self.assertEqual(job["attempt_id"], before["attempt_id"])
+        self.assertFalse(job["workspace_closed"])
+        self.assertFalse(job["admission_acquired"])
+        self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS
+                             for event in self.events()[events_before:]))
+        self.assertEqual(self.call("finish")[0], 0)
+
+    def test_resume_does_not_relaunch_a_receipted_attempt_with_unverified_pane_identity(self):
+        self.manual_continuation_fixture()
+        self.configure(observation={"state": "done", "identity_verified": False})
+        events_before = len(self.events())
+
+        _, result = self.call("resume")
+
+        self.assertFalse(result["jobs"][0]["settled"])
+        self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS
+                             for event in self.events()[events_before:]))
+        self.assertFalse(self.state()["jobs"][0]["workspace_closed"])
+
+    def test_finish_reconciles_receipts_from_other_pre_submission_phases(self):
+        for phase in ("ready", "retry_ready"):
+            with self.subTest(phase=phase):
+                self.run = self.root / phase
+                self.manual_continuation_fixture(phase=phase)
+                events_before = len(self.events())
+
+                code, result = self.call("finish")
+
+                self.assertEqual((code, result["finish_complete"]), (0, True))
+                self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS
+                                     for event in self.events()[events_before:]))
+
+    def test_finish_refuses_invalid_manual_continuation_receipts_even_with_done(self):
+        for mode in ("missing", "malformed", "request_id", "job_id", "attempt_id",
+                     "missing_artifact", "escape", "symlink"):
+            with self.subTest(mode=mode):
+                self.run = self.root / mode
+                job = self.manual_continuation_fixture()
+                output = Path(job["host_output"])
+                receipt_path = output / "receipt.json"
+                receipt = json.loads(receipt_path.read_text())
+                if mode == "missing":
+                    receipt_path.unlink()
+                elif mode == "malformed":
+                    receipt_path.write_text("not JSON")
+                else:
+                    if mode in ("request_id", "job_id", "attempt_id"):
+                        receipt[mode] = "another-identity"
+                    elif mode == "missing_artifact":
+                        receipt["artifacts"] = ["missing.md"]
+                    elif mode == "escape":
+                        receipt["artifacts"] = ["../result.md"]
+                    else:
+                        (output / "link.md").symlink_to(output / "result.md")
+                        receipt["artifacts"] = ["link.md"]
+                    receipt_path.write_text(json.dumps(receipt))
+                events_before = len(self.events())
+
+                _, result = self.call("finish")
+
+                self.assertFalse(result["finish_complete"])
+                self.assertFalse(result["jobs"][0]["settled"])
+                self.assertEqual(result["jobs"][0]["phase"], "moved")
+                self.assertIsNotNone(result["jobs"][0]["collection_error"])
+                self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS | {"workspace_close"}
+                                     for event in self.events()[events_before:]))
+
+    def test_receipt_cannot_close_or_relaunch_an_ambiguous_manual_continuation(self):
+        observations = (
+            {"state": "working", "identity_verified": True, "prompt_verified": True},
+            {"state": "blocked", "identity_verified": True},
+            {"state": "unknown", "identity_verified": True},
+            {"state": "done", "identity_verified": False},
+        )
+        for index, observation in enumerate(observations):
+            for operation in ("finish", "resume"):
+                with self.subTest(observation=observation, operation=operation):
+                    self.run = self.root / f"ambiguous-{index}-{operation}"
+                    self.manual_continuation_fixture()
+                    self.configure(observation=observation)
+                    events_before = len(self.events())
+
+                    _, result = self.call(operation)
+
+                    self.assertFalse(result["jobs"][0]["settled"])
+                    self.assertFalse(result["jobs"][0]["workspace_closed"])
+                    self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS | {"workspace_close"}
+                                         for event in self.events()[events_before:]))
+
+    def test_receipt_cannot_resolve_ambiguous_resource_effects(self):
+        for phase, pending in (("pending", "split"), ("split", "move"), ("moved", "retry_setup")):
+            for operation in ("finish", "resume"):
+                with self.subTest(pending=pending, operation=operation):
+                    self.run = self.root / f"pending-{pending}-{operation}"
+                    self.manual_continuation_fixture(phase=phase, pending_action=pending)
+                    events_before = len(self.events())
+
+                    _, result = self.call(operation)
+
+                    self.assertFalse(result["jobs"][0]["settled"])
+                    self.assertFalse(result["jobs"][0]["workspace_closed"])
+                    self.assertEqual(result["jobs"][0]["pending_effect"]["action"], pending)
+                    self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS | {"workspace_close"}
+                                         for event in self.events()[events_before:]))
+
+
     def test_visible_working_marker_is_required_when_no_receipt_landed(self):
         self.configure(jobs={"job0": "unverified_working"})
 
