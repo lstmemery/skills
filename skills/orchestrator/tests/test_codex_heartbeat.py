@@ -121,6 +121,24 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.assertEqual(len(self.calls('add')), 1)
         self.assertEqual(json.loads((self.run / 'add-b.json').read_text())['concurrency'], 1)
 
+    def test_worker_quota_wait_blocks_backlog_with_spare_capacity(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        (self.run / 'run/state.json').write_text(
+            '{"request_id":"replay","request":{"concurrency":3}}')
+        self.pane('complete.txt')
+        self.replay(RESET - 1)
+        self.assertEqual((self.run / 'quota-a.until').read_text().strip(), str(RESET))
+        self.assertFalse(self.calls('add'))
+
+    def test_existing_active_worker_counts_toward_stored_concurrency(self):
+        self.backlog()
+        (self.run / 'out-a/DONE').unlink()
+        # The active worker fills the durable cap even if the manifest allows more.
+        (self.run / 'manifest.json').write_text('{"concurrency":4}')
+        self.replay()
+        self.assertFalse(self.calls('add'))
+
     def test_add_failure_is_never_logged_as_added(self):
         self.backlog()
         self.config.update(add_output='{"jobs":[]}', add_exit=1)
