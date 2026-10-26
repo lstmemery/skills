@@ -1,0 +1,9 @@
+level,primary_model,primary_effort,primary_harness,primary_provider,fallback_model,fallback_effort,fallback_harness,fallback_provider
+1,gpt-6-luna,low,codex,codex,gpt-6-luna,low,pi,opencode go
+2,gpt-6-luna,medium,codex,codex,gpt-6-luna,medium,pi,opencode go
+3,gpt-6-luna,xhigh,codex,codex,gpt-6-luna,xhigh,pi,opencode go
+4,gpt-6-luna,max,codex,codex,gpt-6-luna,max,pi,opencode go
+5,mimo-v2.6-pro,max,pi,opencode go,gpt-6.1-sol,low,codex,codex
+6,gpt-6.1-sol,high,codex,codex,claude-sonnet-5-5,medium,claude,claude
+7,gpt-6.1-sol,max,codex,codex,claude-sonnet-5-5,high,claude,claude
+8,claude-opus-5-5,high,claude,claude,gpt-6-astra,high,codex,codex

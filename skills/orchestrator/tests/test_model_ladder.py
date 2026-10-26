@@ -19,11 +19,11 @@ import test_transport
 
 
 EXPECTED = [
-    (("gpt-6-luna", "low", "codex", "codex"), ("gpt-6-luna", "low", "pi", "opencode go")),
-    (("gpt-6-luna", "medium", "codex", "codex"), ("gpt-6-luna", "medium", "pi", "opencode go")),
-    (("gpt-6-luna", "xhigh", "codex", "codex"), ("gpt-6-luna", "xhigh", "pi", "opencode go")),
-    (("gpt-6-luna", "max", "codex", "codex"), ("gpt-6-luna", "max", "pi", "opencode go")),
-    (("mimo-v2.6-pro", "max", "pi", "opencode go"), ("gpt-6.1-sol", "low", "codex", "codex")),
+    (("gpt-6-luna", "low", "codex", "codex"), ("claude-sonnet-5-5", "low", "claude", "claude")),
+    (("gpt-6-luna", "medium", "codex", "codex"), ("claude-sonnet-5-5", "medium", "claude", "claude")),
+    (("gpt-6-luna", "xhigh", "codex", "codex"), ("claude-sonnet-5-5", "medium", "claude", "claude")),
+    (("gpt-6-luna", "max", "codex", "codex"), ("claude-sonnet-5-5", "high", "claude", "claude")),
+    (("gpt-6.1-sol", "low", "codex", "codex"), ("claude-sonnet-5-5", "medium", "claude", "claude")),
     (("gpt-6.1-sol", "high", "codex", "codex"), ("claude-sonnet-5-5", "medium", "claude", "claude")),
     (("gpt-6.1-sol", "max", "codex", "codex"), ("claude-sonnet-5-5", "high", "claude", "claude")),
     (("claude-opus-5-5", "high", "claude", "claude"), ("gpt-6-astra", "high", "codex", "codex")),
@@ -48,6 +48,9 @@ class LadderTest(unittest.TestCase):
         self.job = {"job_id": "route-test", "name": "Route test", "task_kind": "ordinary",
                     "task_file": "task.md", "cwd": str(self.root), "output_expectation": "Report",
                     "writes_repository": False}
+
+    def use_opencode_go_ladder(self):
+        self.csv.write_bytes((PACKAGE / "tests/fixtures/opencode-go-model-ladder.csv").read_bytes())
 
     def prepared(self, **values):
         self.manifest.write_text(json.dumps({"schema_version": 1, "request_id": "routes",
@@ -264,6 +267,7 @@ class LadderTest(unittest.TestCase):
             provider_arguments("codex", "opencode-go")
 
     def test_preflight_rejects_opencode_go_codex_spec_before_host_discovery(self):
+        self.use_opencode_go_ladder()
         fixture = self.fixture()
         spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit",
                           "evidence": self.fallback_evidence("rate_limit")})
@@ -284,6 +288,7 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(fixture.calls, [])
 
     def test_effect_refuses_opencode_go_codex_route_before_any_action(self):
+        self.use_opencode_go_ladder()
         fixture = self.fixture()
         spec = self.prepared(model_level=1, model_fallback={"reason": "rate_limit",
                           "evidence": self.fallback_evidence("rate_limit")})
@@ -368,6 +373,7 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(self.prepared()["route"]["runtime"], "omp")
 
     def test_malformed_ladders_fail_offline_without_effects(self):
+        self.use_opencode_go_ladder()
         original = self.csv.read_text()
         rows = original.splitlines()
         malformed = [original.replace("primary_model", "model", 1), "\n".join(rows[:-1]),
@@ -393,6 +399,7 @@ class LadderTest(unittest.TestCase):
                 self.prepared(model_level=level)
 
     def test_installed_catalog_shapes_and_provider_disambiguation(self):
+        self.use_opencode_go_ladder()
         self.assertEqual(catalog_models({"models": [{"id": "old"}]}, "codex"), [{"id": "old"}])
         fixture = self.fixture()
         spec = self.prepared(model_level=6, escalation=self.escalation(6))
@@ -409,6 +416,7 @@ class LadderTest(unittest.TestCase):
             pi_catalog("unexpected native help")
 
     def test_pi_silent_effort_clamping_is_rejected_before_effects(self):
+        self.use_opencode_go_ladder()
         fixture = self.fixture()
         fixture.adapter.read_terminal = lambda argv: "provider model context max-out thinking images\nopencode-go mimo-v2.6-pro 1M 128K yes yes\n"
         fixture.adapter.pi_model_efforts = lambda provider, model: ["off", "minimal", "low", "medium", "high"]
@@ -426,6 +434,7 @@ class LadderTest(unittest.TestCase):
         self.assertFalse(any(call[1:3] in (["pane", "split"], ["agent", "start"]) for call in fixture.calls))
 
     def test_opencode_go_fallback_uses_pi_offline_catalog_and_effort_metadata(self):
+        self.use_opencode_go_ladder()
         fixture = self.fixture()
         table = ("provider model context max-out thinking images\n"
                  "opencode-go gpt-6-luna 1M 128K yes yes\n"
