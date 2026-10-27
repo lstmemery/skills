@@ -8,7 +8,7 @@ import sys
 from .cleanup import cleanup_stale, close_workspace
 from .continuation import continue_job
 from .engine import Engine, WORKER_DISPOSITIONS
-from .edit_scope import edit_scope_warnings
+from .edit_scope import declared_brief_contract, edit_scope_warnings
 from .records import JobError, digest, effort_arguments, encoded, prepare, run_lock
 from .transport import BudgetExpired, Deadline, NativeTransport
 
@@ -171,6 +171,7 @@ def main(argv=None, transport_factory=NativeTransport):
                         "runtime_argv": preview_runtime_argv(job),
                         "model_route": job.get("model_route"), "cwd": job["cwd"],
                         "edit_scope_warnings": edit_scope_warnings(job),
+                        "brief_contract": declared_brief_contract(job),
                         "effects": ["create workspace/pane", "start worker", "submit task", "collect artifacts"]}
                         for job in request["jobs"]]}
             print(encoded(result).decode())
