@@ -20,8 +20,8 @@ from herdr_jobs.engine import Engine
 
 
 class NoExternalEffects:
-    def status(self, provider):
-        return {"active_count": 0}
+    def status(self, provider=None):
+        return {"active_count": 0, "leases": []}
 
 
 class StateCompatibilityTests(unittest.TestCase):
