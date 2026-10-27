@@ -275,6 +275,8 @@ def main(argv=None, transport_factory=NativeTransport):
         if engine is not None and engine.state is not None:
             output["checkpoint"] = engine.result()
             output["next_action"] = {"kind": "inspect", "argv": [sys.executable, ENTRYPOINT, "status", "--run-dir", str(engine.root), "--wait-seconds", "0"]}
+            if engine.defer_quota_recovery:
+                output["next_action"]["argv"].append("--defer-quota-recovery")
         print(encoded(output).decode())
         return EXIT_CODES[error.kind]
     except (OSError, UnicodeError) as error:

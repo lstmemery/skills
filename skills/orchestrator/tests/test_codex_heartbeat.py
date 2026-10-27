@@ -42,7 +42,11 @@ elif name == 'herdr-jobs.py':
                 print(f'{j} | {p} | running | - | -')
         else:
             print(c.get('status_output', json.dumps({'jobs': [
-                {'job_id': j, 'pane_id': None if p == '-' else p} for j, p in c['rows']
+                {'job_id': j, 'pane_id': None if p == '-' else p,
+                 'pending_effect': None, 'rate_limit_seen': False,
+                 'rate_limit_recoveries': 0, 'continuation_count': 0,
+                 'observed': None, 'settled': False, 'collection': None,
+                 'collection_error': None, 'workspace_closed': False} for j, p in c['rows']
             ]})))
         sys.exit(c.get('status_exit', 0))
     else:
@@ -146,6 +150,28 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay(RESET + 300)
         self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
         self.assertFalse(self.calls('continue'))
+
+    def test_incomplete_status_cannot_replay_capacity_input(self):
+        for field in ('pending_effect', 'rate_limit_seen', 'rate_limit_recoveries',
+                      'continuation_count', 'settled', 'collection',
+                      'workspace_closed', 'observed', 'collection_error'):
+            with self.subTest(missing=field):
+                (self.root / 'calls.jsonl').unlink(missing_ok=True)
+                for artifact in ('heartbeat.log', 'capacity-a.until', 'capacity-a.until.sent'):
+                    (self.run / artifact).unlink(missing_ok=True)
+                job = self.quota_job(
+                    rate_limit_seen=False, pending_effect={'action': 'prompt'},
+                    observed={'identity_verified': True, 'state': 'idle'})
+                del job[field]
+                self.config['status_output'] = json.dumps({'batch_state': 'partial', 'jobs': [job]})
+                (self.root / 'pane.txt').write_text(
+                    'Selected model is at capacity. Please try a different model.')
+                self.replay()
+                self.replay(RESET + 300)
+                self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
+                self.assertFalse(self.calls('continue'))
+                self.assertIn('status-failed: invalid job records',
+                              (self.run / 'heartbeat.log').read_text())
 
     def test_wrapped_quota_banner_delegates_reset_handling(self):
         self.quota_job()
@@ -372,6 +398,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":2}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'},
@@ -395,6 +423,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":3}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'},
@@ -403,6 +433,8 @@ class HeartbeatReplayTest(unittest.TestCase):
             'observed': {'state': 'working', 'identity_verified': True, 'prompt_verified': False},
         }
         completed = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'workspace_closed': False,
             'job_id': 'completed', 'pane_id': 'ws:2', 'phase': 'submitted', 'settled': True,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': None, 'issue': None,
@@ -430,6 +462,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":3}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'},
@@ -457,6 +491,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":4}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'}, 'issue': None,
@@ -492,6 +528,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.backlog()
         (self.run / 'out-a/DONE').unlink()
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'}, 'issue': None,
@@ -590,14 +628,16 @@ class HeartbeatReplayTest(unittest.TestCase):
             '{"request_id":"replay","request":{"concurrency":3}}')
         job = self.quota_job(job_id='running', pane_id='ws:2')
         self.config['status_output'] = json.dumps({'jobs': [
-            {'job_id': 'a', 'pane_id': None}, job]})
+            {**job, 'job_id': 'a', 'pane_id': None, 'rate_limit_seen': False,
+             'observed': None, 'settled': True}, job]})
         self.config.update(continue_exit=5, continue_output='{"error":"decision_needed"}')
         for operation in ('resume', 'status'):
             for code in (6, 10):
                 with self.subTest(operation=operation, code=code):
                     self.config.update(resume_exit=0, status_exit=0)
                     self.config['status_output'] = json.dumps({'jobs': [
-                        {'job_id': 'a', 'pane_id': None}, job]})
+                        {**job, 'job_id': 'a', 'pane_id': None, 'rate_limit_seen': False,
+                         'observed': None, 'settled': True}, job]})
                     self.config[operation + '_exit'] = code
                     self.config['resume_output'] = json.dumps({
                         'batch_state': 'partial' if code == 10 else 'unresolved_effect',
@@ -611,7 +651,8 @@ class HeartbeatReplayTest(unittest.TestCase):
                     self.assertFalse(self.calls('add'))
                     # Partial helper replies still gate backlog after quota clears.
                     self.config['status_output'] = json.dumps({'jobs': [
-                        {'job_id': 'a', 'pane_id': None},
+                        {**job, 'job_id': 'a', 'pane_id': None, 'rate_limit_seen': False,
+                         'observed': None, 'settled': True},
                         {**job, 'rate_limit_seen': False, 'observed': {
                             'identity_verified': True, 'state': 'working'}}]})
                     (self.root / 'pane.txt').write_text('Working (1s)')

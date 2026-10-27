@@ -179,6 +179,29 @@ class ContinuationTest(unittest.TestCase):
         self.assertEqual(code, 10, result)
         self.assertIn("--defer-quota-recovery", result["next_action"]["argv"])
 
+    def test_error_followups_preserve_reconciliation_before_replay(self):
+        code, result = self.call(extra=[
+            "--defer-quota-recovery", "--reconciliation", str(self.run / "missing.json")])
+        self.assertEqual(code, 5, result)
+        self.assertEqual(result["error"], "decision_needed")
+        for expected_operation in ("status", "resume"):
+            argv = result["next_action"]["argv"]
+            self.assertEqual(argv[2], expected_operation)
+            output = io.StringIO()
+            with (redirect_stdout(output), patch("herdr_jobs.transport.command", self.pane.command),
+                  patch("time.sleep", self.pane.sleep),
+                  patch("time.monotonic", side_effect=lambda: self.pane.elapsed)):
+                code = main(argv[2:], transport_factory=self.transport)
+            result = json.loads(output.getvalue())
+            self.assertIn(code, (0, 10), result)
+            job = load_json(self.run / "state.json")["jobs"][0]
+            self.assertEqual(job["attempt_id"], self.original["attempt_id"])
+            self.assertEqual(job["rate_limit_recoveries"], 0)
+            self.assertIsNone(job["pending_effect"])
+            self.assertFalse(any(item["action"] == "rate_limit_retry" for item in job["history"]))
+            self.assertEqual(self.pane.events, [])
+        self.assertIn("--defer-quota-recovery", result["next_action"]["argv"])
+
     def test_supervised_quota_observation_preserves_unrelated_ambiguous_effect(self):
         self.edit_job(pending_effect={"action": "move", "started_at": "fixture"})
         code, result = self.call("status", extra=["--defer-quota-recovery"])

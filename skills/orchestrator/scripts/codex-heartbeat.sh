@@ -104,15 +104,19 @@ with open("last-status.json") as f:
   d=json.load(f)
 assert not d.get("error") and isinstance(d["jobs"],list)
 for j in d["jobs"]:
-  if j.get("collection_error"):
+  if j["collection_error"]:
     print(f'collection-error {j["job_id"]}: {j["collection_error"]}',file=sys.stderr)
-  o=j.get("observed") or {}
-  quota=bool(j.get("rate_limit_seen") or o.get("rate_limit"))
-  pending=j.get("pending_effect")
-  blocked=bool(j.get("rate_limit_recoveries",0) or j.get("continuation_count",0)
+  o=j["observed"] or {}
+  quota=bool(j["rate_limit_seen"] or o.get("rate_limit"))
+  pending=j["pending_effect"]
+  recoveries=j["rate_limit_recoveries"]
+  continuations=j["continuation_count"]
+  settled=j["settled"]
+  collection=j["collection"]
+  closed=j["workspace_closed"]
+  blocked=bool(recoveries or continuations
                or (pending and (not quota or pending["action"] not in ("start","prompt")))
-               or j.get("settled") or j.get("collection")
-               or j.get("workspace_closed"))
+               or settled or collection or closed)
   print(j["job_id"],j["pane_id"] or "-",int(quota),int(blocked))
 PY_ROWS
   ) || { log "status-failed: invalid job records"; continue; }
