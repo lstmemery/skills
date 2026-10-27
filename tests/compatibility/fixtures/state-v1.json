@@ -104,6 +104,7 @@
         "host_output": "fixture/run/worker-output",
         "worker_output": "fixture/run/worker-output",
         "issue": null,
+        "issue_code": null,
         "exit_record": "fixture/run/lifecycle/job-1/exit.json"
       }
     ],
@@ -200,6 +201,7 @@
         "host_output": "fixture/run/worker-output",
         "worker_output": "fixture/run/worker-output",
         "issue": null,
+        "issue_code": null,
         "exit_record": "fixture/run/lifecycle/job-1/exit.json"
       }
     ],
@@ -230,6 +232,7 @@
         "settled": false,
         "pending_effect": null,
         "issue": null,
+        "issue_code": null,
         "workspace_id": null,
         "workspace_closed": false,
         "worker_disposition": null,
