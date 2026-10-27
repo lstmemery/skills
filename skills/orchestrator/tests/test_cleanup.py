@@ -14,6 +14,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 from herdr_jobs.admission import AdmissionStore
 from herdr_jobs.cleanup import cleanup_stale, close_workspace
 from herdr_jobs.records import JobError
+from finish_watch import close_herdr_workspace
 
 
 class CleanupStaleTest(unittest.TestCase):
@@ -112,10 +113,34 @@ class CleanupStaleTest(unittest.TestCase):
             close_workspace("w1", env={}, runs_root=self.runs,
                             admission_dir=self.root / "admission")
 
+    def test_coordinator_cleanup_refuses_managed_workspace(self):
+        default_run = self.root / ".local/share/orchestrator/runs/fixture-run"
+        default_run.mkdir(parents=True)
+        (default_run / "state.json").write_text(json.dumps(self.state))
+        store = AdmissionStore(self.root / ".local/state/orchestrator")
+        store.acquire("codex", "model", "lease-a", cap=3, run_id="fixture-run")
+        with patch("pathlib.Path.home", return_value=self.root), patch(
+                "herdr_jobs.cleanup.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as host:
+            with self.assertRaisesRegex(JobError, str(default_run)):
+                close_herdr_workspace("w1")
+        host.assert_not_called()
+        self.assertEqual(store.status()["active_count"], 1)
+
     def test_close_guard_refuses_coordinator_workspace_from_pane_environment(self):
         with self.assertRaisesRegex(JobError, "coordinator workspace"):
             close_workspace("w1", env={"HERDR_PANE_ID": "w1:p9"},
                             runs_root=self.runs, admission_dir=self.root / "admission")
+
+    def test_manually_released_slot_does_not_bypass_managed_close_guard(self):
+        self.store.release("lease-a")
+        self.state["jobs"][0].update(settled=False, admission_acquired=False)
+        (self.run / "state.json").write_text(json.dumps(self.state))
+        with patch("herdr_jobs.cleanup.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0, "{}", "")) as host:
+            with self.assertRaisesRegex(JobError, str(self.run)):
+                close_workspace("w1", env={}, runs_root=self.runs,
+                                admission_dir=self.root / "admission")
+        host.assert_not_called()
 
     def test_close_guard_keeps_existing_behavior_for_non_lease_workspace(self):
         commands = []

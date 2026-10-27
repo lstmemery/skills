@@ -478,6 +478,7 @@ class Engine:
             raise JobError("conflict", "stored jobs do not match the request")
         self.state = state
         self.telemetry_grade_tampering = set()
+        held_lease_ids = {item["lease_id"] for item in self.admission.status()["leases"]}
         for job, spec in zip(state["jobs"], state["request"]["jobs"]):
             fields(job, ["spec", "attempt_id", "agent_name", "resolved_model", "phase", "pane_id", "previous_pane_ids",
                          "pending_effect", "history", "observed", "activity_seen", "settled", "collection",
@@ -638,9 +639,7 @@ class Engine:
                     raise JobError("conflict", "invalid stored collection")
             for name in ("host_output", "worker_output", "exit_record", "agent_name", "attempt_id"):
                 text(job[name], f"stored {name}", 4096)
-            if ((job["phase"] != "pending" or job["pending_effect"] is not None)
-                    and not job["settled"] and not job["admission_acquired"]):
-                self.acquire_admission(job, bypass_admission=True)
+            job["admission_acquired"] = job["admission_lease_id"] in held_lease_ids
         integer(state["request"]["concurrency"], "stored concurrency", 1, 64)
         self.coordinator_grades = self.load_coordinator_grades()
         self.state = state
@@ -1244,9 +1243,12 @@ class Engine:
                     and job["spec"]["route"]["runtime"] == "codex")
 
     def observe(self, job):
-        job["issue_code"] = None
         if job.get("workspace_closed", False):
+            if not job["settled"]:
+                self.collect(job)
+            self.release_retired_admission(job)
             return
+        job["issue_code"] = None
         if job["pending_effect"] and job["pending_effect"]["action"] == "workspace_close":
             return
         if job["pane_id"] is None:
@@ -1285,11 +1287,13 @@ class Engine:
             job["observed"] = {"state": "unknown", "observed_at": now(), "identity_verified": False}
             job["settled"] = False
             job["issue"] = str(error)
+            self.retire_absent_workspace(job)
             return
         job["observed"] = {**observation, "observed_at": now()}
         if not observation["identity_verified"]:
             job["issue"] = observation.get("launch_issue", "worker identity unverified")
             job["settled"] = False
+            self.retire_absent_workspace(job)
             return
         lifecycle = observation["state"]
         if job["pending_effect"] and job["pending_effect"]["action"] == "continue":
@@ -1376,8 +1380,67 @@ class Engine:
         else:
             job["issue"] = None
 
+    def release_retired_admission(self, job):
+        retirement = next((item for item in reversed(job["history"])
+                           if item.get("action") == "external_workspace_closed"
+                           and item.get("attempt_id") == job["attempt_id"]
+                           and item.get("workspace_id") == job["workspace_id"]
+                           and item.get("pane_id") == job["pane_id"]), None)
+        if retirement is not None:
+            self.admission.release(job["admission_lease_id"],
+                                   reconciliation_evidence=retirement["evidence"])
+            job["admission_acquired"] = False
+
+    def retire_absent_workspace(self, job):
+        """Retire a proven owned resource without settling its worker outcome."""
+        pending = job["pending_effect"]
+        if pending and pending["action"] not in ("start", "prompt", "jail"):
+            return
+        owned = job["workspace_id"] and any(
+            item.get("action") == "move" and item.get("attempt_id") == job["attempt_id"]
+            and item.get("pane_id") == job["pane_id"] for item in job["history"])
+        if not owned:
+            return
+        try:
+            if self.transport.workspace_is_open(job):
+                return
+        except (JobError, BudgetExpired, UnicodeError) as error:
+            job["issue"] += f"; workspace absence could not be verified: {error}"
+            return
+        lease = next((item for item in self.admission.status()["leases"]
+                      if item["lease_id"] == job["admission_lease_id"]), None)
+        lease_effect = lease.get("pending_effect") if lease else None
+        if lease is not None and (
+                lease["run_id"] != self.state["request"]["request_id"]
+                or lease_effect is not None and (
+                    lease_effect["pane_id"] != job["pane_id"]
+                    or lease_effect["agent_name"] != job["agent_name"])):
+            job["issue"] += "; admission lease names a different owner; reconcile it before retirement"
+            return
+        evidence = (f"Owned workspace {job['workspace_id']} for attempt {job['attempt_id']} "
+                    "is absent from the verified Herdr workspace list; resource retired, outcome unresolved.")
+        job["history"].append({"action": "external_workspace_closed", "attempt_id": job["attempt_id"],
+                               "workspace_id": job["workspace_id"], "pane_id": job["pane_id"],
+                               "observed_at": now(), "evidence": evidence,
+                               "admission_lease": lease,
+                               "pending_effect": pending,
+                               "receipt_sha256": (job["collection"]["receipt_sha256"]
+                                                  if job["collection"] else None)})
+        job["workspace_closed"] = True
+        job["settled"] = False
+        job["issue_code"] = "external_workspace_closed"
+        job["issue"] = "owned workspace was closed externally; worker outcome remains unresolved; coordinator review required"
+        # Persist retirement before release so a crash cannot restore this reservation.
+        self.checkpoint()
+        self.release_retired_admission(job)
+
     def active(self, job):
-        return not job["settled"] and (job["phase"] != "pending" or job["pending_effect"] is not None)
+        return (not job["settled"] and not job["workspace_closed"]
+                and (job["phase"] != "pending" or job["pending_effect"] is not None))
+
+    def restore_active_admission(self, job):
+        if self.active(job) and not job["admission_acquired"]:
+            self.acquire_admission(job, bypass_admission=True)
 
     @staticmethod
     def has_verified_working_activity(job):
@@ -1398,13 +1461,15 @@ class Engine:
                     if (not job["settled"]
                             and (job["pane_id"] is not None or job["pending_effect"] is not None)):
                         self.observe(job)
+                        self.restore_active_admission(job)
                         self.checkpoint()
             while True:
                 self.deadline.check()
                 observed_in_launch = set()
                 if not status_only:
                     for job in self.state["jobs"]:
-                        if job["settled"] or job["pending_effect"] or job["phase"] == "submitted":
+                        if (job["settled"] or job["workspace_closed"]
+                                or job["pending_effect"] or job["phase"] == "submitted"):
                             continue
                         active_count = sum(self.active(item) for item in self.state["jobs"])
                         if job["phase"] == "pending" and active_count >= self.state["request"]["concurrency"]:
@@ -1418,11 +1483,13 @@ class Engine:
                     if job["spec"]["job_id"] in observed_in_launch:
                         continue
                     self.observe(job)
+                    self.restore_active_admission(job)
                     self.checkpoint()
                 if status_only or all(job["settled"] for job in self.state["jobs"]):
                     return
                 if not any(self.has_verified_working_activity(job) for job in self.state["jobs"]):
-                    launchable = any(job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
+                    launchable = any(not job["workspace_closed"]
+                                     and job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
                                      and job["pending_effect"] is None for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:
                         return

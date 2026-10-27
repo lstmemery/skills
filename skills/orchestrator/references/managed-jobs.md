@@ -40,7 +40,41 @@ reconcile a refused lease through its owning run.
 Do not use raw `herdr workspace close` for lease-bound panes; use this command
 or `finish --run-dir RUN_DIR` so admission capacity is reconciled first. The
 `close-workspace` guard refuses a workspace with a held managed lease and names
-the run directory; ordinary workspaces retain Herdr's existing close behavior.
+the run directory. It also refuses an unclosed managed workspace whose slot was
+already released. The coordinator's `finish-task.py` cleanup helper uses this
+same guard. For managed jobs, use `herdr-jobs.py finish`; ordinary workspaces
+retain Herdr's existing close behavior.
+
+If an owned worker workspace was closed externally, run `finish --run-dir
+RUN_DIR` with a positive observation budget to reconcile it, then inspect its
+per-job issues. The helper requires a move recorded for the current attempt and
+pane, plus an authoritative Herdr workspace list confirming the saved workspace
+is absent. A missing agent/pane response alone does not establish absence. It
+collects any matching receipt and artifacts and checkpoints an
+`external_workspace_closed` history record before releasing that attempt's
+provider slot. The record includes the resource identity, receipt digest when
+available, remaining pending effect, and the admission lease with its unknown
+effect metadata when present. A lease naming a different run or effect owner is
+retained for inspection. Later `resume` calls retain that
+retirement and never relaunch the attempt or restore its stale reservation.
+Positive-budget observation can still collect a late matching receipt for a
+retired attempt without settling it or discarding its unresolved effects.
+
+This retires resources, not the worker outcome: `workspace_closed` is true,
+`settled` remains false, and `issue_code: external_workspace_closed` requests
+coordinator review. `finish_complete` remains false; a matching receipt is still
+subject to review. Missing or invalid receipts and unknown start/prompt/jail
+effects remain visible as collection errors or unresolved effects. Neither a
+`DONE` file nor workspace disappearance proves success. An ambiguous split,
+move, or retry-setup effect cannot be retired this way, because the saved
+workspace does not establish where all of its resources ended up. Missing
+ownership evidence, an open workspace, or a failed workspace-list call also
+retains the reservation for inspection.
+
+Loading a checkpoint (including zero-budget `status`) reads actual admission
+ownership without acquiring a slot. Positive-budget observation reconciles
+retired resources before restoring reservations for workers that remain active
+or ambiguous. Do not manually release a live or ambiguously owned worker's slot.
 
 `finish` maps worker outcomes to coordinator dispositions using the worker
 contract: `ready` → `completed`, `blocked` → `blocked`, `partial` → `failed`,

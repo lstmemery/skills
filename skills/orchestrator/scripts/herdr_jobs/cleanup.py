@@ -223,9 +223,10 @@ def cleanup_stale(args, *, env=None, herdr="herdr", admission_dir=None):
 
 
 def close_workspace(workspace_id, *, env=None, herdr="herdr", runs_root=None,
-                    admission_dir=None, run_command=subprocess.run):
-    """Preserve ordinary close behavior while refusing lease-bound workspaces."""
+                    admission_dir=None, run_command=None):
+    """Preserve ordinary close behavior while guarding managed ownership."""
     env = os.environ if env is None else env
+    run_command = subprocess.run if run_command is None else run_command
     if workspace_id == _caller_workspace(env):
         raise JobError("decision_needed", "refusing to close the coordinator workspace")
     root = Path(runs_root or (Path.home() / ".local/share/orchestrator/runs")).expanduser()
@@ -235,10 +236,11 @@ def close_workspace(workspace_id, *, env=None, herdr="herdr", runs_root=None,
         jobs = state.get("jobs", [])
         for job in jobs:
             if (isinstance(job, dict) and job.get("workspace_id") == workspace_id
-                    and job.get("admission_lease_id") in active_ids):
-                raise JobError("decision_needed", f"workspace is bound to a provider lease; finish run directory {state_path.parent} or use cleanup-stale")
+                    and (job.get("admission_lease_id") in active_ids
+                         or job.get("workspace_closed") is not True)):
+                raise JobError("decision_needed", f"workspace is owned by a managed job; finish run directory {state_path.parent} or use cleanup-stale")
     completed = run_command([herdr, "workspace", "close", workspace_id],
-                             capture_output=True, text=True, check=False)
+                             capture_output=True, text=True, check=False, timeout=30)
     if completed.returncode:
         raise JobError("unavailable_capability", completed.stderr.strip() or completed.stdout.strip())
     return {"closed": True, "workspace_id": workspace_id}

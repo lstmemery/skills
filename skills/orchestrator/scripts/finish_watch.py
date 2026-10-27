@@ -12,6 +12,7 @@ import sys
 import time
 
 from herdr_jobs import records, worker_records
+from herdr_jobs.cleanup import close_workspace
 
 
 OUTCOME_DISPOSITIONS = {
@@ -40,21 +41,13 @@ def _regular_json(path, label):
 
 
 def close_herdr_workspace(workspace):
-    """Close one exact Herdr workspace without invoking a shell or process-name kill."""
+    """Use the managed ownership guard before coordinator workspace cleanup."""
     try:
-        result = subprocess.run(
-            ["herdr", "workspace", "close", workspace],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
+        close_workspace(workspace)
     except FileNotFoundError as error:
         raise RuntimeError("herdr executable was not found") from error
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("herdr workspace close timed out") from error
-    if result.returncode != 0:
-        raise RuntimeError(f"herdr workspace close exited {result.returncode}")
 
 
 def _expected_disposition(task_id, revision, status, summary, evidence):

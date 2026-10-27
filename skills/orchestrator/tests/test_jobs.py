@@ -876,6 +876,140 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(self.call("finish")[1]["finish_complete"], True)
         self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
 
+    def test_external_close_retires_capacity_without_claiming_completion_or_relaunching(self):
+        for receipt_mode in ("valid", "missing", "stale", "malformed"):
+            with self.subTest(receipt=receipt_mode):
+                self.run = self.root / receipt_mode
+                before = self.manual_continuation_fixture(phase="ready")
+                output = Path(before["host_output"])
+                receipt_path = output / "receipt.json"
+                if receipt_mode == "missing":
+                    receipt_path.unlink()
+                elif receipt_mode == "stale":
+                    receipt = json.loads(receipt_path.read_text())
+                    receipt["attempt_id"] = "a" * 32
+                    receipt_path.write_text(json.dumps(receipt))
+                elif receipt_mode == "malformed":
+                    receipt_path.write_text("not JSON")
+                receipt_bytes = receipt_path.read_bytes() if receipt_path.exists() else None
+                (self.root / "closed-workspaces.json").write_text(json.dumps([before["workspace_id"]]))
+                self.configure(observation_error="pane_not_found")
+                AdmissionStore(self.admission_dir).release(before["admission_lease_id"])
+                checkpoint = self.state()
+                checkpoint["jobs"][0]["admission_acquired"] = False
+                (self.run / "state.json").write_bytes(encoded(checkpoint))
+                events_before = len(self.events())
+
+                code, result = self.call("finish")
+
+                self.assertEqual((code, result["finish_complete"]), (10, False))
+                self.assertTrue(result["jobs"][0]["workspace_closed"])
+                for operation in ("resume", "resume"):
+                    code, result = self.call(operation)
+                    job = result["jobs"][0]
+                    self.assertEqual((code, result["batch_state"]), (10, "partial"))
+                    self.assertFalse(job["settled"])
+                    self.assertFalse(job["admission_acquired"])
+                    self.assertEqual(job["issue_code"], "external_workspace_closed")
+                    self.assertEqual(job["attempt_id"], before["attempt_id"])
+                    if receipt_mode == "valid":
+                        self.assertIsNotNone(job["collection"])
+                    else:
+                        self.assertIsNotNone(job["collection_error"])
+                    self.assertEqual(result["provider_active"][job["provider"]], 0)
+                self.assertEqual(receipt_path.read_bytes() if receipt_path.exists() else None, receipt_bytes)
+                self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS | {"workspace_close"}
+                                     for event in self.events()[events_before:]))
+
+    def test_local_status_does_not_restore_a_manually_released_slot_before_observation(self):
+        self.configure(jobs={"job0": "working"})
+        self.call()
+        checkpoint = self.state()
+        job = checkpoint["jobs"][0]
+        AdmissionStore(self.admission_dir).release(job["admission_lease_id"])
+        job["admission_acquired"] = False
+        (self.run / "state.json").write_bytes(encoded(checkpoint))
+        events_before = len(self.events())
+
+        code, result = self.call("status", wait_seconds=0)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(AdmissionStore(self.admission_dir).status()["active_count"], 0)
+        self.assertFalse(result["jobs"][0]["admission_acquired"])
+        self.assertEqual(len(self.events()), events_before)
+        self.call("resume")
+        self.assertEqual(AdmissionStore(self.admission_dir).status()["active_count"], 1)
+
+    def test_external_close_preserves_unknown_admission_effect_evidence(self):
+        before = self.manual_continuation_fixture(phase="ready", pending_action="start")
+        (Path(before["host_output"]) / "receipt.json").unlink()
+        store = AdmissionStore(self.admission_dir)
+        store.record_unknown_effect(before["admission_lease_id"], {
+            "action": "start", "status": "unknown", "pane_id": before["pane_id"],
+            "agent_name": before["agent_name"],
+            "observation": {"state": "unknown", "identity_verified": False,
+                            "prompt_verified": False}})
+        lease = store.status()["leases"][0]
+        (self.root / "closed-workspaces.json").write_text(json.dumps([before["workspace_id"]]))
+        self.configure(observation={"state": "unknown", "identity_verified": False})
+        events_before = len(self.events())
+
+        self.call("finish")
+
+        history = self.state()["jobs"][0]["history"]
+        retirement = next(item for item in history if item["action"] == "external_workspace_closed")
+        self.assertEqual(retirement.get("admission_lease"), lease)
+        self.assertEqual(retirement["pending_effect"], before["pending_effect"])
+        for operation in ("resume", "resume"):
+            code, result = self.call(operation)
+            self.assertEqual((code, result["batch_state"]), (6, "unresolved_effect"))
+            self.assertEqual(result["jobs"][0]["pending_effect"], before["pending_effect"])
+            self.assertFalse(result["jobs"][0]["settled"])
+            self.assertIsNotNone(result["jobs"][0]["collection_error"])
+            self.assertEqual(store.status()["active_count"], 0)
+        self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS
+                             for event in self.events()[events_before:]))
+
+    def test_external_close_cannot_retire_a_lease_naming_another_effect_owner(self):
+        before = self.manual_continuation_fixture(phase="ready", pending_action="start")
+        (Path(before["host_output"]) / "receipt.json").unlink()
+        store = AdmissionStore(self.admission_dir)
+        store.record_unknown_effect(before["admission_lease_id"], {
+            "action": "start", "status": "unknown", "pane_id": "another-owned-pane",
+            "agent_name": before["agent_name"],
+            "observation": {"state": "unknown", "identity_verified": False,
+                            "prompt_verified": False}})
+        lease = store.status()["leases"][0]
+        (self.root / "closed-workspaces.json").write_text(json.dumps([before["workspace_id"]]))
+        self.configure(observation={"state": "unknown", "identity_verified": False})
+
+        _, result = self.call("finish")
+
+        self.assertFalse(result["jobs"][0]["workspace_closed"])
+        self.assertFalse(result["jobs"][0]["settled"])
+        self.assertEqual(result["jobs"][0]["pending_effect"], before["pending_effect"])
+        self.assertEqual(store.status()["leases"], [lease])
+        self.assertIn("different owner", result["jobs"][0]["issue"])
+
+    def test_external_close_collects_late_receipt_without_settling_unknown_work(self):
+        before = self.manual_continuation_fixture(phase="ready", pending_action="start")
+        receipt_path = Path(before["host_output"]) / "receipt.json"
+        receipt = receipt_path.read_bytes()
+        receipt_path.unlink()
+        (self.root / "closed-workspaces.json").write_text(json.dumps([before["workspace_id"]]))
+        self.configure(observation_error="pane_not_found")
+        self.call("finish")
+        receipt_path.write_bytes(receipt)
+
+        code, result = self.call("resume")
+
+        self.assertIsNotNone(result["jobs"][0]["collection"])
+        self.assertIsNone(result["jobs"][0]["collection_error"])
+        self.assertEqual((code, result["batch_state"]), (6, "unresolved_effect"))
+        self.assertEqual(result["jobs"][0]["pending_effect"], before["pending_effect"])
+        self.assertFalse(result["jobs"][0]["settled"])
+        self.assertEqual(AdmissionStore(self.admission_dir).status()["active_count"], 0)
+
     def test_finish_identifies_legacy_receipt_only_jobs_as_not_worker_validated(self):
         self.configure(legacy_receipt_fixture=str(PACKAGE / "tests/fixtures/managed-jobs/legacy-receipt.json"))
         code, result = self.call()
@@ -1031,11 +1165,12 @@ class JobsTest(unittest.TestCase):
             {"state": "done", "identity_verified": False},
         )
         for index, observation in enumerate(observations):
-            for operation in ("finish", "resume"):
-                with self.subTest(observation=observation, operation=operation):
-                    self.run = self.root / f"ambiguous-{index}-{operation}"
+            for operation, list_error in (("finish", False), ("resume", False), ("finish", True)):
+                with self.subTest(observation=observation, operation=operation, list_error=list_error):
+                    self.run = self.root / f"ambiguous-{index}-{operation}-{list_error}"
                     self.manual_continuation_fixture()
-                    self.configure(observation=observation)
+                    self.configure(observation=observation,
+                                   workspace_list_error="workspace list unavailable" if list_error else None)
                     events_before = len(self.events())
 
                     _, result = self.call(operation)
@@ -1047,10 +1182,15 @@ class JobsTest(unittest.TestCase):
 
     def test_receipt_cannot_resolve_ambiguous_resource_effects(self):
         for phase, pending in (("pending", "split"), ("split", "move"), ("moved", "retry_setup")):
-            for operation in ("finish", "resume"):
-                with self.subTest(pending=pending, operation=operation):
-                    self.run = self.root / f"pending-{pending}-{operation}"
-                    self.manual_continuation_fixture(phase=phase, pending_action=pending)
+            for operation, closed in (("finish", False), ("resume", False),
+                                      ("finish", True), ("resume", True)):
+                with self.subTest(pending=pending, operation=operation, closed=closed):
+                    self.run = self.root / f"pending-{pending}-{operation}-{closed}"
+                    before = self.manual_continuation_fixture(phase=phase, pending_action=pending)
+                    (self.root / "closed-workspaces.json").write_text(json.dumps(
+                        [before["workspace_id"]] if closed else []))
+                    if closed:
+                        self.configure(observation={"state": "unknown", "identity_verified": False})
                     events_before = len(self.events())
 
                     _, result = self.call(operation)
