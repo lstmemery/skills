@@ -3,6 +3,7 @@
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 
 
 # Backticks support paths with spaces; unquoted absolute/home paths are common
@@ -108,6 +109,15 @@ def brief_contract_errors(job):
                     if operation == "read" and (not resolved.is_file() or not os.access(resolved, os.R_OK)):
                         errors.append(f"{key}: dependency is not a readable file: {path}")
                     if operation == "write":
+                        ancestor = resolved.parent
+                        while True:
+                            try:
+                                ancestor_mode = ancestor.stat().st_mode
+                                break
+                            except (FileNotFoundError, NotADirectoryError):
+                                ancestor = ancestor.parent
+                        if not stat.S_ISDIR(ancestor_mode):
+                            errors.append(f"{key}: mutation target ancestor is not a directory: {ancestor}")
                         if not all(any(candidate.is_relative_to(root) for root in editable)
                                    for candidate in (Path(os.path.abspath(path)), resolved)):
                             errors.append(f"{key}: target is outside editable_paths: {path} -> {resolved}")

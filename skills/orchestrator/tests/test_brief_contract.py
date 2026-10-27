@@ -120,6 +120,16 @@ class BriefContractTest(unittest.TestCase):
             {"host": "desktop", "path": str(missing), "canonical_path": str(missing)},
         ]}, "resolution unverified")
 
+    def test_mutation_beneath_a_regular_file_is_refused(self):
+        allowed = self.root / "allowed"
+        allowed.mkdir()
+        ancestor = allowed / "ordinary-file"
+        ancestor.write_text("Existing regular file.\n")
+        target = ancestor / "required-context.md"
+        self.assert_refused({"editable_paths": [str(allowed)], "mutation_targets": [
+            {"host": "desktop", "path": str(target), "canonical_path": str(target)},
+        ]}, "ancestor is not a directory")
+
     def test_canonical_destination_must_match_current_local_resolution(self):
         self.assert_refused({"dependencies": [
             {"host": "desktop", "path": str(self.context_test), "canonical_path": str(self.context_fixture)},

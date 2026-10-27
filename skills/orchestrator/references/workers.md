@@ -442,7 +442,9 @@ with `invalid_input` before creating run state or contacting a transport:
 
 - Desktop dependencies must resolve to readable files and match the recorded
   canonical destination. Desktop mutations may name new files; resolve existing
-  parents and compare the result with the recorded destination.
+  parents and compare the result with the recorded destination. The nearest
+  existing ancestor must be a directory; editable scope does not authorize
+  replacing a file ancestor with a directory.
 - Both the lexical and resolved desktop mutation paths must be within the
   lexical `editable_paths`, relative to worker `cwd`, and outside protected
   paths and acceptance tests. An allowed symlink does not grant its destination.
