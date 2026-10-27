@@ -170,6 +170,11 @@ reason, and local-lane completion records the independent validator result.
 ## Native contracts and capability gaps
 
 `claude` is the CSV harness alias for runtime `claude-code`, Herdr kind `claude`.
+Its managed start requires the verified host binding, exact model/effort
+discovery, and the Claude admission pool. Claude effort is capped at `xhigh`;
+Haiku starts additionally require the pane-scoped compaction environment
+described in [managed jobs](managed-jobs.md). Offline support does not attest a
+live host contract or authorize a manual fallback launch.
 `opencode go` maps to native provider `opencode-go`, and every OpenCode Go tuple
 must use Pi. Pi passes `--provider opencode-go`; it passes models unchanged with
 `--model` and efforts with `--thinking`. Codex/OpenCode Go combinations are

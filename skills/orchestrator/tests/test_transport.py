@@ -40,11 +40,13 @@ class FakeHerdr:
         self.prompt_error = prompt_error
         self.retry_environment = {}
         self.retry_output = None
+        self.start_environment = None
 
     def command(self, argv, deadline, cwd=None, env=None):
         self.calls.append(argv)
         self.environments.append(env)
         if argv[:3] == ["herdr", "agent", "start"]:
+            self.start_environment = dict(self.retry_environment)
             return self.start_code, b'{"result":{}}', b"agent_not_ready: timed out" if self.start_code else b""
         if argv[:3] == ["herdr", "agent", "prompt"] and self.prompt_error:
             return 1, b"{}", self.prompt_error.encode()
@@ -68,8 +70,11 @@ class FakeHerdr:
             else:
                 format_string = shlex.split(shell_command)[1]
                 marker = format_string.split("%s", 1)[0].lstrip("\\n")
-                self.retry_output = (marker + self.retry_environment["PI_CODING_AGENT_DIR"] + "__"
-                                     + self.retry_environment["PI_CODING_AGENT_SESSION_DIR"])
+                if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in shell_command:
+                    self.retry_output = marker + self.retry_environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]
+                else:
+                    self.retry_output = (marker + self.retry_environment["PI_CODING_AGENT_DIR"] + "__"
+                                         + self.retry_environment["PI_CODING_AGENT_SESSION_DIR"])
             return 0, b"", b""
         return 0, b'{"result":{}}', b""
 
@@ -526,6 +531,7 @@ class TransportTest(unittest.TestCase):
 
     def test_claude_effort_maps_without_an_explicit_model(self):
         fake = FakeHerdr()
+        self.adapter.binding["supported_kinds"].append("claude")
         self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"},
                          override={"effort": "xhigh"})
 
@@ -548,6 +554,57 @@ class TransportTest(unittest.TestCase):
 
         start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
         self.assertEqual(start[-5:], ["--", "--model", "claude-sonnet-5-5", "--effort", "high"])
+
+    def test_claude_start_refuses_an_unbound_kind_before_any_host_effect(self):
+        fake = FakeHerdr()
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaisesRegex(JobError, "Herdr kind is not verified as installed: claude"):
+                self.adapter.effect("start", self.job, "Assigned work")
+        self.assertEqual(fake.calls, [])
+
+    def test_haiku_start_inherits_the_required_compaction_window_in_its_pane(self):
+        fake = FakeHerdr()
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"},
+                         override={"effort": "medium"})
+        self.job["resolved_model"] = "claude-haiku-4-5-20251001"
+        with patch("herdr_jobs.transport.command", fake.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+        self.assertEqual(fake.start_environment, {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "100000"})
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "claude",
+                                 "--pane", "moved:1", "--", "--model", "claude-haiku-4-5-20251001",
+                                 "--effort", "medium"])
+
+    def test_haiku_environment_setup_rejection_never_starts_the_runtime(self):
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        self.job["resolved_model"] = "haiku"
+        calls = []
+
+        def reject_setup(argv, deadline, cwd=None, env=None):
+            calls.append(argv)
+            return 1, b"", b"setup rejected"
+
+        with patch("herdr_jobs.transport.command", reject_setup):
+            with self.assertRaisesRegex(EffectUnknown, "Haiku environment setup was rejected"):
+                self.adapter.effect("start", self.job, "Assigned work")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:4], ["pane", "run", "moved:1"])
+
+    def test_haiku_does_not_start_without_its_attempt_bound_environment_readback(self):
+        fake = FakeHerdr()
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.adapter.deadline = Deadline(0.01)
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        self.job["resolved_model"] = "claude-haiku-4-5"
+        self.pane_output = "__ORCH_CLAUDE_ENV_previous-attempt__100000"
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaisesRegex(EffectUnknown, "Haiku environment did not persist"):
+                self.adapter.effect("start", self.job, "Assigned work")
+        self.assertIsNone(fake.start_environment)
 
     def test_claude_kind_is_refused_when_host_binding_does_not_list_it(self):
         fake = FakeHerdr()
@@ -583,9 +640,68 @@ class TransportTest(unittest.TestCase):
         result = self.adapter.preflight({"jobs": [self.spec], "policy": {"local_lane": {}}})
         self.assertEqual(result["binding"]["supported_kinds"], ["codex", "omp", "claude"])
 
-    def test_claude_effort_arguments_preserve_explicit_xhigh_or_max(self):
+    def test_claude_effort_is_capped_at_xhigh(self):
         self.assertEqual(effort_arguments("claude-code", "xhigh"), ["--effort", "xhigh"])
-        self.assertEqual(effort_arguments("claude-code", "max"), ["--effort", "max"])
+        with self.assertRaisesRegex(JobError, "effort 'max' is not supported"):
+            effort_arguments("claude-code", "max")
+
+    def test_claude_preflight_refuses_a_saved_max_route_even_if_catalog_accepts_it(self):
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.available.append("claude-code")
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"},
+                         model="claude-sonnet-5-5", override={"effort": "max"})
+        self.catalog = {"models": [{"id": "claude-sonnet-5-5", "efforts": ["medium", "max"]}]}
+        with self.assertRaisesRegex(JobError, "effort 'max' is not supported"):
+            self.adapter.preflight({"jobs": [self.spec], "policy": {}})
+
+    def test_claude_trust_question_blocks_submission_even_when_identity_is_idle(self):
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        self.agent.update(agent="claude", agent_status="idle")
+        self.pane_output = "Do you trust the files in this folder?\n1. Yes, proceed\n2. No, exit"
+        fake = FakeHerdr()
+        with patch("herdr_jobs.transport.command", fake.command):
+            with self.assertRaisesRegex(EffectUnknown, "trust or authentication dialog"):
+                self.adapter.effect("prompt", self.job, "Assigned work")
+        self.assertEqual(fake.calls, [])
+
+    def test_claude_prompt_requires_idle_identity_and_observes_one_active_turn(self):
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        self.agent.update(agent="claude", agent_status="idle")
+        self.pane_output = "Ready"
+        self.job.update(phase="ready", pending_effect={"action": "prompt"})
+        calls = []
+
+        def accept_prompt(argv, deadline, cwd=None, env=None):
+            calls.append(argv)
+            self.agent["agent_status"] = "working"
+            self.pane_output = "Working"
+            return 0, b'{"result":{}}', b""
+
+        with patch("herdr_jobs.transport.command", accept_prompt):
+            result = self.adapter.effect("prompt", self.job, "Assigned work")
+        self.assertEqual(result, {"prompt_submitted": True})
+        self.assertEqual(calls, [["herdr", "agent", "prompt", "c9-fixture", "Assigned work"]])
+
+    def test_claude_mismatched_identity_or_authentication_dialog_never_receives_prompt(self):
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.spec.update(kind="claude", route={"mode": "agent", "runtime": "claude-code"})
+        for agent_changes, output in (
+            ({"agent": "codex"}, "Ready"),
+            ({"agent": "claude", "pane_id": "another:pane"}, "Ready"),
+            ({"agent": "claude", "name": "another-worker"}, "Ready"),
+            ({"agent": "claude"}, "Sign in to continue"),
+        ):
+            with self.subTest(agent_changes=agent_changes, output=output):
+                self.agent.update(agent="claude", pane_id="moved:1", name="c9-fixture", agent_status="idle")
+                self.agent.update(agent_changes)
+                self.pane_output = output
+                fake = FakeHerdr()
+                with patch("herdr_jobs.transport.command", fake.command):
+                    with self.assertRaises(EffectUnknown):
+                        self.adapter.effect("prompt", self.job, "Assigned work")
+                self.assertEqual(fake.calls, [])
 
     def test_omp_effort_maps_to_thinking_without_an_explicit_model(self):
         fake = FakeHerdr()

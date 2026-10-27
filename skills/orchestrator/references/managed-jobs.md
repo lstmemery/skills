@@ -208,7 +208,7 @@ native argument:
 |---|---|---|
 | `codex` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `-c model_reasoning_effort=<value>` |
 | `pi` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `--thinking <value>` |
-| `claude-code` | `low`, `medium`, `high`, `xhigh`, `max` | `--effort <value>` |
+| `claude-code` | `low`, `medium`, `high`, `xhigh` | `--effort <value>` |
 | `omp` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` | `--thinking <value>` |
 
 Every prompt names one canonical output directory in both its worker brief and
@@ -226,10 +226,27 @@ Effort values are runtime-level capabilities; a selected model may support a
 smaller subset. Claude Code receives the resolved exact model as
 `--model <id>` when a model is selected, and its requested effort as
 `--effort <value>`; the host binding must verify these arguments. Effort is
-preserved as requested and is never raised automatically above `xhigh` (or any
-other level). A Pi provider override is also passed to Pi as `--provider` and
+preserved as requested. Claude effort is capped at `xhigh`: `max` is refused
+without downgrading, including when a saved route is preflighted for a new
+start. A Pi provider override is also passed to Pi as `--provider` and
 used for admission, and requires an explicit model because Pi requires
 `--model` with `--provider`.
+
+Managed Claude jobs use `herdr agent start NAME --kind claude --pane PANE --
+--model EXACT_ID --effort VALUE`. The adapter checks the bound kind again before
+starting or prompting. Startup must produce the owned idle Claude identity
+before one prompt is sent; a visible `Working` observation or an attempt-bound
+receipt proves delivery. Trust and authentication dialogs remain blocked.
+For a selected Haiku model (including its native alias), the launcher first
+exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` in that owned pane and verifies
+an attempt-specific readback. An unverified environment leaves the start effect
+unresolved and sends no runtime start or task prompt. The environment is scoped
+to the worker pane; shared Claude configuration is not edited.
+
+Claude leases and backoffs use the `claude` provider pool, independently of
+Codex. The usual receipt/artifact collector applies to Claude: list `DONE` as a
+receipt artifact when it must be collected. A `DONE` marker alone neither
+proves delivery nor replaces the receipt or coordinator acceptance.
 
 `retry_override` is an optional run-level object, pinned in `state.json` and
 applied only to matching workers in that run. Pi accepts `max_retries` (0–100)
