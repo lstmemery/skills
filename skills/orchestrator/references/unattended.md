@@ -88,9 +88,11 @@ accumulate in one context (F8: coordinator context/quota was the scarce resource
 ### Desktop codex-heartbeat
 
 D9 (2026-10-25) adopts the desktop heartbeat as the tested unattended mechanism.
-After rebasing onto n3 (`d6c2a7e`), the canonical heartbeat is
-[`scripts/codex-heartbeat.sh`](../scripts/codex-heartbeat.sh); its SHA-256 matches
-the live desktop copy checked on 2026-10-26. The wake helper remains vendored in
+The canonical source is
+[`scripts/codex-heartbeat.sh`](../scripts/codex-heartbeat.sh). Its Q9 adoption
+changes are a repository candidate; the historical n3 copy (`d6c2a7e`) matched
+the live desktop source checked on 2026-10-26. That comparison does not establish
+that the current candidate is deployed. The wake helper remains vendored in
 [scripts/supervision](../scripts/supervision/README.md). These host-specific
 scripts are not an installer. D9's original documentation check observed the
 timer enabled and active; this rebase did not kill a coordinator or restart the
@@ -139,46 +141,46 @@ For each enrolled run root, the current script:
    clears that notification marker. Existing jobs can still be supervised.
 2. Requires a positive integer concurrency from `run/state.json` at
    `request.concurrency`. When quota permits, calls managed `resume` with a
-   20-second budget, retaining `last-resume.json`. A nonzero exit, JSON error,
-   malformed JSON, or missing `jobs` list disables backlog launches for that
-   pass. It reads `status --summary --wait-seconds 0`; this is local checkpoint
-   evidence, not another live observation pass. Status exits 6 and 10 preserve
-   supervision of unaffected jobs but disable launches; other nonzero exits or
-   a missing summary header skip the run. It appends to `heartbeat.log`.
-3. Clears `quota-<job-id>.until` and its `.sent` marker for `DONE` or `CANCELLED`
-   jobs. Cancelled jobs consume no active slot and receive no pane reads,
+   20-second budget, retaining `last-resume.json`. All helper operations that
+   can observe or launch work pass `--defer-quota-recovery`, so observation
+   cannot prepare or launch a fresh quota retry before effect reconciliation.
+   It reads structured `status` with a positive 20-second budget for current
+   identity, pending-effect and classifier evidence, retaining `last-status.json`.
+   Failed/malformed replies disable backlog; exits 6 and 10 still allow existing
+   workers to be supervised. The narrowly verified live Codex start described
+   in the supervision README may allow unrelated backlog, but counts toward
+   concurrency. Other ambiguous effects block launches.
+3. Clears legacy `quota-<job-id>.until`/`.sent` and capacity wait/sent files
+   for `DONE` or `CANCELLED` jobs. Cancelled jobs consume no active slot and receive no pane reads,
    labels, quota/capacity continuation, or per-job DONE wake. DONE jobs queue a wake once,
    tracked by `out-<job-id>/.woke`. Other jobs with a pane are counted as active;
    their workspaces are renamed `codex · <run-basename> <job-id>` once, tracked
    by the run's `labeled` file.
-4. Reads the last 15 unwrapped lines of each unfinished worker pane and
-   normalizes whitespace, including wrapped banners. The current grep matches
-   `you've hit your usage` with optional ` limit`, case-insensitively, when
-   `Working (` is absent. Echoed continuation text alone does not match. It
-   parses a `try again at … AM/PM` timestamp into `quota-<job-id>.until`, using
-   the host timezone; parse failure falls back to one hour, and a time over ten
-   minutes in the past is advanced a day. At reset plus five minutes it sends
-   continuation text to the same pane, waits **two seconds** by default, then
-   sends Enter. Immediate Enter did not reliably submit in the operational test.
-   Only successful text/delay/Enter delivery creates `.until.sent`; failures
-   log `continue-failed` and can retry on later passes. The reset and sent files
-   remain while the banner persists, preventing repeated successful sends for
-   that stored reset. They clear when the banner disappears, Working appears,
-   or the job becomes terminal. A later banner can create another reset.
-   The same idle-pane check also recognizes `Selected model is at capacity.
-   Please try a different model.` after whitespace normalization. For this
-   transient provider stall it stores the observation time in the same
-   `quota-<job-id>.until` file and waits **five minutes** before one same-pane
-   continuation; it does not change the selected model. The same `.until.sent`
-   marker suppresses further successful sends while the banner persists, and
-   clears on progress, banner disappearance, or a terminal marker. Failed
-   delivery remains eligible on later passes. Capacity continuation text says
-   the provider retry wait has elapsed and omits the detected banner, so its
-   own echoed prompt cannot schedule another continuation. This also means a
-   capacity wait blocks backlog admission through the existing wait-file gate.
+4. Uses structured helper quota observations to invoke the journaled managed
+   `continue --run-dir run --job JOB --defer-quota-recovery --wait-seconds 30 --reconciliation
+   run/quota-recovery/JOB.json` operation. The coordinator must first inspect
+   artifacts and production effects and write the attempt/pane/assignment/quota
+   digest-bound record specified in [quota recovery](quota-recovery.md#heartbeat-adoption-and-effect-reconciliation).
+   Missing, stale or unknown mutation evidence holds input. Q9 owns the shared
+   single recovery budget, reset timing, durable intent and Working verification;
+   the heartbeat has no separate quota parser or reset timer. It retains each
+   `last-continue-JOB.json`, records ambiguous delivery for inspection and never
+   sends quota text/Enter directly. A pending continuation or spent budget
+   cannot fall through to the capacity path. Legacy quota wait/sent files hold
+   automatic recovery and feeding until the prior delivery is reconciled.
+
+   For a separate model-capacity stall, the existing last-15-line whitespace
+   normalization and `Selected model is at capacity. Please try a different
+   model.` check remain. `capacity-JOB.until` stores the observation time; after
+   five minutes the heartbeat sends one same-pane continuation, with the
+   existing two-second pause before Enter. Capacity has its own marker namespace
+   so old unjournaled quota sends cannot be mistaken for a fresh capacity wait.
+   Its successful `.sent` marker lasts while the banner persists and clears on
+   progress, banner disappearance or terminal markers. Capacity does not change
+   the model or provide another quota recovery. Unresolved submissions are held.
 5. Feeds `backlog/task-<job-id>.md` in `ORDER` order only when launches remain
-   allowed, quota exceeds 10%, no `quota-*.until` files remain, and the active
-   pane count is below the **stored concurrency**. It copies the brief into the
+   allowed, quota exceeds 10%, no legacy quota or capacity wait/sent files remain,
+   and the active pane count is below the **stored concurrency**. It copies the brief into the
    run root, writes `add-<job-id>.json` for one managed `add`, and retains
    `add-<job-id>.out`. The manifest preserves `request.concurrency` and reads
    the explicit route from `backlog/route-<job-id>.json`; without that file it
@@ -313,8 +315,12 @@ swallowed a prompt that appeared to send).
 
 Classify each failure before acting on it:
 
-- **Transient provider or network failure** (for example "model service
-  temporarily unavailable", a 5xx, or a rate limit): retry in a new attempt
+- **Explicit provider usage limit or quota**: follow
+  [quota recovery](quota-recovery.md). Reconcile effects before continuation or
+  a fresh attempt, share the single recovery budget, and retain ambiguous delivery
+  without replay. The heartbeat defers fresh quota attempts.
+- **Other transient provider or network failure** (for example "model service
+  temporarily unavailable" or a 5xx): retry in a new attempt
   directory through the admission backoff in
   [runtime operations](runtime.md#provider-admission), within the task's
   retry budget and the night window.

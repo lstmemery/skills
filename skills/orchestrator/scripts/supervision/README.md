@@ -1,8 +1,10 @@
 # Desktop supervision sources
 
 The canonical heartbeat is [`../codex-heartbeat.sh`](../codex-heartbeat.sh),
-reviewed with n3 and present in main at `d6c2a7e`. D9's older copy in this
-directory was removed on rebase. The wake helper remains a byte-for-byte desktop
+with Q9 adoption proposed in this candidate. The historical n3 source was
+reviewed at `d6c2a7e`; the hashes below describe that earlier live comparison,
+not deployment of this candidate. D9's older copy in this directory was removed
+on rebase. The wake helper remains a byte-for-byte desktop
 snapshot. Read-only comparison on 2026-10-26 found these SHA-256 values:
 
 | Repository file | Live source | SHA-256 |
@@ -26,8 +28,14 @@ directories in `PATH` and uses `coordinator.json` for both the worker split orig
 and the wake target. Keep the recorded identity current during succession.
 
 `CANCELLED` markers skip pane supervision and count as terminal beside `DONE`;
-both clear quota wait/sent markers. Successful continuation retains a sent marker
-while the banner persists, with a default two-second pause before Enter. Finish
+both clear quota and capacity wait/sent markers. Quota continuation uses the
+managed helper and its shared recovery budget;
+`run/quota-recovery/JOB.json` supplies coordinator artifact/effect reconciliation.
+See [the record contract](../../references/quota-recovery.md#heartbeat-adoption-and-effect-reconciliation).
+All observing/launching helper calls defer fresh quota recovery. Pending effects
+and spent budgets never fall through to capacity input. Capacity alone retains
+its existing five-minute backoff and two-second pause, using `capacity-JOB.until`
+and `.sent`. Legacy quota markers hold recovery until reconciled. Finish
 requires explicit `finish_complete: true` and a nonempty top-level `jobs` list;
 each job needs both `pane_id` and `workspace_closed`, with a null pane or true
 closure. Marker and workspace cleanup remain separate from coordinator acceptance.
@@ -36,8 +44,10 @@ Heartbeat tests share the canonical offline replay harness in
 `../../tests/test_codex_heartbeat.py`, including D9's distinct lifecycle checks.
 `../../tests/test_supervision.py` covers wake-helper identity and queue handling.
 
-Pending follow-up: replace the heartbeat's banner grep with the shared s1 Codex
-detector. s1 is already merged via `72e7710`; integration remains pending. Use
-`herdr_jobs.admission.rate_limit_from_output` with `source="pane"` and
-`runtime="codex"`, then validate recovery before a separately authorized
-deployment. This rebase leaves n3's heartbeat and the live installation unchanged.
+Quota detection now comes from positive-budget managed status observations and
+Q9's `continue` preflight, both using the shared classifier. The heartbeat no
+longer parses quota banners or chooses a reset timestamp. Q9 journals intent
+before input and leaves ambiguous delivery unresolved; the supervisor retains
+that result instead of replaying it. The candidate requires the matching helper
+with `--defer-quota-recovery` and `continue --reconciliation` support. Live
+validation and deployment require a separate authorized action.

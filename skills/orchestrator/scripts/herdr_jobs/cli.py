@@ -39,8 +39,11 @@ def parser():
         sub.add_argument("--run-dir", required=True)
         sub.add_argument("--host-contract", help="verified Herdr endpoint, CLI contract, and optional jail export binding")
         sub.add_argument("--wait-seconds", type=float, default=30)
+        sub.add_argument("--defer-quota-recovery", action="store_true",
+                         help="observe quota stalls without preparing or launching fresh recovery attempts")
         if name == "continue":
             sub.add_argument("--job", required=True, help="existing managed job ID")
+            sub.add_argument("--reconciliation", help="coordinator artifact/effect reconciliation record required by supervision")
         if name == "status":
             sub.add_argument("--summary", action="store_true",
                              help="print a fixed human-readable job table instead of JSON")
@@ -178,6 +181,7 @@ def main(argv=None, transport_factory=NativeTransport):
         deadline = Deadline(args.wait_seconds)
         with run_lock(root):
             engine = Engine(root, None, deadline)
+            engine.defer_quota_recovery = args.defer_quota_recovery
             exists = (root / "state.json").exists()
             if exists:
                 engine.load()
@@ -215,6 +219,8 @@ def main(argv=None, transport_factory=NativeTransport):
                                  "--manifest", str(Path(args.manifest).absolute()), "--policy", str(Path(args.policy).absolute())]
                     if args.host_contract:
                         next_argv += ["--host-contract", str(Path(args.host_contract).absolute())]
+                if args.defer_quota_recovery:
+                    next_argv += ["--defer-quota-recovery"]
                 result["observation"] = "local_only; no fresh host observation at zero budget"
                 result["next_action"] = {"kind": "resume", "argv": next_argv, "message": "Continue with a positive call budget."}
                 if args.operation == "status" and args.summary:
@@ -235,7 +241,7 @@ def main(argv=None, transport_factory=NativeTransport):
                 if args.operation == "add":
                     engine.append_jobs(request, capabilities)
             if args.operation == "continue":
-                continue_job(engine, args.job)
+                continue_job(engine, args.job, args.reconciliation)
             else:
                 engine.drive(status_only=args.operation in ("status", "finish"))
             if args.operation == "finish":
@@ -254,6 +260,8 @@ def main(argv=None, transport_factory=NativeTransport):
                 result["next_action"] = {"kind": "inspect" if result["batch_state"] in ("partial", "unresolved_effect") else "resume",
                                          "argv": [sys.executable, ENTRYPOINT, "resume", "--run-dir", str(root)],
                                          "message": "Inspect per-job issues; resume reconciles without replaying ambiguous effects."}
+        if args.defer_quota_recovery and result.get("next_action", {}).get("argv"):
+            result["next_action"]["argv"].append("--defer-quota-recovery")
         if args.operation == "status" and args.summary:
             print(render_status_summary(result, engine.state))
         else:

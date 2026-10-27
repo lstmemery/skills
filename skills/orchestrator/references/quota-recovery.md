@@ -113,6 +113,79 @@ Supervision should invoke this command instead of an unjournaled
 send-text/sleep/Enter sequence; this change does not install or alter a live
 supervision timer.
 
+## Heartbeat adoption and effect reconciliation
+
+The repository heartbeat uses Q9's supported `continue` operation. It does not
+parse another quota banner or maintain a quota reset timer. Its positive-budget
+`status` observation uses the shared classifier; `continue` owns reset anchoring,
+identity checks, delayed submission, shared recovery accounting and Working
+verification. The heartbeat retains `last-continue-<job>.json` and reports success
+only for a verified Working result on the same attempt and pane.
+
+Every heartbeat `resume`, `status`, `add`, `finish`, and `continue` uses
+`--defer-quota-recovery`. This flag keeps a quota-stalled attempt available for
+same-pane recovery, without preparing a fresh attempt or settling an idle quota
+pane without a receipt. It also holds a fresh retry already prepared by an older
+helper invocation. Returned follow-up argv preserves the flag. It is an
+invocation policy (also exposing recovery counts in result JSON), not a
+persisted change to the run or permission for a later unflagged command. A separately authorized fresh retry still requires the
+mutation preflight below and shares Q9's single recovery budget.
+
+Before the supervisor may send a quota continuation, the coordinator must
+inspect receipts, declared artifacts and completed local/remote effects, then
+atomically write `RUN_DIR/quota-recovery/JOB_ID.json` (the heartbeat's run root
+contains `run`, so this is `run/quota-recovery/JOB_ID.json` there):
+
+```json
+{
+  "schema_version": 1,
+  "request_id": "the-managed-request-id",
+  "job_id": "the-job-id",
+  "attempt_id": "the-existing-attempt-id",
+  "pane_id": "the-owned-pane-id",
+  "assignment_sha256": "sha256-of-encoded-job-spec",
+  "quota_sha256": "sha256-from-continue_quota_observed-evidence",
+  "mutation_state": "mutation-checkpointed",
+  "observed_at": "2026-10-27T00:00:00Z",
+  "artifact_evidence": "Paths and observations for the receipt and declared artifacts inspected.",
+  "effect_evidence": "Completed effects, checkpoint and why the remaining assignment is safe to continue."
+}
+```
+
+These values are a schema example, not a ready reconciliation record. Use the
+actual job from `state.json`; compute `assignment_sha256` with
+`herdr_jobs.records.digest(herdr_jobs.records.encoded(job["spec"]))`. Take
+`quota_sha256` from that attempt/pane's latest `continue_quota_observed` history
+entry. A first heartbeat `continue` can record that evidence while waiting or
+refusing a missing reconciliation record; no input or budget is spent. The
+record's observation timestamp needs a timezone. Both evidence fields must be
+nonempty and describe observed state, not intentions. `writes_repository: false`
+does not establish that a task has no production effects.
+
+The heartbeat passes `--reconciliation run/quota-recovery/JOB_ID.json` to
+`continue`. Under the run lock, the helper verifies the request, job, attempt,
+pane, unchanged assignment digest and current quota-output digest. It accepts
+only `read-only`, `mutation-not-started`, or `mutation-checkpointed`;
+`mutation-state-unknown`, missing/malformed records and stale identities block
+input. Accepted evidence is copied into `continue_intent` before input. This is
+a coordinator attestation checked for consistency, not automatic proof of the
+external effects it describes. Direct coordinator calls may omit the flag, but
+still require the mutation preflight in this reference.
+
+An unresolved `continue`, exhausted budget or collected result holds recovery;
+it never falls through to capacity input. Status can reconcile a prior delivery
+from verified Working or a matching receipt, without replay. Missing receipts
+alone do not block the helper's preflight; existing receipts still refuse
+continuation. Failed/malformed continuation replies are retained for inspection
+and are never reported as successful delivery. Legacy `quota-<job>.until` or
+`.until.sent` files hold automatic recovery and backlog admission until the
+coordinator reconciles the old unjournaled delivery. Do not erase them just to
+rearm recovery or edit launcher telemetry to manufacture a budget.
+
+This is a repository candidate, not a live deployment. Deploying the heartbeat
+requires the matching helper supporting both new flags; no timer, enrollment,
+host-contract or live supervisor change is performed here.
+
 ## Coordinator recovery and ownership
 
 A coordinator that sees its own usage-limit banner/status stops task and run
@@ -141,8 +214,9 @@ outside the configured same-level fallback.
 
 ## Reconcile mutations before managed quota recovery
 
-This is a coordinator preflight requirement; it does not establish that the
-helper enforces a mutation checkpoint or ingests external recovery observations.
+This is a coordinator preflight requirement. The heartbeat additionally passes
+the reconciliation record described above; the helper validates its identity
+and classification, while the coordinator owns the truth of its effect evidence.
 
 Before any fresh managed attempt, inspect the existing receipt, declared
 artifacts, and mutation checkpoint. Classify the task as read-only,

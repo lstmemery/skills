@@ -1,8 +1,9 @@
 """Journal a bounded quota continuation before sending input to an owned pane."""
 
+from datetime import datetime
 from pathlib import Path
 
-from .records import JobError, now
+from .records import JobError, digest, encoded, fields, load_json, now, text
 from .transport import BudgetExpired, EffectUnknown
 
 
@@ -13,7 +14,30 @@ CONTINUATION_TEXT = (
 )
 
 
-def continue_job(engine, job_id):
+def recovery_reconciliation(path, engine, job, evidence):
+    try:
+        record = fields(load_json(path, 16384), [
+            "schema_version", "request_id", "job_id", "attempt_id", "pane_id", "assignment_sha256",
+            "quota_sha256", "mutation_state", "observed_at", "artifact_evidence", "effect_evidence",
+        ], label="quota reconciliation")
+        expected = {"schema_version": 1, "request_id": engine.state["request"]["request_id"],
+                    "job_id": job["spec"]["job_id"], "attempt_id": job["attempt_id"],
+                    "pane_id": job["pane_id"], "assignment_sha256": digest(encoded(job["spec"])),
+                    "quota_sha256": evidence["sha256"]}
+        if any(record[key] != value for key, value in expected.items()):
+            raise ValueError("reconciliation identity, assignment or quota evidence changed")
+        if record["mutation_state"] not in ("read-only", "mutation-not-started", "mutation-checkpointed"):
+            raise ValueError("mutation state is unknown")
+        for key in ("artifact_evidence", "effect_evidence"):
+            text(record[key], key, 4000)
+        if datetime.fromisoformat(record["observed_at"].replace("Z", "+00:00")).utcoffset() is None:
+            raise ValueError("reconciliation observation needs a timezone")
+        return record
+    except (OSError, JobError, ValueError, TypeError, AttributeError) as error:
+        raise JobError("decision_needed", "current artifact/effect reconciliation required before quota recovery") from error
+
+
+def continue_job(engine, job_id, reconciliation_path=None):
     matches = [job for job in engine.state["jobs"] if job["spec"]["job_id"] == job_id]
     if len(matches) != 1:
         raise JobError("invalid_input", "continue requires exactly one existing job ID")
@@ -45,6 +69,8 @@ def continue_job(engine, job_id):
         raise JobError("decision_needed", "parsed Codex reset has not passed")
     if engine.deadline.remaining() <= 2:
         raise JobError("unavailable_capability", "insufficient call budget for delayed continuation")
+    reconciliation = (recovery_reconciliation(reconciliation_path, engine, job, evidence)
+                      if reconciliation_path is not None else None)
     engine.reconcile_coordinator_checkpoint()
     engine.coordinator_takeover_reconciled = True
     if quota_interrupted_submission:
@@ -61,7 +87,8 @@ def continue_job(engine, job_id):
     })
     job["telemetry"]["quota_signals"].append({"kind": "rate_limit", **evidence})
     job["history"].append({"action": "continue_intent", "attempt_id": job["attempt_id"],
-                           "pane_id": job["pane_id"], "evidence": evidence, "observed_at": now()})
+                           "pane_id": job["pane_id"], "evidence": evidence, "observed_at": now(),
+                           **({"reconciliation": reconciliation} if reconciliation is not None else {})})
     engine.checkpoint()
     try:
         observation = engine.transport.continue_prompt(job, CONTINUATION_TEXT, evidence)

@@ -15,7 +15,7 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.cli import main
 from herdr_jobs.engine import Engine
-from herdr_jobs.records import load_json, prepare, run_lock
+from herdr_jobs.records import digest, encoded, load_json, prepare, run_lock
 from herdr_jobs.transport import Deadline, NativeTransport
 from support import isolate_admission_state
 
@@ -110,16 +110,83 @@ class ContinuationTest(unittest.TestCase):
         adapter.preflight = lambda *args, **kwargs: self.capabilities
         return adapter
 
-    def call(self, operation="continue", wait="5"):
+    def call(self, operation="continue", wait="5", extra=()):
         argv = [operation, "--run-dir", str(self.run), "--wait-seconds", wait]
         if operation == "continue":
             argv += ["--job", "j1"]
+        argv += list(extra)
         output = io.StringIO()
         with (redirect_stdout(output), patch("herdr_jobs.transport.command", self.pane.command),
               patch("time.sleep", self.pane.sleep),
               patch("time.monotonic", side_effect=lambda: self.pane.elapsed)):
             code = main(argv, transport_factory=self.transport)
         return code, json.loads(output.getvalue())
+
+    def test_supervised_status_preserves_quota_attempt_for_journaled_continuation(self):
+        code, result = self.call("status", extra=["--defer-quota-recovery"])
+        self.assertEqual(code, 10, result)
+        job = load_json(self.run / "state.json")["jobs"][0]
+        self.assertEqual(job["attempt_id"], self.original["attempt_id"])
+        self.assertEqual(job["rate_limit_recoveries"], 0)
+        self.assertFalse(job["settled"])
+        self.assertEqual(self.pane.events, [])
+        self.assertEqual(self.call()[0], 0)
+
+    def test_supervised_resume_does_not_launch_a_prepared_fresh_quota_retry(self):
+        self.assertEqual(self.call("status")[0], 0)
+        queued = load_json(self.run / "state.json")["jobs"][0]
+        self.assertNotEqual(queued["attempt_id"], self.original["attempt_id"])
+        code, result = self.call("resume", extra=["--defer-quota-recovery"])
+        self.assertEqual(code, 10, result)
+        job = load_json(self.run / "state.json")["jobs"][0]
+        self.assertEqual(job["phase"], "pending")
+        self.assertIsNone(job["pane_id"])
+        self.assertIsNone(job["pending_effect"])
+        self.assertEqual(self.pane.events, [])
+
+    def test_supervised_continuation_requires_current_effect_reconciliation(self):
+        record = {
+            "schema_version": 1, "request_id": "quota-fixture", "job_id": "j1",
+            "attempt_id": self.original["attempt_id"], "pane_id": "owned:1",
+            "assignment_sha256": digest(encoded(self.original["spec"])),
+            "quota_sha256": digest(self.pane.output.encode()),
+            "mutation_state": "mutation-checkpointed", "observed_at": "2026-10-27T00:00:00Z",
+            "artifact_evidence": "Original output inspected; no receipt; partial report retained.",
+            "effect_evidence": "Fixture checkpoint confirms all completed effects; remaining steps safe.",
+        }
+        path = self.run / "reconciliation.json"
+        extra = ["--reconciliation", str(path), "--defer-quota-recovery"]
+        code, result = self.call(extra=extra)
+        self.assertEqual(code, 5, result)
+        for field, value in (("attempt_id", "stale"), ("pane_id", "other:1"),
+                             ("assignment_sha256", "stale"), ("quota_sha256", "stale"), ("mutation_state", "mutation-state-unknown"),
+                             ("artifact_evidence", ""), ("effect_evidence", "")):
+            with self.subTest(field=field):
+                path.write_text(json.dumps({**record, field: value}))
+                self.assertEqual(self.call(extra=extra)[0], 5)
+                self.assertEqual(self.pane.events, [])
+        path.write_text(json.dumps(record))
+        code, result = self.call(extra=extra)
+        self.assertEqual(code, 0, result)
+        job = load_json(self.run / "state.json")["jobs"][0]
+        intent = next(item for item in job["history"] if item["action"] == "continue_intent")
+        self.assertEqual(intent["reconciliation"], record)
+        self.assertEqual(job["rate_limit_recoveries"], 1)
+        self.assertEqual(result["jobs"][0]["continuation_count"], 1)
+
+    def test_supervised_followup_keeps_the_recovery_fence(self):
+        code, result = self.call("status", extra=["--defer-quota-recovery"])
+        self.assertEqual(code, 10, result)
+        self.assertIn("--defer-quota-recovery", result["next_action"]["argv"])
+
+    def test_supervised_quota_observation_preserves_unrelated_ambiguous_effect(self):
+        self.edit_job(pending_effect={"action": "move", "started_at": "fixture"})
+        code, result = self.call("status", extra=["--defer-quota-recovery"])
+        self.assertEqual(code, 6, result)
+        job = load_json(self.run / "state.json")["jobs"][0]
+        self.assertEqual(job["pending_effect"]["action"], "move")
+        self.assertEqual(self.call()[0], 5)
+        self.assertEqual(self.pane.events, [])
 
     def test_expired_quota_continues_owned_attempt_and_journals_working(self):
         code, result = self.call()
