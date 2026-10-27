@@ -76,10 +76,12 @@ class FakeAdmissionStore:
         self.calls = []
         self.held = False
         self.admitted = True
+        self.lease_id = None
 
     def acquire(self, provider, model, lease_id, cap, request_id, bypass_admission=False):
         self.calls.append(("acquire", lease_id, provider, model, cap, request_id))
         self.held = self.admitted
+        self.lease_id = lease_id
         return {"admitted": self.admitted, "lease_held": self.admitted, "provider": provider,
                 "provider_active": 3 if not self.admitted else 1, "cap": cap,
                 "reason": None if self.admitted else "capacity", "retry_at": None}
@@ -89,8 +91,9 @@ class FakeAdmissionStore:
         self.held = False
         return {"released": True}
 
-    def status(self, provider):
-        return {"active_count": int(self.held)}
+    def status(self, provider=None):
+        return {"active_count": int(self.held),
+                "leases": [{"lease_id": self.lease_id}] if self.held else []}
 
 
 class FakeNativeTransport:

@@ -170,13 +170,14 @@ class FinishWatchTest(unittest.TestCase):
             ["herdr", "workspace", "close", "wExample"], 0
         )
 
-        close_herdr_workspace("wExample")
+        with patch("pathlib.Path.home", return_value=self.run_dir):
+            close_herdr_workspace("wExample")
 
         run.assert_called_once_with(
             ["herdr", "workspace", "close", "wExample"],
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
             timeout=30,
         )
         self.assertFalse(run.call_args.kwargs.get("shell", False))

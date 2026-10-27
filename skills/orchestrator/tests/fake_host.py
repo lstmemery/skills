@@ -165,6 +165,8 @@ class FakeHost:
 
     def observe(self, job):
         self.event("observe", job)
+        if self.fixture.get("observation_error"):
+            raise JobError("unavailable_capability", self.fixture["observation_error"])
         if "observation" in self.fixture:
             return self.fixture["observation"]
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
@@ -217,6 +219,8 @@ class FakeHost:
         return {"closed": True, "workspace_id": job.get("workspace_id")}
 
     def workspace_is_open(self, job):
+        if self.fixture.get("workspace_list_error"):
+            raise JobError("unavailable_capability", self.fixture["workspace_list_error"])
         closed_path = self.path.with_name("closed-workspaces.json")
         closed = load_json(closed_path) if closed_path.exists() else []
         return job.get("workspace_id") not in closed
