@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 from .cleanup import cleanup_stale, close_workspace
+from .continuation import continue_job
 from .engine import Engine, WORKER_DISPOSITIONS
 from .edit_scope import edit_scope_warnings
 from .records import JobError, digest, effort_arguments, encoded, prepare, run_lock
@@ -33,11 +34,13 @@ def parser():
     cleanup.add_argument("--wait-seconds", type=float, default=30)
     close = commands.add_parser("close-workspace", help="close a workspace after checking managed lease ownership")
     close.add_argument("workspace_id")
-    for name in ("run", "add", "resume", "status", "finish"):
+    for name in ("run", "add", "resume", "status", "finish", "continue"):
         sub = commands.add_parser(name)
         sub.add_argument("--run-dir", required=True)
         sub.add_argument("--host-contract", help="verified Herdr endpoint, CLI contract, and optional jail export binding")
         sub.add_argument("--wait-seconds", type=float, default=30)
+        if name == "continue":
+            sub.add_argument("--job", required=True, help="existing managed job ID")
         if name == "status":
             sub.add_argument("--summary", action="store_true",
                              help="print a fixed human-readable job table instead of JSON")
@@ -145,6 +148,8 @@ def main(argv=None, transport_factory=NativeTransport):
             return 0
         if hasattr(args, "wait_seconds") and not 0 <= args.wait_seconds <= 60:
             raise JobError("invalid_input", "wait-seconds must be finite and between 0 and 60")
+        if args.operation == "continue" and args.wait_seconds <= 2:
+            raise JobError("invalid_input", "continue requires wait-seconds greater than 2 for delayed submission and verification")
         disposition_overrides, override_reason = ({}, None)
         coordinator_grades = {}
         if args.operation == "finish":
@@ -182,7 +187,7 @@ def main(argv=None, transport_factory=NativeTransport):
                         raise JobError("conflict", "request content or policy changed; original run preserved")
                 if args.operation not in ("add",):
                     request = engine.state["request"]
-            if args.operation in ("resume", "status", "finish") and not exists:
+            if args.operation in ("resume", "status", "finish", "continue") and not exists:
                 raise JobError("invalid_input", "run state does not exist")
             if args.operation == "add" and not exists:
                 raise JobError("invalid_input", "add requires an existing run; start it with run first")
@@ -222,14 +227,17 @@ def main(argv=None, transport_factory=NativeTransport):
             engine.transport = transport
             preflight_request = request if args.operation in ("run", "add") else engine.state["request"]
             capabilities = transport.preflight(preflight_request, existing=engine.state,
-                                               status_only=args.operation in ("status", "finish"))
+                                               status_only=args.operation in ("status", "finish", "continue"))
             if not exists:
                 engine.initialize(request, capabilities, binding_path)
             else:
                 engine.bind(capabilities)
                 if args.operation == "add":
                     engine.append_jobs(request, capabilities)
-            engine.drive(status_only=args.operation in ("status", "finish"))
+            if args.operation == "continue":
+                continue_job(engine, args.job)
+            else:
+                engine.drive(status_only=args.operation in ("status", "finish"))
             if args.operation == "finish":
                 finish = engine.finish(disposition_overrides, override_reason, coordinator_grades)
             result = engine.result()

@@ -45,10 +45,11 @@ redacted status excerpt and runtime as the evidence.
    reports the due record; it does not restart or prompt the worker. Without
    the existing watcher/notification, the coordinator must poll the durable
    record itself. If the handle cannot accept a continuation, do not silently
-   relaunch. Managed Herdr jobs currently have no supported same-pane
-   continuation. Their default recovery is one fresh attempt in a new output
-   directory after the recorded reset, with the same pinned route and
-   assignment, subject to the mutation-reconciliation fence below.
+   relaunch. For a managed Codex job, use the journaled `continue` operation
+   below when the owned pane is still present. Managed recovery by a fresh
+   attempt uses a new output directory after the recorded reset, with the same
+   pinned route and assignment, subject to the mutation-reconciliation fence
+   below. Both paths consume the same single recovery budget.
 3. If the reset is unknown, unavailable, or the primary remains exhausted,
    when a reset cannot be awaited, the only quota fallback is the exact same-level configured model in
    `model-ladder.csv`, with concrete limit evidence and the normal explicit
@@ -58,6 +59,59 @@ redacted status excerpt and runtime as the evidence.
    reasoning level to solve quota exhaustion. Do not do both the continuation
    and fallback for the same observed stall; once either path is used, further
    recovery needs coordinator disposition or user direction.
+
+## Managed same-pane Codex continuation
+
+Reconcile existing artifacts and production effects first, then call the helper
+on the existing managed run and job:
+
+```sh
+python3 /path/to/orchestrator/scripts/herdr-jobs.py continue \
+  --run-dir "$RUN_DIR" --job "$JOB_ID" --wait-seconds 30
+```
+
+The command uses the saved host contract (or an explicit `--host-contract`),
+checks its server/session and pinned route, and verifies the job's owned pane,
+agent kind and agent name where the host contract exposes it. It accepts only
+an idle Codex agent with the s1 classifier's explicit usage-limit banner and a
+parseable reset. It refuses receipts (including newly written receipts), closed
+or settled jobs, other runtimes, active workers, trust dialogs, incompatible
+pending effects and a consumed recovery budget. An interrupted initial Codex
+`start` or `prompt` can be reconciled by the owned quota banner; split, move and
+workspace-close ambiguity must be resolved separately.
+
+A future reset is journaled in `state.json` history as
+`continue_quota_observed`; exit 5 means no input was sent. Invoke `continue`
+again after that reset. The saved evidence is bound to the attempt, pane and
+visible-output digest. For clock-only and relative banners, call once while
+waiting so the reset is anchored to the original observation, including across
+midnight. With no earlier observation, the s1 detector conservatively chooses
+the next local clock occurrence; the command does not guess that a clock-only
+reset already passed. An absolute expired reset can proceed on its first call.
+Missing or unparseable reset metadata never authorizes input.
+
+Once due, the helper durably checkpoints `pending_effect.action = continue`,
+`continue_intent`, the redacted evidence, and the consumed recovery budget
+before sending input. Launcher-owned telemetry records one continuation and
+its reset/attempt/pane evidence; coordinator grade stays pending. The helper
+sends a fixed continuation instruction preserving the original assignment,
+waits **two seconds**, sends Enter once, and verifies both owned-agent Working
+and the visible Working marker. Immediate Enter does not reliably submit in
+Codex. The attempt, route, assignment, worktree and output directory are kept.
+Use a call budget greater than two seconds (30 seconds is the default).
+
+Success appends `continue` to history. Failed text/Enter, a timeout, interruption
+or missing Working leaves the journaled effect unresolved and spends the
+budget. Exit 6 requires inspection; **do not resend manually or reset the
+counter**. `status` and `resume` retain the pending effect without replaying it;
+a later verified Working observation or a valid matching receipt can reconcile
+it. A matching receipt still requires a verified idle, done, or exited worker
+before settlement. Normal receipt and
+settlement guards still govern collection and `finish`. Neither same-pane
+continuation nor a fresh automatic retry may spend a second quota recovery.
+Supervision should invoke this command instead of an unjournaled
+send-text/sleep/Enter sequence; this change does not install or alter a live
+supervision timer.
 
 ## Coordinator recovery and ownership
 
@@ -98,19 +152,19 @@ from that observed state. Unknown mutation state blocks automatic replay; keep
 the original attempt and record the reconciliation needed. Never duplicate a
 production action merely because the quota reset has passed.
 
-An explicit coordinator decision may select the existing exact pane when a
-fresh attempt could repeat production effects. This is an exception record,
-not a claim that the managed helper supports same-pane continuation. Preserve
-the task/attempt/route, before-and-after checkpoint, reset source, exact pane,
-continuation budget, and observation proving work resumed. Until the helper has
-a supported operation for this, record the gap outside launcher-owned
-telemetry; neither workers nor ad hoc scripts may edit that telemetry.
+An explicit coordinator decision may select the existing exact Codex pane when
+a fresh attempt could repeat production effects. Use `herdr-jobs.py continue`
+after reconciling those effects; preserve the before-and-after mutation
+checkpoint alongside its journaled task/attempt/route, reset source, exact pane,
+continuation budget and Working observation. Workers and ad hoc scripts must
+not edit launcher-owned telemetry.
 
 When an operator observes a quota banner that the helper does not classify,
 retain the bounded redacted excerpt and mark detection as unknown or missed,
 not false. Persist provider backoff through the supported admission command and
-record the affected task/attempt separately. The planned helper interface must
-validate the existing attempt identity, accept only explicit quota evidence,
-record its provenance atomically, and consume the same single recovery budget
-as automatic detection. It must reject stale identities and duplicate events.
-A manually submitted continuation must not be reported as zero continuations.
+record the affected task/attempt separately. The supported same-pane helper
+accepts only classified Codex evidence, binds it to the existing attempt and
+pane, and consumes the same single recovery
+budget as automatic detection. Unsupported evidence still needs coordinator
+reconciliation; do not convert it into permission to send input. A manually
+submitted continuation must not be reported as zero continuations.

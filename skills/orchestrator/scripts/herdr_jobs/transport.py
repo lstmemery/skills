@@ -19,7 +19,8 @@ from .admission import rate_limit_from_output
 from .retry import codex_retry_cli_args, validate_codex_retry_provider, validate_pi_project_settings
 from .worktrees import verify_repository_worktree
 from .model_ladder import billing_pool, provider_arguments, validate_provider_harness
-from .security import ANSI_ESCAPE, contains_secret_material, safe_cli_text as _safe_cli_text
+from .security import (ANSI_ESCAPE, contains_secret_material,
+                       safe_cli_text as _safe_cli_text)
 from .local_lane import (check_preconditions as check_local_lane_preconditions,
                          local_lane_environment, sanitize_pane_environment)
 from .prompt import (PromptNotStarted, has_active_turn_status, pane_text_submit,
@@ -713,11 +714,47 @@ class NativeTransport:
         observation = {"state": state, "identity_verified": True}
         rate_limit = (rate_limit_from_output(output, runtime=job["spec"]["route"]["runtime"])
                       if output is not None else None)
-        if rate_limit is not None:
+        if rate_limit is not None and not self.prompt_landed(job, state, output):
             observation["rate_limit"] = rate_limit
         if agent_route:
             observation["prompt_verified"] = self.prompt_landed(job, state, output)
         return observation
+
+    def continuation_evidence(self, job):
+        observation = self.observe(job)
+        if observation["identity_verified"] is not True or observation["state"] not in ("idle", "done"):
+            raise JobError("decision_needed", "owned Codex worker must be verified and idle before continuation")
+        output = self.terminal_output(self.read_terminal(
+            [self.herdr, "pane", "read", job["pane_id"], "--source", "visible", "--lines", "200"]))
+        observed_at = time.time()
+        signal = rate_limit_from_output(output, now=observed_at, runtime="codex", include_reset_at=True)
+        if signal is None or signal["source"] != "reset" or signal["retry_after_seconds"] is None:
+            raise JobError("decision_needed", "owned pane needs an explicit Codex usage-limit banner with a parsed reset")
+        return {"observed_at": observed_at, "reset_at": signal["reset_at"],
+                "source": "owned_codex_pane", "sha256": digest(output.encode()),
+                "excerpt": _safe_cli_text(re.sub(
+                    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+                    "[REDACTED KEY]", output, flags=re.DOTALL))}
+
+    def continue_prompt(self, job, prompt, evidence):
+        current = self.continuation_evidence(job)
+        if current["sha256"] != evidence["sha256"]:
+            raise EffectUnknown("owned pane changed after quota evidence was checkpointed")
+        if self.deadline.remaining() <= 2:
+            raise EffectUnknown("insufficient call budget for delayed continuation")
+        self.raw([self.herdr, "pane", "send-text", job["pane_id"], prompt])
+        time.sleep(2)
+        self.deadline.check()
+        self.raw([self.herdr, "pane", "send-keys", job["pane_id"], "enter"])
+        while self.deadline.remaining() > 0:
+            observation = self.observe(job)
+            if (observation["identity_verified"] is True and observation["state"] == "working"
+                    and observation.get("prompt_verified") is True):
+                return observation
+            if observation["state"] == "blocked":
+                break
+            time.sleep(min(0.2, self.deadline.remaining()))
+        raise EffectUnknown("continuation submitted without verified Working; inspect the owned pane")
 
     @staticmethod
     def without_prompt_echo(output, job):

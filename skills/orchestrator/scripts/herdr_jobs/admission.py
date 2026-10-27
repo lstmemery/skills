@@ -56,7 +56,7 @@ def _retry_after(value, now):
         return None
 
 
-def _reset_delay(value, now):
+def _reset_delay(value, now, *, clamp=True):
     if value is None:
         return None
     value = str(value).strip().strip('"\'`')
@@ -65,7 +65,7 @@ def _reset_delay(value, now):
         if not math.isfinite(numeric) or numeric < 0:
             return None
         if numeric >= 1_000_000_000 or numeric > now:
-            return max(0.0, numeric - now)
+            return max(0.0, numeric - now) if clamp else numeric - now
         return numeric
     except ValueError:
         pass
@@ -74,7 +74,8 @@ def _reset_delay(value, now):
         parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return max(0.0, parsed.timestamp() - now)
+        delay = parsed.timestamp() - now
+        return max(0.0, delay) if clamp else delay
     except (TypeError, ValueError, OverflowError):
         return _retry_after(value, now)
 
@@ -251,7 +252,8 @@ def _http_429_status_line(output):
     return re.search(r"(?im)^\s*HTTP(?:/[0-9]+(?:\.[0-9]+)?)?\s+429(?:\s|$)", output) is not None
 
 
-def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exit_code=None):
+def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exit_code=None,
+                           include_reset_at=False):
     """Return metadata only for known provider errors, never for generic transcript prose."""
     output = str(output)
     if source == "harness_error":
@@ -303,7 +305,13 @@ def rate_limit_from_output(output, now=None, *, source="pane", runtime=None, exi
         delay = _natural_reset_delay(output, current_time)
         if delay is not None:
             source = "reset"
-    return {"retry_after_seconds": delay, "source": source}
+    signal = {"retry_after_seconds": delay, "source": source}
+    if include_reset_at:
+        reset_delay = _reset_delay(reset_at, current_time, clamp=False) if source == "reset" else None
+        if reset_delay is None and source == "reset":
+            reset_delay = delay
+        signal["reset_at"] = None if reset_delay is None else current_time + reset_delay
+    return signal
 
 
 def write_continuation_record(path, task_id, pane_id, reset_at, attempt_id):
