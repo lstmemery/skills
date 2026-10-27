@@ -42,6 +42,7 @@ class Engine:
         self.coordinator_takeover_reconciled = False
         self.coordinator_grades = {}
         self.telemetry_grade_tampering = set()
+        self.defer_quota_recovery = False
 
     def admission_config(self):
         return self.state["request"]["policy"].get("provider_admission", {
@@ -136,7 +137,7 @@ class Engine:
         return backoff["retry_at"]
 
     def retry_rate_limited_attempt(self, job, lifecycle, receipt_valid):
-        if (not job["rate_limit_seen"] or receipt_valid
+        if (self.defer_quota_recovery or not job["rate_limit_seen"] or receipt_valid
                 or lifecycle not in ("idle", "done", "exited")):
             return False
         if job["rate_limit_recoveries"] >= 1:
@@ -953,7 +954,14 @@ class Engine:
         self.checkpoint()
         return True
 
+    def fresh_quota_recovery_deferred(self, job):
+        return self.defer_quota_recovery and (
+            job["rate_limit_seen"] or any(item["action"] == "rate_limit_retry" for item in job["history"]))
+
     def launch(self, job):
+        if self.fresh_quota_recovery_deferred(job):
+            job["issue"] = "fresh quota recovery deferred; coordinator effect reconciliation required"
+            return
         spec = job["spec"]
         ensure_task_admitted(spec["task_kind"], spec["job_id"])
         while job["phase"] != "submitted" and job["pending_effect"] is None:
@@ -1315,7 +1323,9 @@ class Engine:
         rate_limit = observation.get("rate_limit")
         if rate_limit is not None:
             self.note_rate_limit(job, rate_limit)
-            if job["pending_effect"] and lifecycle in ("idle", "done", "exited"):
+            if (job["pending_effect"] and lifecycle in ("idle", "done", "exited")
+                    and (not self.defer_quota_recovery
+                         or job["pending_effect"]["action"] in ("start", "prompt"))):
                 job["history"].append({"action": "rate_limit_effect_reconciled",
                                        "pending_action": job["pending_effect"]["action"],
                                        "attempt_id": job["attempt_id"], "observed_at": now()})
@@ -1357,6 +1367,10 @@ class Engine:
         job["settled"] = bool(job["phase"] == "submitted" and job["pending_effect"] is None
                               and lifecycle in ("idle", "done", "exited")
                               and (job["activity_seen"] or receipt_valid or lifecycle == "exited"))
+        if self.defer_quota_recovery and job["rate_limit_seen"] and not receipt_valid:
+            job["settled"] = False
+            job["issue"] = "quota recovery deferred; reconcile effects before same-pane continuation"
+            return
         if job["settled"]:
             self.release_admission(job)
         if self.retry_rate_limited_attempt(job, lifecycle, receipt_valid):
@@ -1499,7 +1513,8 @@ class Engine:
                 if not any(self.has_verified_working_activity(job) for job in self.state["jobs"]):
                     launchable = any(not job["workspace_closed"]
                                      and job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
-                                     and job["pending_effect"] is None for job in self.state["jobs"])
+                                     and job["pending_effect"] is None
+                                     and not self.fresh_quota_recovery_deferred(job) for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:
                         return
                 time.sleep(min(0.1, self.deadline.remaining()))
@@ -1514,6 +1529,10 @@ class Engine:
                          "provider": job["provider"], "model": job["admission_model"],
                          "admission_acquired": job["admission_acquired"],
                          "attempt_id": job["attempt_id"], "resolved_model": job["resolved_model"],
+                         **({"rate_limit_seen": job["rate_limit_seen"],
+                             "rate_limit_recoveries": job["rate_limit_recoveries"],
+                             "continuation_count": job["telemetry"]["continuation_count"]}
+                            if self.defer_quota_recovery else {}),
                          "observed": job["observed"], "settled": job["settled"],
                          "pending_effect": job["pending_effect"], "issue": job["issue"],
                          "issue_code": job["issue_code"],

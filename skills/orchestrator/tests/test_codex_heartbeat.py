@@ -42,7 +42,11 @@ elif name == 'herdr-jobs.py':
                 print(f'{j} | {p} | running | - | -')
         else:
             print(c.get('status_output', json.dumps({'jobs': [
-                {'job_id': j, 'pane_id': None if p == '-' else p} for j, p in c['rows']
+                {'job_id': j, 'pane_id': None if p == '-' else p,
+                 'pending_effect': None, 'rate_limit_seen': False,
+                 'rate_limit_recoveries': 0, 'continuation_count': 0,
+                 'observed': None, 'settled': False, 'collection': None,
+                 'collection_error': None, 'workspace_closed': False} for j, p in c['rows']
             ]})))
         sys.exit(c.get('status_exit', 0))
     else:
@@ -90,26 +94,111 @@ class HeartbeatReplayTest(unittest.TestCase):
     def pane(self, name):
         (self.root / 'pane.txt').write_text((FIXTURES / name).read_text())
 
-    def test_wrapped_banner_records_reset(self):
+    def quota_job(self, **changes):
+        job = {
+            'job_id': 'a', 'pane_id': 'ws:1', 'attempt_id': 'original-attempt',
+            'route': {'mode': 'agent', 'runtime': 'codex'}, 'settled': False,
+            'workspace_closed': False, 'collection': None, 'collection_error': None,
+            'pending_effect': None, 'issue': 'quota recovery deferred',
+            'rate_limit_seen': True, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'observed': {'identity_verified': True, 'state': 'idle',
+                         'rate_limit': {'source': 'reset', 'retry_after_seconds': 0}},
+        }
+        job.update(changes)
+        self.config['status_output'] = json.dumps({'batch_state': 'partial', 'jobs': [job]})
+        self.config['status_exit'] = 10
+        return job
+
+    def test_quota_supervision_uses_reconciled_managed_continuation(self):
+        job = self.quota_job()
         self.pane('wrapped.txt')
-        self.replay()
-        self.assertEqual((self.run / 'quota-a.until').read_text().strip(), str(RESET))
+        working = {**job, 'pending_effect': None, 'rate_limit_recoveries': 1,
+                   'continuation_count': 1,
+                   'observed': {'identity_verified': True, 'state': 'working', 'prompt_verified': True}}
+        self.config['continue_output'] = json.dumps({'batch_state': 'active', 'jobs': [working]})
+        self.replay(RESET + 300)
+        calls = self.calls('continue')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index('--job') + 1], 'a')
+        self.assertEqual(calls[0][calls[0].index('--reconciliation') + 1], 'run/quota-recovery/a.json')
+        self.assertTrue(all('--defer-quota-recovery' in call for call in self.calls('resume') + self.calls('status')))
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
+        self.assertIn('continued a ws:1 through managed quota recovery', (self.run / 'heartbeat.log').read_text())
 
-    def test_truncated_banner_uses_conservative_wait(self):
+    def test_success_reply_for_another_attempt_is_not_reported_as_continued(self):
+        job = self.quota_job()
+        job.update(attempt_id='other-attempt', rate_limit_recoveries=1, continuation_count=1,
+                   observed={'identity_verified': True, 'state': 'working', 'prompt_verified': True})
+        self.config['continue_output'] = json.dumps({'jobs': [job]})
+        self.replay()
+        self.assertNotIn('continued a', (self.run / 'heartbeat.log').read_text())
+        self.assertIn('quota continuation held', (self.run / 'heartbeat.log').read_text())
+
+    def test_absent_receipt_allows_the_managed_continuation_preflight(self):
+        self.quota_job(collection_error="[Errno 2] No such file or directory: 'receipt.json'")
+        self.config.update(continue_exit=5, continue_output='{"error":"decision_needed"}')
+        self.replay()
+        self.assertEqual(len(self.calls('continue')), 1)
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
+
+    def test_capacity_banner_cannot_replay_an_unresolved_submission(self):
+        self.quota_job(rate_limit_seen=False, pending_effect={'action': 'prompt'},
+                       observed={'identity_verified': True, 'state': 'idle'})
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay()
+        self.replay(RESET + 300)
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
+        self.assertFalse(self.calls('continue'))
+
+    def test_incomplete_status_cannot_replay_capacity_input(self):
+        for field in ('pending_effect', 'rate_limit_seen', 'rate_limit_recoveries',
+                      'continuation_count', 'settled', 'collection',
+                      'workspace_closed', 'observed', 'collection_error'):
+            with self.subTest(missing=field):
+                (self.root / 'calls.jsonl').unlink(missing_ok=True)
+                for artifact in ('heartbeat.log', 'capacity-a.until', 'capacity-a.until.sent'):
+                    (self.run / artifact).unlink(missing_ok=True)
+                job = self.quota_job(
+                    rate_limit_seen=False, pending_effect={'action': 'prompt'},
+                    observed={'identity_verified': True, 'state': 'idle'})
+                del job[field]
+                self.config['status_output'] = json.dumps({'batch_state': 'partial', 'jobs': [job]})
+                (self.root / 'pane.txt').write_text(
+                    'Selected model is at capacity. Please try a different model.')
+                self.replay()
+                self.replay(RESET + 300)
+                self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
+                self.assertFalse(self.calls('continue'))
+                self.assertIn('status-failed: invalid job records',
+                              (self.run / 'heartbeat.log').read_text())
+
+    def test_wrapped_quota_banner_delegates_reset_handling(self):
+        self.quota_job()
+        self.pane('wrapped.txt')
+        self.config.update(continue_exit=5, continue_output='{"error":"decision_needed","message":"reset pending"}')
+        self.replay()
+        self.assertEqual(len(self.calls('continue')), 1)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
+
+    def test_truncated_banner_never_gets_an_invented_reset_or_direct_input(self):
+        self.quota_job()
         self.pane('truncated.txt')
+        self.config.update(continue_exit=5, continue_output='{"error":"decision_needed","message":"reset unparseable"}')
         self.replay()
-        self.assertEqual((self.run / 'quota-a.until').read_text().strip(), str(RESET + 3600))
-        self.assertFalse(self.calls('pane') and any(a[1] == 'send-text' for a in self.calls('pane')))
+        self.replay(RESET + 7200)
+        self.assertEqual(len(self.calls('continue')), 2)
+        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
 
-    def test_continues_once_at_reset_plus_five_minutes(self):
-        self.pane('complete.txt')
+    def test_quota_continuation_waits_on_helper_without_local_timer(self):
+        self.quota_job()
+        self.config.update(continue_exit=5, continue_output='{"error":"decision_needed","message":"reset pending"}')
         self.replay(RESET - 1)
         self.replay(RESET + 299)
-        self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
-        self.replay(RESET + 300)
-        self.replay(RESET + 301)
-        sent = [a[1] for a in self.calls('pane') if a[1].startswith('send-')]
-        self.assertEqual(sent, ['send-text', 'send-keys'])
+        self.assertEqual(len(self.calls('continue')), 2)
+        self.assertNotIn('continued a', (self.run / 'heartbeat.log').read_text())
 
     def test_capacity_stall_continues_once_after_five_minute_backoff(self):
         (self.root / 'pane.txt').write_text(
@@ -122,7 +211,7 @@ class HeartbeatReplayTest(unittest.TestCase):
         sent = [a for a in self.calls('pane') if a[1].startswith('send-')]
         self.assertEqual([a[1] for a in sent], ['send-text', 'send-keys'])
         self.assertEqual(sent[0][2], 'ws:1')
-        self.assertTrue((self.run / 'quota-a.until.sent').exists())
+        self.assertTrue((self.run / 'capacity-a.until.sent').exists())
 
     def test_wrapped_capacity_banner_is_detected(self):
         (self.root / 'pane.txt').write_text(
@@ -140,8 +229,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         (self.root / 'pane.txt').write_text('› ' + sent[0][3])
         self.replay(RESET + 301)
-        self.assertFalse((self.run / 'quota-a.until').exists())
-        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertFalse((self.run / 'capacity-a.until').exists())
+        self.assertFalse((self.run / 'capacity-a.until.sent').exists())
         self.replay(RESET + 7200)
         self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)
 
@@ -152,8 +241,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay(RESET + 300)
         (self.root / 'pane.txt').write_text(banner + '\nWorking (2s)')
         self.replay(RESET + 301)
-        self.assertFalse((self.run / 'quota-a.until').exists())
-        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertFalse((self.run / 'capacity-a.until').exists())
+        self.assertFalse((self.run / 'capacity-a.until.sent').exists())
         (self.root / 'pane.txt').write_text(banner)
         self.replay(RESET + 400)
         self.replay(RESET + 699)
@@ -166,7 +255,7 @@ class HeartbeatReplayTest(unittest.TestCase):
             'Selected model is at capacity. Please try a different model.\nWorking (2s)')
         self.replay()
         self.replay(RESET + 3600)
-        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse((self.run / 'capacity-a.until').exists())
         self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
 
     def test_done_capacity_job_clears_wait_without_reading_or_continuing(self):
@@ -175,8 +264,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay()
         (self.run / 'out-a/DONE').touch()
         self.replay(RESET + 300)
-        self.assertFalse((self.run / 'quota-a.until').exists())
-        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertFalse((self.run / 'capacity-a.until').exists())
+        self.assertFalse((self.run / 'capacity-a.until.sent').exists())
         self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'read']), 1)
         self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
 
@@ -186,12 +275,12 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.replay()
         self.config['send_exit'] = 1
         self.replay(RESET + 300)
-        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertFalse((self.run / 'capacity-a.until.sent').exists())
         self.assertNotIn('continued a', (self.run / 'heartbeat.log').read_text())
         self.config['send_exit'] = 0
         self.replay(RESET + 420)
         self.replay(RESET + 540)
-        self.assertTrue((self.run / 'quota-a.until.sent').exists())
+        self.assertTrue((self.run / 'capacity-a.until.sent').exists())
         self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 2)
 
     def backlog(self):
@@ -214,9 +303,10 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'out-a/DONE').unlink()
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":3}}')
-        self.pane('complete.txt')
+        self.quota_job()
+        self.config.update(continue_exit=5, continue_output='{"error":"decision_needed"}')
         self.replay(RESET - 1)
-        self.assertEqual((self.run / 'quota-a.until').read_text().strip(), str(RESET))
+        self.assertEqual(len(self.calls('continue')), 1)
         self.assertFalse(self.calls('add'))
 
     def test_existing_active_worker_counts_toward_stored_concurrency(self):
@@ -277,19 +367,29 @@ class HeartbeatReplayTest(unittest.TestCase):
                 self.assertIn('add-failed b', log)
                 self.assertNotIn('added b', log)
 
-    def test_failed_send_is_not_reported_as_continued(self):
-        self.pane('complete.txt')
-        self.config['send_exit'] = 1
+    def test_ambiguous_managed_delivery_is_retained_without_replay(self):
+        self.quota_job()
+        response = '{"error":"unresolved_effect","message":"delivery unproven"}'
+        self.config.update(continue_exit=6, continue_output=response)
         self.replay(RESET + 300)
         self.assertNotIn('continued a', (self.run / 'heartbeat.log').read_text())
-        self.assertFalse((self.run / 'quota-a.until.sent').exists())
+        self.assertTrue((self.run / 'last-continue-a.json').exists())
+        self.assertEqual((self.run / 'last-continue-a.json').read_text().strip(), response)
+        self.quota_job(pending_effect={'action': 'continue'},
+                       rate_limit_recoveries=1, continuation_count=1)
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay(RESET + 600)
+        self.replay(RESET + 900)
+        self.assertEqual(len(self.calls('continue')), 1)
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
 
-    def test_working_pane_clears_quota_wait(self):
-        self.pane('complete.txt')
-        self.replay()
+    def test_working_observation_never_requests_quota_continuation(self):
+        self.quota_job(rate_limit_seen=False,
+                       observed={'identity_verified': True, 'state': 'working'})
         (self.root / 'pane.txt').write_text("You've hit your usage limit. Working (2s)")
         self.replay(RESET + 400)
-        self.assertFalse((self.run / 'quota-a.until').exists())
+        self.assertFalse(self.calls('continue'))
         self.assertFalse(any(a[1] == 'send-text' for a in self.calls('pane')))
 
     def test_observed_alive_unresolved_starts_allow_backlog_with_spare_capacity(self):
@@ -298,6 +398,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":2}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'},
@@ -321,6 +423,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":3}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'},
@@ -329,6 +433,8 @@ class HeartbeatReplayTest(unittest.TestCase):
             'observed': {'state': 'working', 'identity_verified': True, 'prompt_verified': False},
         }
         completed = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'workspace_closed': False,
             'job_id': 'completed', 'pane_id': 'ws:2', 'phase': 'submitted', 'settled': True,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': None, 'issue': None,
@@ -356,6 +462,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":3}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'},
@@ -383,6 +491,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":4}}')
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'}, 'issue': None,
@@ -418,6 +528,8 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.backlog()
         (self.run / 'out-a/DONE').unlink()
         alive = {
+            'rate_limit_seen': False, 'rate_limit_recoveries': 0, 'continuation_count': 0,
+            'collection': None, 'collection_error': None, 'workspace_closed': False,
             'job_id': 'a', 'pane_id': 'ws:1', 'phase': 'moved', 'settled': False,
             'route': {'mode': 'agent', 'runtime': 'codex'},
             'pending_effect': {'action': 'start'}, 'issue': None,
@@ -464,8 +576,8 @@ class HeartbeatReplayTest(unittest.TestCase):
             p.chmod(0o755)
         self.env.update(HERDR='replay-herdr', QUOTA_AXI='replay-quota-axi')
         self.replay()
-        self.assertTrue((self.run / 'quota-a.until').exists())
         self.assertTrue(any(a[:2] == ['pane', 'read'] for a in self.calls('pane')))
+        self.assertTrue(self.calls('status'))
 
     def test_quota_gate_also_prevents_resume_launching_pending_jobs(self):
         self.config['quota']['providers'][0]['windows'][0]['percentRemaining'] = 10
@@ -514,11 +626,18 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.config['rows'] = [['a', '-'], ['running', 'ws:2']]
         (self.run / 'run/state.json').write_text(
             '{"request_id":"replay","request":{"concurrency":3}}')
-        self.pane('complete.txt')
+        job = self.quota_job(job_id='running', pane_id='ws:2')
+        self.config['status_output'] = json.dumps({'jobs': [
+            {**job, 'job_id': 'a', 'pane_id': None, 'rate_limit_seen': False,
+             'observed': None, 'settled': True}, job]})
+        self.config.update(continue_exit=5, continue_output='{"error":"decision_needed"}')
         for operation in ('resume', 'status'):
             for code in (6, 10):
                 with self.subTest(operation=operation, code=code):
                     self.config.update(resume_exit=0, status_exit=0)
+                    self.config['status_output'] = json.dumps({'jobs': [
+                        {**job, 'job_id': 'a', 'pane_id': None, 'rate_limit_seen': False,
+                         'observed': None, 'settled': True}, job]})
                     self.config[operation + '_exit'] = code
                     self.config['resume_output'] = json.dumps({
                         'batch_state': 'partial' if code == 10 else 'unresolved_effect',
@@ -526,11 +645,16 @@ class HeartbeatReplayTest(unittest.TestCase):
                     })
                     (self.run / 'out-a/.woke').unlink(missing_ok=True)
                     self.replay(RESET + 300)
-                    self.assertEqual((self.run / 'quota-running.until').read_text().strip(), str(RESET))
-                    self.assertTrue((self.run / 'quota-running.until.sent').exists())
+                    self.assertTrue(self.calls('continue'))
+                    self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
                     self.assertTrue((self.run / 'out-a/.woke').exists())
                     self.assertFalse(self.calls('add'))
-                    # Once the banner clears, spare capacity must still not admit backlog.
+                    # Partial helper replies still gate backlog after quota clears.
+                    self.config['status_output'] = json.dumps({'jobs': [
+                        {**job, 'job_id': 'a', 'pane_id': None, 'rate_limit_seen': False,
+                         'observed': None, 'settled': True},
+                        {**job, 'rate_limit_seen': False, 'observed': {
+                            'identity_verified': True, 'state': 'working'}}]})
                     (self.root / 'pane.txt').write_text('Working (1s)')
                     self.replay(RESET + 301)
                     self.assertFalse(self.calls('add'))
@@ -556,18 +680,14 @@ class HeartbeatReplayTest(unittest.TestCase):
                 self.assertIn(str(self.run), (self.sup / 'active-runs.txt').read_text())
 
     def test_echoed_continuation_does_not_schedule_another_reset(self):
-        self.pane('complete.txt')
-        self.replay(RESET + 300)
-        self.assertTrue((self.run / 'quota-a.until.sent').exists())
         (self.root / 'pane.txt').write_text(
             'The usage limit has reset. Continue the task from where you stopped; '
             'do not repeat changes already made.')
         self.replay(RESET + 301)
-        self.assertFalse((self.run / 'quota-a.until').exists())
-        self.assertFalse((self.run / 'quota-a.until.sent').exists())
         self.replay(RESET + 7200)
+        self.assertFalse(self.calls('continue'))
         self.assertFalse((self.run / 'quota-a.until').exists())
-        self.assertEqual(len([a for a in self.calls('pane') if a[1] == 'send-text']), 1)
+        self.assertFalse(any(a[1].startswith('send-') for a in self.calls('pane')))
 
     def test_recorded_coordinator_is_split_origin_and_workspaces_are_labeled_once(self):
         self.env.update(HERDR_PANE_ID='stale:1', HERDR_WORKSPACE_ID='stale')
@@ -634,12 +754,14 @@ class HeartbeatReplayTest(unittest.TestCase):
         self.assertEqual(len(self.calls('finish')), 2)
         self.assertEqual((self.sup / 'wake-queue.txt').read_text().count('a DONE'), 1)
 
-    def test_continuation_uses_default_two_second_delay_before_enter(self):
+    def test_capacity_continuation_uses_default_two_second_delay_before_enter(self):
         sleep = self.bin / 'sleep'
         sleep.write_text(STUB)
         sleep.chmod(0o755)
         del self.env['HEARTBEAT_SEND_DELAY']
-        self.pane('complete.txt')
+        (self.root / 'pane.txt').write_text(
+            'Selected model is at capacity. Please try a different model.')
+        self.replay(RESET)
         self.replay(RESET + 300)
         calls = list(map(json.loads, (self.root / 'calls.jsonl').read_text().splitlines()))
         index = next(i for i, (_, args) in enumerate(calls) if args[:2] == ['pane', 'send-text'])
