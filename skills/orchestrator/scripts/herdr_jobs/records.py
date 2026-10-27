@@ -11,6 +11,8 @@ import stat
 import tempfile
 from datetime import datetime, timezone
 
+from .edit_scope import brief_contract_errors
+
 
 WORKER_MODES = frozenset(("literal", "inferential"))
 CONTEXT_KINDS = frozenset(("test", "fixture", "source", "schema", "dependency", "document"))
@@ -321,6 +323,55 @@ def validate_protected_paths(protected_paths, editable_paths=(), base=None):
     return protected_paths
 
 
+def host_path_record(value, label):
+    fields(value, ["host", "path", "canonical_path"],
+           ["lookup_host", "source"], label=label)
+    if value["host"] not in ("desktop", "pve"):
+        invalid(f"{label}.host must be desktop or pve")
+    for key in ("path", "canonical_path"):
+        path = PurePosixPath(text(value[key], f"{label}.{key}", 4096))
+        if not path.is_absolute() or ".." in path.parts or "\\" in str(path):
+            invalid(f"{label}.{key} must be an absolute path without traversal")
+    if value.get("lookup_host", value["host"]) not in ("desktop", "pve"):
+        invalid(f"{label}.lookup_host must be desktop or pve")
+    if "source" in value:
+        source = fields(value["source"], ["request_id", "job_id", "run_dir"], label=f"{label}.source")
+        identifier(source["request_id"], f"{label}.source.request_id")
+        identifier(source["job_id"], f"{label}.source.job_id")
+        root = PurePosixPath(text(source["run_dir"], f"{label}.source.run_dir", 4096))
+        if not root.is_absolute() or ".." in root.parts:
+            invalid(f"{label}.source.run_dir must be absolute without traversal")
+    return dict(value)
+
+
+def brief_contract_record(job):
+    for key in ("dependencies", "mutation_targets"):
+        if key not in job:
+            continue
+        values = job[key]
+        if not isinstance(values, list) or len(values) > 128:
+            invalid(f"{key} must be an array of at most 128 entries")
+        job[key] = [host_path_record(value, f"{key}[{index}]")
+                    for index, value in enumerate(values)]
+    if "remote_authority" in job:
+        values = job["remote_authority"]
+        if not isinstance(values, list) or len(values) > 64:
+            invalid("remote_authority must be an array of at most 64 entries")
+        for value in values:
+            fields(value, ["host", "paths", "operations", "instruction"], label="remote_authority")
+            if value["host"] != "pve":
+                invalid("remote_authority.host must be pve")
+            text(value["instruction"], "remote_authority.instruction", 10000)
+            roots = path_list(value["paths"], "remote_authority.paths")
+            if not roots or any(not PurePosixPath(root).is_absolute() or ".." in PurePosixPath(root).parts
+                                for root in roots):
+                invalid("remote_authority.paths must contain absolute paths without traversal")
+            operations = value["operations"]
+            if (not isinstance(operations, list) or not operations
+                    or any(operation not in ("read", "write") for operation in operations)):
+                invalid("remote_authority.operations must contain read or write")
+
+
 def _context_kind(path, explicit=None):
     if explicit is not None:
         explicit = text(explicit, "required_context.kind", 32).strip().casefold()
@@ -597,9 +648,10 @@ def prepare(manifest_path, policy_path):
                 "model_level", "model_fallback", "escalation", "worker_mode", "mode",
                 "protected_paths", "editable_paths", "acceptance_tests", "required_context",
                 "tracker_writes", "local_lane", "independent_validator", "local_lane_scope",
-                "prompt_transport"], "job")
+                "prompt_transport", "dependencies", "mutation_targets", "remote_authority"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
+        brief_contract_record(job)
         if job_id in seen:
             invalid(f"duplicate job_id: {job_id}")
         seen.add(job_id)
@@ -840,6 +892,8 @@ def prepare(manifest_path, policy_path):
             timeout_policy = policy["jail_stream_idle_timeout_ms"]
             prepared_job["jail_stream_idle_timeout_ms"] = timeout_policy["task_classes"].get(
                 task_class, timeout_policy["default"])
+        for error in brief_contract_errors(prepared_job):
+            invalid(f"{job_id}: {error}")
         jobs.append(prepared_job)
     if retry_override:
         if ("pi" in retry_override

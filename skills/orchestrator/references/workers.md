@@ -140,7 +140,7 @@ warn when a brief mentions TrueNAS, `system.general`, `wg0`, or secrets without
 that section.
 Managed `run --preview` and `add --preview` also return per-job
 `edit_scope_warnings` for declared editable paths and literal path references
-whose symlink destinations fall outside `editable_paths`. These are advisory:
+whose symlink destinations fall outside `editable_paths`. These prose-derived warnings are advisory:
 references can be read-only, and prose, globs, discovered files, and other
 namespaces still require the edit-target inventory in checklist item 4. A clean
 preview does not verify edit scope. For example, allowing
@@ -374,6 +374,98 @@ Changed user instructions increment the assignment revision. Results from an
 earlier revision remain evidence about earlier work, not completion of the new
 assignment. User feedback sent directly through the review pane is captured by
 the worker in its next result and reconciled before the coordinator acts on it.
+
+## Structured dependencies and mutation targets
+
+Managed manifest jobs may add `dependencies`, `mutation_targets`, and
+`remote_authority`. Omitted fields preserve the legacy contract. New or
+regenerated briefs should list every required input file and every file the
+worker must change. These records are separate from managed output permissions
+and from the existing `required_context` jail bundle contract.
+
+```json
+{
+  "dependencies": [
+    {
+      "host": "desktop",
+      "lookup_host": "desktop",
+      "path": "/runs/author-run/out-author/report.md",
+      "canonical_path": "/runs/author-run/out-author/report.md",
+      "source": {
+        "request_id": "author-run",
+        "job_id": "author",
+        "run_dir": "/runs/author-run"
+      }
+    }
+  ],
+  "mutation_targets": [
+    {
+      "host": "desktop",
+      "path": "/work/candidate/CONTEXT.md",
+      "canonical_path": "/work/candidate/CONTEXT.md"
+    },
+    {
+      "host": "pve",
+      "path": "/etc/example/config",
+      "canonical_path": "/etc/example/config"
+    }
+  ],
+  "remote_authority": [
+    {
+      "host": "pve",
+      "paths": ["/etc/example/config"],
+      "operations": ["write"],
+      "instruction": "Exact applicable user authorization for this remote edit."
+    }
+  ]
+}
+```
+
+Each dependency and mutation has an absolute `path`, its absolute
+`canonical_path`, and its source/destination `host` (`desktop` or `pve`). Paths
+must not contain `..`. `lookup_host` optionally records the host on which the
+brief intends to open that path; it defaults to `host`. A mismatch is a hard
+contradiction: a desktop context file cannot be looked up on pve. Use remote
+access to the declared host rather than reinterpreting its path in another
+namespace. This is a check of explicit declarations, not a parser of SSH prose.
+
+For author artifacts, include `source` to pin the original request and job.
+`run_dir` must end in `request_id`; both lexical and canonical paths must be
+inside either `run_dir/out-<job_id>` or `run_dir/run/workers/<job_id>`. These
+bindings check location and identity declarations, not artifact contents or
+receipt authenticity. Preserve this source binding when making reviewer retries;
+regenerate the assignment records and render a new brief, rather than globally
+replacing run names. The runner does not rewrite prose or invent retry inputs.
+
+Both `run` and `add`, including `--preview`, reject structured contradictions
+with `invalid_input` before creating run state or contacting a transport:
+
+- Desktop dependencies must resolve to readable files and match the recorded
+  canonical destination. Desktop mutations may name new files; resolve existing
+  parents and compare the result with the recorded destination.
+- Both the lexical and resolved desktop mutation paths must be within the
+  lexical `editable_paths`, relative to worker `cwd`, and outside protected
+  paths and acceptance tests. An allowed symlink does not grant its destination.
+- Pve dependencies require remote `read` authority; pve mutations require remote
+  `write` authority. A single explicit grant must cover both lexical and
+  canonical paths using path components. `instruction` records the applicable
+  authorization; a worker or validator cannot manufacture that authorization.
+  Remote permission never grants desktop edits, and local output scope never
+  grants remote mutations.
+
+The normalized records appear as `brief_contract` in preview and in the worker
+prompt. Hard errors require corrected records or revised work before dispatch;
+they cannot be dismissed as advisory warnings. Prose-only paths still need the
+manual inventory above. No permissions are widened automatically.
+
+This additive contract supports desktop agent routes. Structured host records
+on jail routes fail closed because their namespace binding is unverified;
+continue using the jail `required_context` bundle contract. Pve paths are checked
+lexically against declared authority without SSH or local filesystem lookup:
+remote existence and canonical resolution remain coordinator-supplied evidence,
+not launcher-verified facts. Recheck every destination in its actual namespace
+immediately before writing; stop on drift. This contract does not add deployment,
+commit authorization, live host verification, or retry automation.
 
 ## Resolve the effect contract before dispatch
 
