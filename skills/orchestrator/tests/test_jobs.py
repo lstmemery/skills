@@ -2000,10 +2000,67 @@ class JobsTest(unittest.TestCase):
     def test_four_blocked_workers_hold_slots(self):
         self.write_jobs(5)
         self.configure(jobs={f"job{index}": "blocked" for index in range(4)})
-        code, result = self.call(wait_seconds=1)
+        # Capacity assertions require all four starts to fit in the call budget.
+        code, result = self.call(wait_seconds=2)
         self.assertEqual((code, result["batch_state"]), (6, "unresolved_effect"))
         self.assertEqual(result["active_jobs"], 4)
+        self.assertEqual(result["provider_active"], {"codex": 4})
+        for job in result["jobs"][:4]:
+            self.assertEqual(job["observed"]["state"], "blocked")
+            self.assertEqual(job["pending_effect"]["action"], "start")
+            self.assertFalse(job["settled"])
+            self.assertTrue(job["admission_acquired"])
         self.assertEqual(result["jobs"][4]["phase"], "pending")
+        self.assertFalse(any(event["job_id"] == "job4" for event in self.events()))
+
+        code, resumed = self.call("resume", wait_seconds=2)
+        self.assertEqual((code, resumed["active_jobs"]), (6, 4))
+        self.assertEqual(resumed["provider_active"], {"codex": 4})
+        self.assertEqual(resumed["jobs"][4]["phase"], "pending")
+        self.assertEqual(sum(event["action"] == "start" for event in self.events()), 4)
+        self.assertFalse(any(event["action"] == "prompt" or event["job_id"] == "job4"
+                             for event in self.events()))
+
+    def test_completed_codex_start_frees_capacity_while_blocked_claude_holds_its_slot(self):
+        self.write_jobs(4, concurrency=2, model="gpt-6-luna", effort="low")
+        manifest = json.loads(self.manifest.read_text())
+        for job in manifest["jobs"][1:]:
+            job["override"] = {"instruction": "Use Claude.", "runtime": "claude-code",
+                               "provider": "claude", "model": "claude-sonnet-5-5", "effort": "medium"}
+        self.manifest.write_text(json.dumps(manifest))
+        policy = json.loads(self.policy.read_text())
+        policy["provider_admission"]["provider_caps"].update(codex=1, claude=2)
+        self.policy.write_text(json.dumps(policy))
+        self.configure(jobs={"job0": "ambiguous", "job1": "blocked", "job2": "working"})
+
+        code, result = self.call(wait_seconds=2)
+
+        self.assertEqual((code, result["active_jobs"]), (6, 2))
+        self.assertEqual(result["provider_active"], {"codex": 1, "claude": 1})
+        self.assertEqual(result["jobs"][0]["pending_effect"]["action"], "start")
+        self.assertEqual(result["jobs"][1]["observed"]["state"], "blocked")
+        self.assertEqual([job["phase"] for job in result["jobs"][2:]], ["pending", "pending"])
+
+        self.configure(jobs={"job0": "missing", "job1": "blocked", "job2": "working"})
+        _, result = self.call("resume", wait_seconds=2)
+
+        self.assertEqual(result["active_jobs"], 2)
+        self.assertEqual(result["provider_active"], {"codex": 0, "claude": 2})
+        self.assertTrue(result["jobs"][0]["settled"])
+        self.assertIsNone(result["jobs"][0]["collection"])
+        self.assertFalse(result["collection_complete"])
+        self.assertFalse(result["jobs"][0]["admission_acquired"])
+        self.assertEqual(result["jobs"][1]["observed"]["state"], "blocked")
+        self.assertTrue(result["jobs"][1]["admission_acquired"])
+        self.assertFalse(result["jobs"][1]["settled"])
+        self.assertEqual(result["jobs"][2]["phase"], "submitted")
+        self.assertEqual(result["jobs"][3]["phase"], "pending")
+        events = self.events()
+        for job_id in ("job0", "job1", "job2"):
+            self.assertEqual(sum(event["action"] == "start" and event["job_id"] == job_id
+                                 for event in events), 1)
+        self.assertEqual([event["job_id"] for event in events if event["action"] == "prompt"], ["job2"])
+        self.assertFalse(any(event["job_id"] == "job3" for event in events))
 
     def test_finite_jail_exits_release_slots_and_collect(self):
         self.write_jobs(5, ["deep_research"] * 5)
