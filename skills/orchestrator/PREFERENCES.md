@@ -15,9 +15,9 @@ acceptance of worker output.
 
 ## User Preferences
 
-- Run up to 8 workers at once by default: use concurrency 8 in managed-job
+- Run up to 4 workers at once by default: use concurrency 4 in managed-job
   manifests unless quota, a shared resource, or the user says otherwise
-  (Matt 2026-10-18).
+  (Matt 2026-10-27; was 8 from 2026-10-18).
 - Deliver each finished report produced by focused or deep research through the
   active runtime's delivery contract by default, after the research coordinator
   completes synthesis and validation. Do not ask again whether to send it. Honor
