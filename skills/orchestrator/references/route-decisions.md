@@ -74,7 +74,7 @@ of admission. Retry-ready workers rediscover capabilities before a fresh start.
 
 ## Holds, evidence and lease lifetime
 
-Failed preparation or live preflight writes an append-only record in
+Routing holds during preparation or live preflight write an append-only record in
 `RUN_DIR/preflight-holds/`, with the blocker and submitted request. Secret-like
 payloads are represented by a digest. Preview remains read-only. The original
 manifest is not edited, and preflight failures create no pane or worker. Correct
@@ -99,5 +99,11 @@ coordinator grading remain separate.
 
 Legacy runs without a decision can still be inspected with `status`; launching
 new work requires a prepared coordinator decision. The fixed local direct
-launcher and external non-Herdr launch tools have separate contracts; callers
-must not treat them as a fallback for a held ordinary assignment.
+launcher compiles the same decision schema via `local-lane.py preview` and
+requires that record on `start --route-decision DECISION.json`. It validates the
+fixed local policy tuple, task digest and scope, discovers the exact Pi model
+offline before effects, and checks the shared lease before resetting the pane,
+starting Pi or submitting the prompt. Its native launch telemetry retains the
+decision and lease. It remains outside the integer ladder and cannot replace a
+held ordinary assignment. External non-Herdr launch tools are outside this
+supported dispatch contract.

@@ -209,27 +209,40 @@ python3 scripts/herdr-admission.py release --lease-id <lease-id> \
 
 The admission CLI refuses to release a lease with a pending effect unless
 reconciliation evidence is supplied. In the owned worktree, create and move a
-pane, then use the shared local-lane launcher with a bounded task class, four
-false scope declarations, and a brief file:
+pane. Compile the coordinator decision with a bounded task class, four false
+scope declarations, and a brief file. Preview is read-only; retain its
+`route_decision` object as `decision.json` and pass it to start with identical
+name, task class, scope, and prompt:
 
 ```sh
 herdr pane split --current --direction right --cwd <worktree> --no-focus
 herdr pane move <returned-pane-id> --new-workspace --label <task-name> --no-focus
+python3 scripts/local-lane.py preview --name <unique-name> \
+  --task-class summary \
+  --local-lane-scope-json '{"network_access":false,"credential_access":false,"credentials_in_environment":false,"destructive_actions":false}' \
+  --prompt-file <brief-file>
+# Save the returned route_decision object to <task-output-dir>/decision.json.
 python3 scripts/local-lane.py start --pane <moved-pane-id> --name <unique-name> \
   --task-class summary \
   --local-lane-scope-json '{"network_access":false,"credential_access":false,"credentials_in_environment":false,"destructive_actions":false}' \
   --prompt-file <brief-file> \
-  --telemetry-file <task-output-dir>/telemetry.json
+  --telemetry-file <task-output-dir>/telemetry.json \
+  --route-decision <task-output-dir>/decision.json
 ```
 
-The launcher reruns service/GPU preflight, checks the shared class/scope gate,
+The launcher validates the coordinator decision against the fixed policy tuple,
+class, scope, and task digest; reruns service/GPU preflight; and requires the
+exact provider/model in Pi's offline catalog. Missing or changed decisions and
+incomplete discovery create no telemetry, lease, pane reset, or worker. It then
 creates a task telemetry file using the managed route's schema, acquires
 admission with the pending-effect marker, replaces the pane shell with an
 `env -i` shell, starts Pi, submits the brief through the verified submit
 helper, and waits for the worker to finish before releasing admission. The
 telemetry records route, model, effort, harness, start/end times, continuation
 count and reasons, quota signals, a coordinator-grade slot that remains pending,
-and independent-validation status. The actual coordinator grade is stored in
+and independent-validation status, plus the native backend, coordinator decision,
+decision digest, and shared lease identity. Each launch effect checks that the
+lease still exists and the provider has no backoff. The actual coordinator grade is stored in
 coordinator-owned `coordinator-grades.json` in the run directory. It records the
 start time before issuing the Herdr start command and
 the end time only after the worker reaches `done`. The telemetry path must be

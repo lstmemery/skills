@@ -13,9 +13,10 @@ import uuid
 
 from .records import (JobError, encoded, ensure_local_lane_admitted, load_json,
                       now, parse_json, policy_record, save, text)
+from .routing_decision import decision_for, validate_decision
 from .prompt import PromptNotStarted, has_active_turn_status, submit_and_verify
 from .security import contains_secret_material
-from .telemetry import task_telemetry, validate_task_telemetry
+from .telemetry import launch_telemetry, task_telemetry, validate_task_telemetry
 
 
 POLICY_PATH = Path(__file__).resolve().parents[2] / "launch-policy.json"
@@ -78,6 +79,24 @@ def _direct_local_lane_telemetry(local_config):
     }
     telemetry = task_telemetry(spec, local_config["model"], local_config["provider"])
     return validate_task_telemetry(telemetry, telemetry["route"])
+
+
+def direct_route_spec(local_config, task_class, local_lane_scope, name, prompt):
+    """Compile the fixed local assignment for coordinator preview and validation."""
+    task_class, local_lane_scope = ensure_local_lane_admitted(
+        local_config, task_class, local_lane_scope, "direct")
+    pins = {"instruction": "Explicit scoped local-lane opt-in", "runtime": "pi",
+            "provider": local_config["provider"], "model": local_config["model"],
+            "effort": local_config["effort"]}
+    return {"job_id": text(name, "agent name", 32), "task_class": task_class,
+            "task_kind": "ordinary", "writes_repository": True, "local_lane": True,
+            "task_file": "direct-local-lane", "output_expectation": "Bounded local-lane result",
+            "task": local_lane_instruction(task_class, local_lane_scope) + "\n\n" + prompt,
+            "route": {"mode": "agent", "runtime": "pi"},
+            "model": local_config["model"], "provider": local_config["provider"],
+            "override": pins, "requested_override": pins,
+            "model_route": {"lane": "local_lane", "level": None,
+                            "choice": "explicit_opt_in", "effort": local_config["effort"]}}
 
 
 def local_lane_environment(source_env=None, pane_id=None):
@@ -177,10 +196,12 @@ def sanitize_pane_environment(pane_id, environment, *, herdr="herdr", run_comman
 def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane, name, prompt,
                             telemetry_path,
                             source_env=None, herdr="herdr", run_command=_run_host_command,
-                            policy=None, admission_service=None):
+                            policy=None, admission_service=None, route_decision=None):
     """Validate and start the explicitly scoped direct Herdr local-lane route."""
     task_class, local_lane_scope = ensure_local_lane_admitted(
         local_config, task_class, local_lane_scope, "direct")
+    if route_decision is None:
+        raise JobError("decision_needed", "direct local-lane start requires a coordinator route decision")
     pane_id = text(pane, "pane ID", 200)
     agent_name = text(name, "agent name", 32)
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", agent_name):
@@ -190,19 +211,37 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
                          + "\n\n" + prompt, "local-lane prompt", 100000)
     if contains_secret_material(worker_prompt):
         raise JobError("invalid_input", "local_lane prompt contains secret-like material; remove credentials or secrets before launch")
+    policy = policy or policy_record(load_json(POLICY_PATH))
+    if local_config != policy.get("local_lane"):
+        raise JobError("conflict", "direct local-lane configuration differs from policy")
+    spec = direct_route_spec(local_config, task_class, local_lane_scope, agent_name, prompt)
+    spec["route_decision"] = route_decision
+    validate_decision(spec, policy)
     if telemetry_path is None:
         raise JobError("invalid_input", "direct local-lane start requires a telemetry file")
     telemetry_path = Path(text(str(telemetry_path), "telemetry file path", 4096)).absolute()
     if telemetry_path.exists() or telemetry_path.is_symlink():
         raise JobError("conflict", "direct local-lane telemetry file already exists")
     environment = local_lane_environment(source_env, pane_id)
+    # Deferred to break transport.py -> local_lane.py -> transport.py.
+    from .transport import pi_catalog
+
+    code, output, _ = run_command(["pi", "--offline", "--list-models"], env=environment)
+    if code:
+        raise JobError("unavailable_capability", "Pi exact model discovery failed")
+    try:
+        catalog = pi_catalog(output.decode("utf-8", errors="strict"))
+    except UnicodeError as error:
+        raise JobError("unavailable_capability", "Pi exact model discovery returned invalid text") from error
+    resolved_model = local_config["provider"] + "/" + local_config["model"]
+    if not any(item["id"] == resolved_model for item in catalog["models"]):
+        raise JobError("unavailable_capability", "exact model unavailable in Pi offline discovery")
     telemetry = _direct_local_lane_telemetry(local_config)
     try:
         _create_telemetry_file(telemetry_path, telemetry)
     except FileExistsError as error:
         raise JobError("conflict", "direct local-lane telemetry file already exists") from error
 
-    policy = policy or policy_record(load_json(POLICY_PATH))
     # Defer to break the engine.py -> local_lane.py -> admission_service.py -> engine.py import cycle.
     from .admission_service import AdmissionService
 
@@ -210,7 +249,7 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
     lease_id = "direct-local-" + uuid.uuid4().hex
     admission_job = {
         "provider": local_config["provider"],
-        "admission_model": local_config["model"],
+        "admission_model": resolved_model,
         "admission_lease_id": lease_id,
     }
     effect_context = {
@@ -236,11 +275,25 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
     if not admission["admitted"]:
         raise JobError("unavailable_capability",
                        f"direct local-lane admission denied: {admission['reason']}")
+
+    def authorize():
+        validate_decision(spec, policy)
+        status = admission_service.store.status(local_config["provider"], resolved_model)
+        leases = [item for item in status["leases"] if item["lease_id"] == lease_id]
+        if (len(leases) != 1 or leases[0]["run_id"] != lease_id
+                or leases[0]["model"] != resolved_model.casefold()):
+            raise JobError("conflict", "direct local-lane shared admission lease is missing or changed")
+        if status["backoffs"]:
+            raise JobError("decision_needed", "provider backoff holds direct local-lane dispatch")
+
+    telemetry["launch"] = launch_telemetry(spec, "native", lease_id)
     try:
+        save(telemetry_path, telemetry)
+        authorize()
         verify_pane_worktree(pane_id, herdr=herdr, run_command=run_command)
         result = _launch_direct_local_lane(
             local_config, task_class, pane_id, agent_name, worker_prompt, environment,
-            herdr, run_command, effect_context, telemetry, telemetry_path,
+            herdr, run_command, effect_context, telemetry, telemetry_path, authorize,
         )
         result["telemetry"] = telemetry
         result["telemetry_file"] = str(telemetry_path)
@@ -295,7 +348,8 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
 
 def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, worker_prompt,
                               environment, herdr, run_command, effect_context,
-                              telemetry, telemetry_path):
+                              telemetry, telemetry_path, authorize):
+    authorize()
     sanitize_pane_environment(pane_id, environment, herdr=herdr, run_command=run_command)
     start = [herdr, "agent", "start", agent_name, "--kind", "pi", "--pane", pane_id,
              "--", "--provider", local_config["provider"], "--model", local_config["model"], "--approve"]
@@ -330,6 +384,7 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
             observation["prompt_verified"] = code == 0 and has_active_turn_status(terminal)
         return observation
 
+    authorize()
     telemetry["started_at"] = now()
     save(telemetry_path, validate_task_telemetry(telemetry, telemetry["route"]))
     effect_context["attempted"] = True
@@ -349,6 +404,7 @@ def _launch_direct_local_lane(local_config, task_class, pane_id, agent_name, wor
         raise
 
     def submit():
+        authorize()
         code, output, _ = run_command(
             [herdr, "agent", "prompt", agent_name, worker_prompt], env=environment)
         if code:
@@ -416,7 +472,7 @@ def check_preconditions(config, run=_run_readonly):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("preflight", "start"))
+    parser.add_argument("command", choices=("preflight", "preview", "start"))
     parser.add_argument("--policy", type=Path, default=POLICY_PATH)
     parser.add_argument("--task-class")
     parser.add_argument("--local-lane-scope-json")
@@ -424,6 +480,7 @@ def main(argv=None):
     parser.add_argument("--name")
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--telemetry-file", type=Path)
+    parser.add_argument("--route-decision", type=Path)
     parser.add_argument("--herdr", default=shutil.which("herdr") or "herdr")
     args = parser.parse_args(argv)
     try:
@@ -431,19 +488,31 @@ def main(argv=None):
         config = policy.get("local_lane")
         if config is None:
             raise JobError("unavailable_capability", "local lane is not configured by launch policy")
-        if args.command == "start":
+        if args.command in ("preview", "start"):
             if (args.task_class is None or args.local_lane_scope_json is None
-                    or args.pane is None or args.name is None or args.prompt_file is None
-                    or args.telemetry_file is None):
-                raise JobError("invalid_input", "direct local-lane start requires task class, scope, pane, name, prompt file, and telemetry file")
+                    or args.name is None or args.prompt_file is None):
+                raise JobError("invalid_input", "direct local-lane preview/start requires task class, scope, name, and prompt file")
             scope = parse_json(args.local_lane_scope_json.encode())
             ensure_local_lane_admitted(config, args.task_class, scope, "direct")
-            check_preconditions(config)
             prompt = args.prompt_file.read_text(encoding="utf-8")
+            spec = direct_route_spec(config, args.task_class, scope, args.name, prompt)
+            if args.command == "preview":
+                print(encoded({"route_decision": decision_for(spec, policy),
+                               "capabilities": "unverified"}).decode())
+                return 0
+            if args.pane is None or args.telemetry_file is None:
+                raise JobError("invalid_input", "direct local-lane start requires pane and telemetry file")
+            if args.route_decision is None:
+                raise JobError("decision_needed", "direct local-lane start requires --route-decision")
+            spec["route_decision"] = load_json(args.route_decision)
+            validate_decision(spec, policy)
+            check_preconditions(config, run=_run_readonly)
             result = start_direct_local_lane(config, task_class=args.task_class,
                                              local_lane_scope=scope, pane=args.pane,
                                              name=args.name, prompt=prompt, herdr=args.herdr,
-                                             telemetry_path=args.telemetry_file, policy=policy)
+                                             telemetry_path=args.telemetry_file, policy=policy,
+                                             route_decision=spec["route_decision"],
+                                             run_command=_run_host_command)
             print(encoded(result).decode())
             return 0
         result = check_preconditions(config)

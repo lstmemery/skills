@@ -58,7 +58,9 @@ lease before creating a pane; do not run preview argv directly. Preserve the exi
 binding, startup verification, isolated worktree, and route-specific isolation;
 the explicit local lane uses a host worktree and no jail. Direct local Pi starts
 must use `scripts/local-lane.py start`, which applies the same
-`task_class`/`local_lane_scope` validator as managed jobs. Do not start the
+`task_class`/`local_lane_scope` validator as managed jobs, validates the retained
+coordinator decision from `local-lane.py preview`, and requires exact offline
+Pi discovery before acquiring a lease or resetting the pane. Do not start the
 local model through a raw `herdr agent start --approve` command.
 The managed local lane requires an allowlisted `task_class` (`triage`,
 `summary`, `contract_artifact`, `bounded_code_edit`, `inventory`, or

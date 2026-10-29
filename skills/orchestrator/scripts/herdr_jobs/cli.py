@@ -197,7 +197,7 @@ def main(argv=None, transport_factory=LaunchTransport, *, backend="managed"):
             request = (prepare(args.manifest, args.policy, existing_jobs)
                        if args.operation in ("run", "add") else None)
         except JobError as error:
-            if not args.preview:
+            if not args.preview and error.kind in ("decision_needed", "unavailable_capability"):
                 record_hold(root, None, error, manifest_path=args.manifest, backend=backend)
             raise
         if request is not None and backend != "managed":

@@ -12,7 +12,7 @@ import unittest
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(PACKAGE.parents[1] / "tests"))
-from compatibility.builders import golden, review_evidence
+from review_fixtures import golden, review_evidence
 from herdr_jobs import review_evidence as domain
 
 

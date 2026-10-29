@@ -15,9 +15,27 @@ import herdr_jobs.local_lane as local_lane
 from herdr_jobs.local_lane import check_preconditions, main
 from herdr_jobs.admission import AdmissionStore
 from herdr_jobs.records import JobError, policy_record, load_json
+from herdr_jobs.routing_decision import decision_for
 
 
 class LocalLaneTest(unittest.TestCase):
+    def start_direct(self, config, **kwargs):
+        policy = kwargs.get("policy") or policy_record(load_json(local_lane.POLICY_PATH))
+        spec = local_lane.direct_route_spec(config, kwargs["task_class"], kwargs["local_lane_scope"],
+                                            kwargs["name"], kwargs["prompt"])
+        kwargs["route_decision"] = decision_for(spec, policy)
+        host = kwargs["run_command"]
+
+        def discovered_host(argv, *, env=None):
+            if argv == ["pi", "--offline", "--list-models"]:
+                table = ("provider model context max-out thinking images\n"
+                         + config["provider"] + " " + config["model"] + " 32k 4k no no\n")
+                return 0, table.encode(), b""
+            return host(argv, env=env)
+
+        kwargs["run_command"] = discovered_host
+        return local_lane.start_direct_local_lane(config, **kwargs)
+
     def fake_worktree_host(self, argv):
         if not hasattr(self, "_fake_worktree_tmp"):
             self._fake_worktree_tmp = tempfile.TemporaryDirectory()
@@ -131,6 +149,11 @@ class LocalLaneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as input_dir:
             prompt_file = Path(input_dir) / "prompt.md"
             prompt_file.write_text("Summarize the fixture.", encoding="utf-8")
+            decision_file = Path(input_dir) / "decision.json"
+            policy = policy_record(load_json(local_lane.POLICY_PATH))
+            spec = local_lane.direct_route_spec(policy["local_lane"], "summary", json.loads(scope),
+                                                "bounded-task", prompt_file.read_text())
+            decision_file.write_text(json.dumps(decision_for(spec, policy)))
             with redirect_stdout(stdout), redirect_stderr(stderr), \
                     patch("herdr_jobs.local_lane.check_preconditions", return_value={}), \
                     patch("herdr_jobs.local_lane.start_direct_local_lane", side_effect=unresolved):
@@ -138,6 +161,7 @@ class LocalLaneTest(unittest.TestCase):
                     "start", "--task-class", "summary", "--local-lane-scope-json", scope,
                     "--pane", "moved:1", "--name", "bounded-task", "--prompt-file", str(prompt_file),
                     "--telemetry-file", str(Path(input_dir) / "telemetry.json"),
+                    "--route-decision", str(decision_file),
                 ])
 
         self.assertEqual(code, 4)
@@ -170,7 +194,7 @@ class LocalLaneTest(unittest.TestCase):
             self.assertTrue(held["admitted"])
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
                 with self.assertRaisesRegex(JobError, "admission"):
-                    local_lane.start_direct_local_lane(
+                    self.start_direct(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
                         telemetry_path=Path(admission_dir) / "telemetry.json",
@@ -182,7 +206,7 @@ class LocalLaneTest(unittest.TestCase):
             self.assertEqual(store.status("llama-local")["active_count"], 1)
 
     def test_direct_start_sanitizes_pane_before_starting_and_prompting_pi(self):
-        start_direct = getattr(local_lane, "start_direct_local_lane", None)
+        start_direct = self.start_direct
         self.assertIsNotNone(start_direct, "the direct route must use the shared local-lane launcher")
         policy = policy_record(load_json(local_lane.POLICY_PATH))
         config = policy["local_lane"]
@@ -241,6 +265,9 @@ class LocalLaneTest(unittest.TestCase):
         self.assertTrue(active_counts)
         self.assertEqual(set(active_counts), {1})
         self.assertEqual(result["outcome"], "ready")
+        self.assertEqual(telemetry["launch"]["backend"], "native")
+        self.assertEqual(telemetry["launch"]["decision"]["resolved"], {
+            "runtime": "pi", "provider": "llama-local", "model": config["model"], "effort": "medium"})
         self.assertEqual(telemetry, result["telemetry"])
         self.assertEqual(result["telemetry_file"], str(telemetry_path))
         self.assertEqual(telemetry["schema_version"], 1)
@@ -318,7 +345,7 @@ class LocalLaneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}), \
                     self.assertRaisesRegex(JobError, "linked worktree"):
-                local_lane.start_direct_local_lane(
+                self.start_direct(
                     config, task_class="summary", local_lane_scope=scope,
                     pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
                     telemetry_path=Path(admission_dir) / "telemetry.json",
@@ -353,7 +380,7 @@ class LocalLaneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
                 with self.assertRaises(local_lane.UnknownDirectLocalLaneEffect) as caught:
-                    local_lane.start_direct_local_lane(
+                    self.start_direct(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
                         telemetry_path=Path(admission_dir) / "telemetry.json",
@@ -417,7 +444,7 @@ class LocalLaneTest(unittest.TestCase):
             telemetry_path = Path(admission_dir) / "telemetry.json"
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
                 with self.assertRaises(KeyboardInterrupt):
-                    local_lane.start_direct_local_lane(
+                    self.start_direct(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
                         telemetry_path=telemetry_path,
@@ -461,7 +488,7 @@ class LocalLaneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as admission_dir:
             with patch.dict(os.environ, {"ORCHESTRATOR_ADMISSION_DIR": admission_dir}):
                 with self.assertRaisesRegex(JobError, "reset the local-lane pane environment"):
-                    local_lane.start_direct_local_lane(
+                    self.start_direct(
                         config, task_class="summary", local_lane_scope=scope,
                         pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
                         telemetry_path=Path(admission_dir) / "telemetry.json",
@@ -487,7 +514,7 @@ class LocalLaneTest(unittest.TestCase):
         }
         for scope in (None, unsafe_scope):
             with self.subTest(scope=scope), self.assertRaises(JobError):
-                local_lane.start_direct_local_lane(
+                self.start_direct(
                     config, task_class="summary", local_lane_scope=scope,
                     pane="moved:1", name="bounded-task", prompt="Summarize the fixture.",
                     telemetry_path=Path(__file__).parent / "unused-telemetry.json",

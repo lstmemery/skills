@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_DIR.parents[1] / "tests"))
-from compatibility.builders import review_evidence
+from review_fixtures import review_evidence
 CLI = SKILL_DIR / "scripts" / "integration-preflight.py"
 CAPTURE_CLI = SKILL_DIR.parent / "code-review" / "scripts" / "capture.py"
 PREFLIGHT_SPEC = importlib.util.spec_from_file_location("integration_preflight", CLI)

@@ -89,14 +89,22 @@ class RouteDecisionTest(unittest.TestCase):
                  "override": {"instruction": "Use Claude for these five interviews", "runtime": "claude"}}
                 for i in range(5)]
         save(self.manifest, {"schema_version": 1, "request_id": "five", "jobs": jobs})
-        with self.assertRaisesRegex(JobError, "harness/provider preference"):
-            prepare(self.manifest, self.policy)
+        request = prepare(self.manifest, self.policy)
+        for spec in request["jobs"]:
+            self.assertEqual(spec["route_decision"]["resolved"], {
+                "runtime": "claude-code", "provider": "claude", "model": "claude-sonnet-5-5", "effort": "low"})
+            self.assertEqual(spec["route_decision"]["pins"], {"runtime": "claude"})
         self.assertFalse((self.root / "admission").exists())
         self.assertEqual(load_json(self.manifest)["jobs"], jobs)
 
     def test_harness_and_provider_pins_remain_separate_from_resolved_tuple(self):
         for pins in ({"runtime": "codex"}, {"provider": "codex"}, {"runtime": "pi"}):
             with self.subTest(pins=pins):
+                if pins == {"runtime": "pi"}:
+                    policy = load_json(self.policy)
+                    policy["model_ladder"]["csv"] = str(PACKAGE / "tests/fixtures/opencode-go-model-ladder.csv")
+                    self.policy = self.root / "pi-policy.json"
+                    save(self.policy, policy)
                 override = {"instruction": "Use this harness/provider", **pins}
                 request = self.request(override=override)
                 spec = request["jobs"][0]
