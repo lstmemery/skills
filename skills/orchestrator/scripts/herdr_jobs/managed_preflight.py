@@ -6,6 +6,7 @@ import re
 import tarfile
 
 from . import records
+from .preflight_batch import done_verdict
 from .review_evidence import AXES, ReviewEvidenceError
 from .worker_records import WorkerIdentity, validate_result
 
@@ -212,10 +213,7 @@ def _materialize_runs(run_dirs, output_dir):
             if "review_of" in job["spec"]:
                 if job["spec"]["review_of"] != author["spec"]["job_id"]:
                     raise ReviewEvidenceError("scheduled review_of disagrees with coding job")
-                done_raw = files.get(f"{review_name}/done.json")
-                if done_raw is None or records.parse_json(done_raw).get("verdict") not in (
-                        "approve", "approve-with-nits", "changes-requested"):
-                    raise ReviewEvidenceError("scheduled review requires an explicit verdict in done.json")
+                done_verdict(files.get(f"{review_name}/done.json"), evidence, required=True)
             if author["agent_name"] == job["agent_name"] or author["pane_id"] == job["pane_id"]:
                 raise ReviewEvidenceError("managed reviewer is the candidate author or shares its pane")
             for key, expected in (("author_identity", author["agent_name"]),

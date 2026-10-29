@@ -31,6 +31,8 @@ def expand_jobs(jobs, existing_jobs=()):
         if (author is None or author_id == job_id or "review_of" in author
                 or author.get("writes_repository") is not True or "worker_result" not in author):
             records.invalid(f"{job_id}: review_of requires a distinct coding job with worker_result")
+        if "cwd" not in author:
+            records.invalid(f"{job_id}: review_of author {author_id} is missing required field: cwd")
         kind = job.get("review_kind", "full")
         if kind not in ("full", "delta"):
             records.invalid("review_kind must be full or delta")

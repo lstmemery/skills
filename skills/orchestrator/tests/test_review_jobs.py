@@ -193,6 +193,22 @@ class ReviewJobsTests(unittest.TestCase):
                 self.assertEqual(code, 2, result)
                 self.assertFalse((self.root / "events.json").exists())
 
+    def test_review_author_missing_required_fields_returns_structured_invalid_input(self):
+        for key in ("cwd", "name", "task_kind", "task_file", "output_expectation",
+                    "writes_repository", "worker_result"):
+            for review_first in (False, True):
+                with self.subTest(missing=key, review_first=review_first):
+                    author = dict(self.author)
+                    del author[key]
+                    reviewer = {"job_id": "reviewer", "review_of": "author"}
+                    jobs = [reviewer, author] if review_first else [author, reviewer]
+
+                    code, result = self.call(jobs=jobs)
+
+                    self.assertEqual(code, 2, result)
+                    self.assertEqual(result["error"], "invalid_input")
+                    self.assertFalse((self.root / "events.json").exists())
+
     def test_moved_candidate_blocks_review_without_launching(self):
         fixture = json.loads(self.fixture.read_text())
         fixture["worker_results"]["author"]["candidate"]["head"] = self.base
@@ -241,3 +257,29 @@ class ReviewJobsTests(unittest.TestCase):
 
         self.assertEqual(gate.returncode, 2, gate.stdout + gate.stderr)
         self.assertIn("verdict in done.json", gate.stdout + gate.stderr)
+
+    def test_non_object_done_is_refused_cleanly_by_both_preflight_paths(self):
+        review = self.clean_review_output()
+        (review / "done.json").write_text("[]\n")
+        fixture = json.loads(self.fixture.read_text())
+        fixture["review_outputs"] = {"reviewer": str(review)}
+        self.fixture.write_text(json.dumps(fixture))
+        code, result = self.call(jobs=[self.author, {"job_id": "reviewer", "review_of": "author"}])
+        self.assertEqual(code, 0, result)
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+
+        commands = {
+            "prepare": self.prepare_preflight,
+            "managed": lambda: subprocess.run([
+                sys.executable, str(PACKAGE / "scripts/integration-preflight.py"),
+                "--repo", str(self.repo), "--target", "main", "--run-dir", str(evidence),
+                "--managed-run", str(self.run), "--candidate", f"candidate={self.head}"],
+                capture_output=True, text=True, timeout=20),
+        }
+        for name, command in commands.items():
+            with self.subTest(path=name):
+                refused = command()
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertNotIn("Traceback", refused.stdout + refused.stderr)
+                self.assertIn("done.json", refused.stdout + refused.stderr)
