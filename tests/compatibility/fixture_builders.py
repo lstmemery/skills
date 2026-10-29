@@ -1,15 +1,11 @@
-"""Review goldens from this checkout, with no paired agents dependency.
-
-The builders mirror the shared compatibility fixture contract; keep expectations
-in the checked-in corpus rather than regenerating them through production code.
-"""
+"""Pure fixture builders from checked-in goldens, without paired-repo discovery."""
 
 import copy
 import json
 from pathlib import Path
 
 
-FIXTURES = Path(__file__).resolve().parents[3] / "tests/compatibility/fixtures"
+FIXTURES = Path(__file__).with_name("fixtures")
 
 
 def golden(name):

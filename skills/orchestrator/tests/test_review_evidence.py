@@ -11,7 +11,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 PREFLIGHT_CLI = PACKAGE / "scripts" / "integration-preflight.py"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(PACKAGE.parents[1] / "tests"))
-from review_fixtures import review_bundle, write_json
+from compatibility.fixture_builders import review_bundle, write_json
 
 from herdr_jobs import records
 from herdr_jobs import review_dispositions

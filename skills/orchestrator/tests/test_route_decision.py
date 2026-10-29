@@ -26,6 +26,7 @@ from herdr_jobs.records import JobError, load_json, prepare, save
 from herdr_jobs.routing_decision import validate_decision
 from herdr_jobs.transport import Deadline, NativeTransport
 import test_transport
+import test_worktrees
 
 
 class RouteDecisionTest(unittest.TestCase):
@@ -298,6 +299,75 @@ class RouteDecisionTest(unittest.TestCase):
         self.assertEqual(telemetry["launch"]["backend"], "native")
         self.assertIsNotNone(telemetry["started_at"])
         self.assertIsNotNone(telemetry["ended_at"])
+
+    def test_native_local_pi_exact_route_launches_and_releases_its_lease(self):
+        repository = test_worktrees.WorktreeAllocationTest()
+        repository.setUp()
+        self.addCleanup(repository.doCleanups)
+        repo, worktree, base = repository.git_fixture()
+        lease = repository.repository_worktree_record(worktree, repo, base)
+        allocation, status = repository.treehouse_records(worktree)
+        request = self.request(
+            backend="native", task_class="summary", local_lane=True,
+            cwd=str(worktree), writes_repository=True, repository_worktree=lease,
+            acceptance_tests=[str(self.root / "task.md")],
+            independent_validator={"argv": ["python3", "validate.py", "{output_dir}"]},
+            override={"instruction": "Use the approved local Pi/Qwen tuple at medium effort.",
+                      "runtime": "pi", "provider": "llama-local",
+                      "model": "qwen3.8-27b-uncensored", "effort": "medium"},
+            local_lane_scope={"network_access": False, "credential_access": False,
+                              "credentials_in_environment": False, "destructive_actions": False},
+        )
+        spec = deepcopy(request["jobs"][0])
+        self.assertEqual(spec["route_decision"]["resolved"], {
+            "runtime": "pi", "provider": "llama-local",
+            "model": "qwen3.8-27b-uncensored", "effort": "medium",
+        })
+        transport, _ = self.transport([])
+        original_raw = transport.raw
+        transport.raw = lambda argv: (
+            b"provider model context max-out thinking images\n"
+            b"llama-local qwen3.8-27b-uncensored 90.1K 16.4K yes no\n"
+            if argv == ["pi", "--offline", "--list-models"] else original_raw(argv)
+        )
+        store = StateStore(self.root / "native-local" / "state.json")
+        adapter = NativeHerdrAdapter(transport=transport, admission_service=AdmissionService(self.store))
+        actions = []
+
+        def effect(action, current, prompt):
+            actions.append(action)
+            self.assertEqual(current["spec"], spec)
+            self.assertEqual(current["resolved_model"], "llama-local/qwen3.8-27b-uncensored")
+            leases = self.store.status("llama-local")["leases"]
+            self.assertEqual(len(leases), 1)
+            self.assertEqual(leases[0]["model"], "qwen3.8-27b-uncensored")
+            if action in ("split", "move"):
+                return {"pane_id": "fixture:1", "workspace_id": "workspace:1"}
+            return {"prompt_submitted": True}
+
+        def host(argv, deadline, cwd=None):
+            if argv == ["systemctl", "--user", "is-active", "llama-server.service"]:
+                return 0, b"active", b""
+            if argv == ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]:
+                return 0, b"3072\n", b""
+            if argv[0] == repository.real_git:
+                return repository.run_git(argv, cwd)
+            if argv == ["treehouse", "get", str(worktree), "--json"]:
+                return 0, allocation.encode(), b""
+            if argv == ["treehouse", "status", "--json"]:
+                return 0, status.encode(), b""
+            raise AssertionError(f"unexpected host command: {argv}")
+
+        with patch("herdr_jobs.transport.command", side_effect=host), \
+                patch.object(NativeTransport, "effect", side_effect=effect), \
+                patch.object(transport, "observe", return_value={
+                    "state": "done", "identity_verified": True, "receipt_valid": True}):
+            result = run(request, store=store, effect_port=adapter, max_steps=20)
+        self.assertEqual(actions, ["split", "move", "start"])
+        self.assertTrue(result.state["jobs"][0]["settled"])
+        self.assertFalse(result.unresolved_effect)
+        self.assertEqual(self.store.status("llama-local")["active_count"], 0)
+        self.assertEqual(request["jobs"][0], spec)
 
     def test_parked_blocked_worker_retains_lease_and_resumes_without_duplicate_start(self):
         request = self.request(backend="native")

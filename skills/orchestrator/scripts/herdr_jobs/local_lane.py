@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 
+from .admission import normalize_model
 from .records import (JobError, encoded, ensure_local_lane_admitted, load_json,
                       now, parse_json, policy_record, save, text)
 from .routing_decision import decision_for, validate_decision
@@ -281,7 +282,7 @@ def start_direct_local_lane(local_config, *, task_class, local_lane_scope, pane,
         status = admission_service.store.status(local_config["provider"], resolved_model)
         leases = [item for item in status["leases"] if item["lease_id"] == lease_id]
         if (len(leases) != 1 or leases[0]["run_id"] != lease_id
-                or leases[0]["model"] != resolved_model.casefold()):
+                or leases[0]["model"] != normalize_model(resolved_model)):
             raise JobError("conflict", "direct local-lane shared admission lease is missing or changed")
         if status["backoffs"]:
             raise JobError("decision_needed", "provider backoff holds direct local-lane dispatch")

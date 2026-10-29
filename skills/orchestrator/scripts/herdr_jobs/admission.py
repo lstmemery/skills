@@ -44,7 +44,7 @@ def normalize_provider(value):
 
 def normalize_model(value):
     value = text(value, "model", 200).strip().casefold()
-    if "/" in value and billing_pool(value.split("/", 1)[0]) in ("codex", "claude", "opencode-go"):
+    if "/" in value and billing_pool(value.split("/", 1)[0]) in ("codex", "claude", "opencode-go", "llama-local"):
         return text(value.split("/", 1)[1], "native model", 200)
     return value
 

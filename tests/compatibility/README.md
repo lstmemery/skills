@@ -22,8 +22,11 @@ validation. The three orchestrator review suites also use `review_evidence` or
 | `calendar.json` | Fictional ICS, exact event JSON and seven-day grids. Passed through `event_from_ics`, `classify`, calendar-days CLI, and `check_plan.validate`. Pins UTC all-day dates, both DST transitions, exclusive ends, dinner boundaries, away precedence and evidence text. |
 | `state-v1.json` | Current and legacy v1 checkpoints, expected public result, and refusal cases for unsupported versions and inconsistent identity. Intended for `Engine.load`, `result`, and `checkpoint`; see the verification limitation below. |
 
-`builders.py` loads fresh copies and materializes isolated inputs. It does not
-call a production parser to manufacture expectations. Tests compare complete
+`fixture_builders.py` loads fresh copies and materializes isolated review/capture
+inputs without discovering a paired repository. Orchestrator unit tests import
+these pure builders directly; `builders.py` re-exports them for the compatibility
+suite and adds the consumers that require the paired agents repository. Neither
+module calls a production parser to manufacture expectations. Tests compare complete
 JSON objects and exact marker strings, including final newlines. Existing fake
 SMTP/IMAP classes and the complete meal-plan builder are reused from their
 bundled test modules.
