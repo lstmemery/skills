@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 from .cleanup import cleanup_stale, close_workspace
+from .codex_trust import prune_trust
 from .continuation import continue_job
 from .engine import Engine, WORKER_DISPOSITIONS
 from .edit_scope import declared_brief_contract, edit_scope_warnings
@@ -26,6 +27,11 @@ class Parser(argparse.ArgumentParser):
 def parser():
     result = Parser(description="Launch, checkpoint, collect, and finish Herdr jobs and worker fleets. JSON output; Python 3.11+ / POSIX.")
     commands = result.add_subparsers(dest="operation", required=True)
+    prune = commands.add_parser("prune-codex-trust", help="prune missing orchestrator cwd trust entries (dry-run by default)")
+    prune.add_argument("--config", help="config.toml path (defaults to $CODEX_HOME/config.toml or ~/.codex/config.toml)")
+    prune_mode = prune.add_mutually_exclusive_group()
+    prune_mode.add_argument("--dry-run", action="store_true", help="report stale entries without writes (default)")
+    prune_mode.add_argument("--apply", action="store_true", help="back up and remove stale scoped trust entries")
     cleanup = commands.add_parser("cleanup-stale", help="reconcile managed Herdr panes and provider leases")
     cleanup.add_argument("--dry-run", action="store_true", default=True,
                          help="report planned cleanup without mutations (default)")
@@ -113,6 +119,8 @@ def finish_message(finish):
                  if item["worker_result_validation"] == "validated"]
     legacy = [job_id for job_id, item in validations.items()
               if item["worker_result_validation"] == "not_requested"]
+    not_started = [job_id for job_id, item in validations.items()
+                   if item["worker_result_validation"] == "not_started"]
     dispositions = []
     for job_id in validated:
         item = validations[job_id]
@@ -122,6 +130,9 @@ def finish_message(finish):
         dispositions.append(detail)
     closed = [job_id for job_id, item in validations.items() if item["workspace_closed"]]
     parts = []
+    if not_started:
+        parts.append("Recorded startup-failure dispositions without worker result or receipt for: "
+                     + ", ".join(not_started) + ".")
     if validated:
         parts.append(
             "Validated each worker result.json schema and assigned task/revision (including the repository candidate "
@@ -141,6 +152,9 @@ def main(argv=None, transport_factory=NativeTransport):
     engine = None
     try:
         args = parser().parse_args(argv)
+        if args.operation == "prune-codex-trust":
+            print(encoded(prune_trust(args.config, apply=args.apply)).decode())
+            return 0
         if args.operation == "cleanup-stale":
             result = cleanup_stale(args, env=os.environ)
             print(encoded(result).decode())

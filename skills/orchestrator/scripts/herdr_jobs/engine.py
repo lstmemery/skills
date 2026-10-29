@@ -18,14 +18,14 @@ from .local_lane import local_lane_instruction
 from .security import contains_secret_material
 from .transport import BudgetExpired, EffectUnknown, RateLimited
 from .model_ladder import billing_pool
-from .lifecycle import JobLifecycle
+from .lifecycle import JobLifecycle, is_untrusted_cwd_issue
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
 from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
 from .store import CoordinatorCheckpointStore
 
 
-PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted"}
+PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted", "failed"}
 WORKER_DISPOSITIONS = {"completed", "blocked", "failed"}
 class Engine:
     def __init__(self, root, transport, deadline, admission_store=None):
@@ -939,6 +939,8 @@ class Engine:
                 observation = result.get("observation", {"state": "blocked", "identity_verified": True})
                 job["observed"] = {**observation, "observed_at": now()}
                 job["issue"] = result.get("issue", "Codex launch is blocked; inspect the owned pane")
+                if self.is_codex_pending_start(job, job["pending_effect"]) and is_untrusted_cwd_issue(job["issue"]):
+                    self.fail_untrusted_start(job, job["issue"])
             else:
                 job["phase"] = "ready"
         else:
@@ -964,7 +966,7 @@ class Engine:
             return
         spec = job["spec"]
         ensure_task_admitted(spec["task_kind"], spec["job_id"])
-        while job["phase"] != "submitted" and job["pending_effect"] is None:
+        while job["phase"] not in ("submitted", "failed") and job["pending_effect"] is None:
             if not self.acquire_admission(job):
                 return
             planned = self.lifecycle.step(job)
@@ -1031,6 +1033,45 @@ class Engine:
         except (JobError, OSError, UnicodeError) as error:
             job["collection_error"] = str(error)
 
+    def fail_untrusted_start(self, job, issue):
+        job.update(phase="failed", settled=True, pending_effect=None,
+                   issue=issue, issue_code="codex_cwd_untrusted")
+        job["history"].append({"action": "start_failed", "reason": "codex_cwd_untrusted",
+                               "attempt_id": job["attempt_id"], "issue": issue, "observed_at": now()})
+        job["telemetry"]["ended_at"] = now()
+        self.checkpoint()
+        self.release_admission(job)
+
+    def record_startup_disposition(self, job, requested, reason):
+        worker = job["spec"].get("worker_result")
+        stored = job.get("worker_disposition_override")
+        if requested == "completed":
+            raise JobError("invalid_input", "a worker blocked at startup cannot be marked completed")
+        if requested is not None:
+            override = {"disposition": requested, "reason": reason}
+            if stored is not None and stored != override:
+                raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
+            job["worker_disposition_override"] = stored = override
+        disposition = stored["disposition"] if stored else "failed"
+        if worker:
+            failure = next(item for item in reversed(job["history"]) if item["action"] == "start_failed")
+            evidence = f"Managed job {job['spec']['job_id']} failed at startup: {failure['issue']}"
+            if stored:
+                evidence += f" Coordinator override: {stored['reason']}"
+            identity = WorkerIdentity(worker["task_id"], worker["assignment_revision"])
+            record = {"task_id": identity.task_id, "assignment_revision": identity.assignment_revision,
+                      "disposition": disposition, "summary": "Codex startup failed before worker execution.",
+                      "evidence": evidence}
+            target = Path(job["host_output"]) / "disposition.json"
+            if target.exists():
+                if load_json(target) != record:
+                    raise JobError("conflict", "existing startup disposition differs from its recorded decision")
+            else:
+                record_disposition(Path(job["host_output"]), DispositionInput(
+                    identity=identity, disposition=disposition, summary=record["summary"], evidence=evidence))
+        job["worker_disposition"] = disposition
+        self.checkpoint()
+
     def finish(self, disposition_overrides=None, override_reason=None, coordinator_grades=None):
         """Record worker dispositions and close only settled, collected jobs."""
         disposition_overrides = disposition_overrides or {}
@@ -1068,6 +1109,10 @@ class Engine:
             job_id = job["spec"]["job_id"]
             worker = job["spec"].get("worker_result")
             validation = "pending" if worker else "not_requested"
+            startup_failure = (job["phase"] == "failed" and job["settled"]
+                               and job.get("issue_code") == "codex_cwd_untrusted"
+                               and (job["pending_effect"] is None
+                                    or job["pending_effect"]["action"] == "workspace_close"))
             if job_id in self.telemetry_grade_tampering:
                 issue = ("worker-writable telemetry contained a coordinator_grade; tampering was detected "
                          "and the value was ignored. Rerun finish with --coordinator-grade after review.")
@@ -1076,10 +1121,13 @@ class Engine:
                 outcomes[job_id] = {"finished": False, "issue": issue,
                                     "worker_result_validation": validation}
                 continue
-            if not job["settled"] or job["collection"] is None or job["collection_error"]:
+            if not startup_failure and (not job["settled"] or job["collection"] is None or job["collection_error"]):
                 outcomes[job_id] = {"finished": False, "issue": "worker is not settled with a collected receipt",
                                     "worker_result_validation": validation}
                 continue
+            if startup_failure:
+                self.record_startup_disposition(job, disposition_overrides.get(job_id), override_reason)
+                validation = "not_started"
             requested_grade = coordinator_grades.get(job_id)
             if requested_grade is not None:
                 self.record_coordinator_grade(job, requested_grade)
@@ -1135,7 +1183,7 @@ class Engine:
                                         "worker_result_validation": validation,
                                         "independent_validation": status}
                     continue
-            if worker:
+            if worker and not startup_failure:
                 try:
                     result_path = Path(job["host_output"]) / "result.json"
                     identity = WorkerIdentity(worker["task_id"], worker["assignment_revision"])
@@ -1238,7 +1286,7 @@ class Engine:
                                 "worker_result_validation": validation,
                                 "coordinator_grade": self.coordinator_grades.get(job_id, {}).get("grade", "pending"),
                                 "independent_validation": job["telemetry"]["independent_validation"]["status"]}
-            if worker:
+            if worker and not startup_failure:
                 outcomes[job_id]["worker_result_outcome"] = result["outcome"]
                 if job.get("worker_disposition_override") is not None:
                     outcomes[job_id]["coordinator_override_reason"] = job["worker_disposition_override"]["reason"]
@@ -1260,6 +1308,9 @@ class Engine:
                     and job["spec"]["route"]["runtime"] == "codex")
 
     def observe(self, job):
+        if job["phase"] == "failed" and job.get("issue_code") == "codex_cwd_untrusted":
+            self.release_admission(job)
+            return
         if job.get("workspace_closed", False):
             if not job["settled"]:
                 self.collect(job)
@@ -1307,6 +1358,11 @@ class Engine:
             self.retire_absent_workspace(job)
             return
         job["observed"] = {**observation, "observed_at": now()}
+        if (self.is_codex_pending_start(job, job["pending_effect"])
+                and observation["state"] == "blocked"
+                and is_untrusted_cwd_issue(observation.get("launch_issue"))):
+            self.fail_untrusted_start(job, observation["launch_issue"])
+            return
         if not observation["identity_verified"]:
             job["issue"] = observation.get("launch_issue", "worker identity unverified")
             job["settled"] = False
@@ -1544,7 +1600,7 @@ class Engine:
                          "collection": job["collection"], "collection_error": job["collection_error"]})
         all_collected = all(job["collection"] is not None and job["collection_error"] is None for job in jobs)
         unresolved = any(job["pending_effect"] is not None for job in jobs)
-        partial = any(job["issue"] or (job["settled"] and job["collection_error"])
+        partial = any(job["phase"] == "failed" or job["issue"] or (job["settled"] and job["collection_error"])
                       or (job["collection"] and (job["collection"]["outcome"] != "complete" or job["collection"]["unresolved"]))
                       for job in jobs)
         batch = "unresolved_effect" if unresolved else "partial" if partial else "collected" if all_collected and all(job["settled"] for job in jobs) else "active"

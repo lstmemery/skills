@@ -171,6 +171,59 @@ class BrokenObservationPort(ImmediatePort):
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_untrusted_cwd_reconciles_pending_start_as_failed_without_replay(self):
+        current = job()
+        current.update(phase="moved", pane_id="owned-pane", pending_effect={"action": "start"})
+        observation = {"state": "blocked", "identity_verified": False,
+                       "launch_issue": "Codex startup failed because the managed worker cwd is untrusted; verify config.toml"}
+        transition = JobLifecycle().step(current, observation)
+        self.assertEqual(transition.state["phase"], "failed")
+        self.assertTrue(transition.state["settled"])
+        self.assertIsNone(transition.state["pending_effect"])
+        self.assertEqual(transition.effects, [])
+        self.assertFalse(transition.unknown)
+
+    def test_untrusted_cwd_releases_acquired_admission_before_settling(self):
+        current = job()
+        current.update(phase="moved", pane_id="owned-pane", pending_effect={"action": "start"},
+                       admission_acquired=True, admission_lease_id="lease-1")
+        lifecycle = JobLifecycle()
+        failed = lifecycle.step({"jobs": [current]}, {
+            "state": "blocked", "identity_verified": False,
+            "launch_issue": "Codex startup failed because the managed worker cwd is untrusted"})
+        self.assertFalse(failed.state["jobs"][0]["settled"])
+        release = lifecycle.step(failed.state)
+        self.assertEqual([effect.action for effect in release.effects], ["admission_release"])
+        settled = lifecycle.step(release.state, {"effect_receipt": True, "released": True})
+        self.assertFalse(settled.state["jobs"][0]["admission_acquired"])
+        self.assertTrue(settled.state["jobs"][0]["settled"])
+        self.assertIn("cwd is untrusted", settled.state["jobs"][0]["issue"])
+
+    def test_native_runner_settles_trust_failure_after_releasing_provider_slot(self):
+        class UntrustedTransport(FakeNativeTransport):
+            def effect(self, action, current, prompt):
+                result = super().effect(action, current, prompt)
+                if action == "start":
+                    return {"launch_blocked": True,
+                            "issue": "Codex startup failed because the managed worker cwd is untrusted",
+                            "observation": {"state": "blocked", "identity_verified": False}}
+                return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            admission = FakeAdmissionStore()
+            transport = UntrustedTransport()
+            adapter = NativeHerdrAdapter(transport=transport, admission_service=AdmissionService(admission))
+            current = job()
+            current.update(provider="codex", admission_model="default", admission_lease_id="lease-1")
+            result = run({"request_id": "trust-failure", "jobs": [current]},
+                         store=StateStore(Path(directory) / "state.json"), effect_port=adapter, max_steps=30)
+        final = result.state["jobs"][0]
+        self.assertEqual(final["phase"], "failed")
+        self.assertTrue(final["settled"])
+        self.assertFalse(final["admission_acquired"])
+        self.assertFalse(admission.held)
+        self.assertEqual(transport.actions, ["split", "move", "start"])
+
     def test_native_runner_delivers_engine_prompt_and_runtime_job(self):
         class CapturingTransport(FakeNativeTransport):
             def __init__(self):

@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath
 import shlex
 import sys
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -84,6 +85,10 @@ class TransportTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.codex_home = self.root / "codex-home"
+        environment = patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.jail_exports = ((self.root, PurePosixPath("/work")),)
         self.jail_exports_patch = patch("herdr_jobs.records.JAIL_CONTEXT_EXPORTS", self.jail_exports)
         self.jail_exports_patch.start()
@@ -448,7 +453,7 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(result["prompt_submitted"], True)
         self.assertEqual(start, ["herdr", "agent", "start", "c9-fixture", "--kind", "codex",
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
-                                 "-c", f'projects."{self.root}".trust_level="trusted"', "-m", "native-id", prompt])
+                                 "-m", "native-id", prompt])
 
     def test_local_lane_start_uses_pi_with_configured_mcp_and_extensions(self):
         fake = FakeHerdr()
@@ -909,9 +914,32 @@ class TransportTest(unittest.TestCase):
 
         self.assertFalse(any(call[:3] == ["herdr", "pane", "split"] for call in self.calls))
 
+    def test_codex_launch_persists_exact_cwd_trust_before_start(self):
+        self.codex_home.mkdir()
+        config = self.codex_home / "config.toml"
+        original = b'# keep formatting\nmodel = "fixture"\n[mcp_servers.fixture]\ncommand = "fixture"\n'
+        config.write_bytes(original)
+        cwd = self.root / 'project with "quotes" and ☃'
+        cwd.mkdir()
+        self.spec["cwd"] = str(cwd)
+        fake = FakeHerdr()
+
+        def command(argv, deadline):
+            if argv[:3] == ["herdr", "agent", "start"]:
+                saved = config.read_bytes()
+                self.assertTrue(saved.startswith(original))
+                self.assertEqual(tomllib.loads(saved.decode())["projects"][str(cwd)]["trust_level"], "trusted")
+            return fake.command(argv, deadline)
+
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        with patch("herdr_jobs.transport.command", command):
+            result = self.adapter.effect("start", self.job, "Assigned work")
+        self.assertTrue(result["prompt_submitted"])
+
     def test_trust_and_resume_dialogs_fail_launch_without_answering_the_dialog(self):
         cases = [
             ("Do you trust the contents of this folder?", "trust dialog"),
+            ("Trust this folder?\n1. Yes, trust and continue", "trust dialog"),
             ("Resume session or use session directory", "resume/session-selection dialog"),
         ]
         for output, expected in cases:
@@ -923,6 +951,9 @@ class TransportTest(unittest.TestCase):
 
                 self.assertTrue(result["launch_blocked"])
                 self.assertIn(expected, result["issue"])
+                if expected == "trust dialog":
+                    self.assertIn("cwd is untrusted", result["issue"])
+                    self.assertIn("config.toml", result["issue"])
                 self.assertFalse(any(call[:2] == ["herdr", "agent"] and call[2] == "prompt" for call in fake.calls))
                 self.assertFalse(any(call[:2] == ["herdr", "agent"] and call[2] == "send-keys" for call in fake.calls))
                 self.assertFalse(any(call[:3] == ["herdr", "agent", "get"] for call in fake.calls))

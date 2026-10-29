@@ -25,6 +25,7 @@ from .local_lane import (check_preconditions as check_local_lane_preconditions,
                          local_lane_environment, sanitize_pane_environment)
 from .prompt import (PromptNotStarted, has_active_turn_status, pane_text_submit,
                      submit_and_verify)
+from .codex_trust import trust_cwd
 
 
 class BudgetExpired(Exception):
@@ -493,8 +494,7 @@ class NativeTransport:
         elif action == "start":
             argv = [self.herdr, "agent", "start", job["agent_name"], "--kind", spec["kind"], "--pane", pane]
             if codex_prompt_start:
-                argv += ["--timeout", "5000", "--", "-C", spec["cwd"], "-c",
-                         f"projects.{json.dumps(spec['cwd'])}.trust_level=\"trusted\""]
+                argv += ["--timeout", "5000", "--", "-C", spec["cwd"]]
                 argv += provider_arguments("codex", spec.get("provider"))
                 if job["resolved_model"] is not None:
                     argv += ["-m", job["resolved_model"]]
@@ -550,6 +550,7 @@ class NativeTransport:
                 and "haiku" in (job["resolved_model"] or "").lower()):
             self.configure_haiku_environment(job)
         if codex_prompt_start:
+            trust_cwd(spec["cwd"])
             # A prompt-bearing Codex invocation makes Herdr's startup timeout
             # expected. Trust only a verified worker identity and live Working
             # state from the pane before reporting the effect as delivered.
@@ -841,7 +842,8 @@ class NativeTransport:
             "trust this directory", "trust this project",
         ))
         if trust_dialog:
-            return "Codex is showing a trust dialog; inspect and resolve it manually before relaunching"
+            return ("Codex startup failed because the managed worker cwd is untrusted (trust dialog); "
+                    "verify the exact -C cwd and config.toml in the worker's CODEX_HOME before relaunching")
         return None
 
     @classmethod

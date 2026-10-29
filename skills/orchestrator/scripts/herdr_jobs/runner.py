@@ -462,7 +462,8 @@ def run(request: Mapping[str, Any] | None = None, store: Any = None, effect_port
                                                "observed_at": observation.get("observed_at", current_time())}
                 current_job["issue"] = (receipt_observation.get("issue")
                                          or _startup_issue(observation))
-                launch_waiting.add(index)
+                if current_job.get("phase") == "ready":
+                    launch_waiting.add(index)
             store.checkpoint(state)
             progress = True
             if transition.reason == "provider admission is waiting":

@@ -803,6 +803,71 @@ class JobsTest(unittest.TestCase):
         disposition = json.loads((output / "disposition.json").read_text())
         self.assertEqual(disposition["disposition"], "blocked")
 
+    def test_finish_settles_untrusted_cwd_startup_without_fabricating_worker_output(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "task-startup", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "untrusted_cwd"})
+
+        code, launched = self.call()
+
+        self.assertEqual(code, 10)
+        self.assertEqual(launched["jobs"][0]["phase"], "failed")
+        self.assertTrue(launched["jobs"][0]["settled"])
+        self.assertIsNone(launched["jobs"][0]["pending_effect"])
+        self.assertFalse(launched["jobs"][0]["admission_acquired"])
+        output = Path(self.state()["jobs"][0]["host_output"])
+        self.assertFalse((output / "result.json").exists())
+        self.assertFalse((output / "receipt.json").exists())
+
+        code, finished = self.call("finish", coordinator_disposition_override="job0=blocked",
+                                   coordinator_override_reason="Coordinator observed the startup trust failure.")
+
+        self.assertEqual((code, finished["finish_complete"]), (10, True))
+        self.assertEqual(finished["jobs"][0]["worker_disposition"], "blocked")
+        self.assertEqual(finished["finish"]["jobs"]["job0"]["worker_result_validation"], "not_started")
+        self.assertFalse((output / "result.json").exists())
+        self.assertFalse((output / "receipt.json").exists())
+        self.assertEqual(json.loads((output / "disposition.json").read_text())["disposition"], "blocked")
+        self.assertTrue(self.call("finish")[1]["finish_complete"])
+        self.assertEqual(sum(item["action"] == "start" for item in self.events()), 1)
+        self.assertFalse(any(item["action"] in ("prompt", "prompt_verified") for item in self.events()))
+
+    def test_finish_reconciles_a_pending_trust_dialog_and_refuses_completed_override(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "task-startup", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "blocked"})
+        self.call()
+        self.assertEqual(self.state()["jobs"][0]["pending_effect"]["action"], "start")
+        self.configure(observation={"state": "blocked", "identity_verified": False,
+                                   "launch_issue": "Codex is showing a trust dialog; verify config.toml"})
+
+        code, refused = self.call("finish", coordinator_disposition_override="job0=completed",
+                                  coordinator_override_reason="Fixture refusal check.")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be marked completed", refused["message"])
+        self.assertFalse(self.state()["jobs"][0]["workspace_closed"])
+        code, finished = self.call("finish")
+        self.assertEqual((code, finished["finish_complete"]), (10, True))
+        self.assertEqual(finished["jobs"][0]["worker_disposition"], "failed")
+
+    def test_finish_retries_workspace_close_after_trust_failure_without_worker_receipt(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "task-startup", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "untrusted_cwd"}, close_workspace_error="Fixture close interrupted.")
+        self.call()
+        code, first = self.call("finish")
+        self.assertFalse(first["finish_complete"])
+        self.assertEqual(self.state()["jobs"][0]["pending_effect"]["action"], "workspace_close")
+        self.configure(jobs={"job0": "untrusted_cwd"})
+
+        code, retry = self.call("finish")
+
+        self.assertEqual((code, retry["finish_complete"]), (10, True))
+        self.assertEqual(retry["jobs"][0]["worker_disposition"], "failed")
+
     def test_finish_preserves_failed_worker_result_disposition_and_requests_review(self):
         self.prepare_worker_outcome("failed")
 

@@ -87,6 +87,9 @@ class TransportRegressionTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.root, ignore_errors=True))
+        environment = patch.dict(os.environ, {"CODEX_HOME": str(self.root / "codex-home")})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.adapter = object.__new__(NativeTransport)
         self.adapter.herdr = "herdr"
         self.adapter.orchestrator = "orchestrator"

@@ -122,7 +122,7 @@ class FakeHost:
         pi_retry_start = (action == "start" and job["spec"]["route"]["runtime"] == "pi"
                           and job.get("retry_profile") is not None)
         if (action in ("prompt", "jail")
-                or (codex_start and mode not in ("failed_start_diagnostic", "blocked"))
+                or (codex_start and mode not in ("failed_start_diagnostic", "blocked", "untrusted_cwd"))
                 or pi_retry_start):
             (self.path.parent / f"prompt-{job['spec']['job_id']}.txt").write_text(prompt)
             rate_limited_first_attempt = (mode == "rate_limited_always" or
@@ -154,6 +154,10 @@ class FakeHost:
                                 start_diagnostic=diagnostic)
         if mode == "blocked" and codex_start:
             return {"launch_blocked": True, "issue": "Codex is showing a trust or resume dialog"}
+        if mode == "untrusted_cwd" and codex_start:
+            return {"launch_blocked": True,
+                    "issue": "Codex startup failed because the managed worker cwd is untrusted (trust dialog); verify config.toml",
+                    "observation": {"state": "blocked", "identity_verified": False}}
         if mode in ("prompt_timeout", "ambiguous") and (action in ("prompt", "jail") or codex_start):
             raise EffectUnknown("prompt response lost")
         if action == "split":
@@ -193,7 +197,7 @@ class FakeHost:
                           and item["action"] in ("prompt", "prompt_verified", "jail")
                           for item in self.events)
         before_prompt = job["phase"] == "ready" and not prompt_seen
-        lifecycle = ("blocked" if mode == "blocked" else "idle" if before_prompt else
+        lifecycle = ("blocked" if mode in ("blocked", "untrusted_cwd") else "idle" if before_prompt else
                      "working" if mode in ("working", "ambiguous", "unverified_working") else "done")
         observation = {"state": lifecycle, "identity_verified": True}
         if job["spec"]["route"]["mode"] == "agent":
