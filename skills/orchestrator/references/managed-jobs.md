@@ -120,7 +120,7 @@ reconciliation before `resume` can launch again. Settlement still requires a
 verified owned pane in `idle`, `done`, or `exited`; unresolved resource effects
 and invalid receipts do not authorize closure. A `DONE` file alone is insufficient.
 
-Preview validates the request, policy, and prompts offline; it does not read the host contract and cannot report a missing or unverified binding. Before the first live call, confirm the contract's `jail_export` is non-null, `verified`, and bound to the child's output root; a preview success is not evidence the binding exists.
+Preview validates the request, policy, and prompts offline; it does not read the host contract and cannot report a missing or unverified binding. Before the first live call, confirm the contract's `jail_export` is non-null, `verified`, and bound to the child's output root, and its `jail_default` attests the verified Codex `gpt-6-astra` xhigh default; a preview success is not evidence either binding exists. See [host integration](host-integration.md) for the exact `jail_default` snippet and placement.
 
 Execute the returned `next_action.argv` as an argument array. A next action of `inspect` requires reading the per-job issues before continuing; it is not permission to repeat an unresolved effect. `status` performs observations and local checkpoints but never launches or prompts. `resume` may launch queued work or continue a proven-safe startup step.
 

@@ -106,7 +106,7 @@ registry, context packet, retries, checks, latency, and cost.
 | Codex CLI + gpt-6.1-sol high/max | Multi-file implementation with explicit protected paths and acceptance tests | Use high as baseline; reserve max for difficult diagnosis or targeted review after a cheaper pass exposes real uncertainty. |
 | Claude Code + Sonnet 5.5 | Complete subagent prompt, allowlist, max-turn bound, and acceptance checks | Start medium/high for routine implementation or exploration; promote to Opus for unresolved ambiguity or long-horizon synthesis. |
 | Claude Code + Opus 5.5 worker | Hard diagnosis or independent review with deterministic oracle | Start high; use max only when the unresolved case has enough decision value. |
-| Jailed Codex + gpt-6-astra max | Required-context manifest with exact quotes, source roles, and an external evaluator | Max is suitable for deep evidence chains; use a cheaper extractor before synthesis when that reduces cost without weakening evidence. |
+| Jailed Codex + gpt-6-astra xhigh | Required-context manifest with exact quotes, source roles, and an external evaluator | Xhigh is suitable for deep evidence chains; use a cheaper extractor before synthesis when that reduces cost without weakening evidence. |
 | omp / oh-my-pi | Validate installed task-agent metadata, effort mapping, structured output, and isolation policy | Use cheap roles for literal slices and slower roles for inference only after the configured ceiling and retry behavior are verified. |
 
 Worker mode stays explicit in every brief and never selects a ladder level.
@@ -205,7 +205,7 @@ fallback is a gap, not permission to invent another route.
 ## Preserved routes and migration
 
 The ladder applies only to ordinary host agents. Deep research keeps jailed
-Codex `gpt-6-astra` at max effort and its independent source/claim check and
+Codex `gpt-6-astra` at xhigh effort and its independent source/claim check and
 privacy guard. The jail default must still be confirmed at admission; exact
 jail model discovery remains outside the managed adapter. Shopping keeps
 jailed Claude Opus 5.5 at xhigh effort via the host pane-command route; the

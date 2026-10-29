@@ -105,7 +105,7 @@ class TransportTest(unittest.TestCase):
                                           "agent_name": ["result", "agent", "name"]},
                                 "jail_export": None,
                                 "jail_default": {"verified": True, "harness": "codex",
-                                                 "model": "gpt-6-astra", "effort": "max"}}
+                                                 "model": "gpt-6-astra", "effort": "xhigh"}}
         self.calls = []
         self.available = ["codex", "omp"]
         self.agent = dict(load_json(HERDR_FIXTURES / "agent-get.json")["result"]["agent"])
@@ -215,6 +215,22 @@ class TransportTest(unittest.TestCase):
             self.adapter.preflight({"jobs": [spec]})
 
         self.assertEqual(lookups, ["codex-jail-agent"])
+
+    def test_jail_default_attestation_requires_xhigh_effort(self):
+        spec = self.prepared_jail_spec(None)
+        self.adapter.binding["jail_export"] = {"verified": True, "host_root": str(self.root),
+                                                "worker_root": "/work"}
+        with patch("herdr_jobs.transport.shutil.which", return_value="/usr/bin/codex-jail-agent"):
+            self.adapter.binding["jail_default"]["effort"] = "xhigh"
+            self.adapter.preflight({"jobs": [spec]})
+
+            self.adapter.binding["jail_default"]["effort"] = "max"
+            with self.assertRaisesRegex(JobError, "jail default is not verified as gpt-6-astra at xhigh effort"):
+                self.adapter.preflight({"jobs": [spec]})
+
+            del self.adapter.binding["jail_default"]
+            with self.assertRaisesRegex(JobError, "jail default model/effort attestation is missing"):
+                self.adapter.preflight({"jobs": [spec]})
 
     def test_changed_command_contract_stops_preflight(self):
         self.adapter.binding["herdr_help_sha256"] = "stale"

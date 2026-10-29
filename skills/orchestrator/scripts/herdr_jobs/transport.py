@@ -366,9 +366,9 @@ class NativeTransport:
                     raise JobError("unavailable_capability", "jail default model/effort attestation is missing")
                 fields(attestation, ["verified", "harness", "model", "effort"], label="jail_default")
                 if (attestation["verified"] is not True or attestation["harness"] != "codex"
-                        or attestation["model"] != "gpt-6-astra" or attestation["effort"] != "max"):
+                        or attestation["model"] != "gpt-6-astra" or attestation["effort"] != "xhigh"):
                     raise JobError("unavailable_capability",
-                                   "jail default is not verified as gpt-6-astra at max effort")
+                                   "jail default is not verified as gpt-6-astra at xhigh effort")
                 validate_required_context(job.get("required_context"), base=job["cwd"],
                                           require_test_fixture=True, jail_visible=True)
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
