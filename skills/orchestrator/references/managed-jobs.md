@@ -88,11 +88,18 @@ and base with the leased worktree. It normally releases the repository-worktree
 lease only when that candidate is clean and its head is merged into the
 repository's local `main` branch. A dirty, mismatched, or unmerged worktree
 stays leased and the per-job finish result explains why. Use
-`lease-worktree.py status` to inspect it. For managed jobs, a coordinator
-disposition override to `failed` with its required reason records abandonment
-and lets `finish` force-release that job's unmerged or dirty worktree. Direct
-use of `lease-worktree.py release` requires `--who` and `--why`, and requires
-`--force` to remove dirty or unmerged worktrees.
+`lease-worktree.py status` to inspect it. Release or retention and its reason
+are checkpointed and validated on reload. After a retained candidate merges,
+rerun `finish` to release it, even if its workspace was already closed.
+For managed jobs, a coordinator disposition override to `failed` with its
+required reason records abandonment and lets `finish` force-release that job's
+unmerged or dirty worktree.
+An explicit abandonment after an earlier normal finish can supersede the
+completed disposition; the prior disposition and its replacement are preserved
+in job history. Detected active use always retains the worktree during `finish`,
+including abandonment; rerun after that use ends.
+Direct use of `lease-worktree.py release` requires `--who` and `--why`, and requires
+`--force` to remove in-use, dirty, or unmerged worktrees.
 
 For an opted-in `local_lane` job, `finish` also runs the declared independent
 validator against the collected output directory. Record coordinator review
