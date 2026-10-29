@@ -389,6 +389,15 @@ def _is_capture_or_repository_copy(directory):
     )
 
 
+def _is_test_fixture_tree(run_root, directory):
+    """Report whether a directory is inside a conventional tests/fixtures tree."""
+    parts = directory.relative_to(run_root).parts
+    return any(
+        parts[index : index + 2] == ("tests", "fixtures")
+        for index in range(len(parts) - 1)
+    )
+
+
 def _has_worker_identity(record):
     """Report whether a record carries a valid worker task identity."""
     if not isinstance(record, dict):
@@ -551,6 +560,8 @@ def _discover_worker_directories(run_root):
                 directory = current_path / name
                 relative_directory = directory.relative_to(run_root)
                 if directory.is_symlink():
+                    continue
+                elif _is_test_fixture_tree(run_root, directory):
                     continue
                 elif _is_capture_or_repository_copy(directory):
                     if _direct_worker_contract(directory):

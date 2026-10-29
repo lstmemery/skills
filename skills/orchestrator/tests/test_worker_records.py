@@ -599,6 +599,26 @@ class WorkerRecordsTest(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertIn("CLOSEOUT READY: 1 worker(s)", process.stdout)
 
+    def test_closeout_ignores_archived_copy_of_worker_marker_fixture(self):
+        run_dir = self.root / "run"
+        self.register_completed_worker(run_dir)
+        archived_fixture = (
+            run_dir
+            / "tasks/reviewer/review/worktree/skills/orchestrator/tests/fixtures"
+            / "worker-records/closeout-non-workers/symlink-target"
+        )
+        archived_fixture.mkdir(parents=True)
+        shutil.copyfile(
+            FIXTURES / "closeout-non-workers/symlink-target/brief.md",
+            archived_fixture / "brief.md",
+        )
+
+        process = self.call("check-closeout", run_dir)
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("CLOSEOUT READY: 1 worker(s)", process.stdout)
+        self.assertNotIn("unrostered worker-shaped directory", process.stderr)
+
     def test_unrostered_worker_contract_brief_is_still_discovered(self):
         run_dir = self.root / "run"
         self.register_completed_worker(run_dir)
