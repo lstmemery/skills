@@ -37,6 +37,29 @@ class CodexTrustTest(unittest.TestCase):
         self.assertEqual(Path(changed["backup"]).read_bytes(), original)
         self.assertEqual(Path(changed["backup"]).stat().st_mode & 0o777, 0o600)
 
+    def test_preserves_unrelated_nan_values_when_adding_or_updating_trust(self):
+        for literal in ("nan", "+nan", "-nan"):
+            for existing_project in (False, True):
+                with self.subTest(literal=literal, existing_project=existing_project):
+                    source = (f'# preserve formatting\r\nscore = {literal} # unchanged\r\n'
+                              f'metrics = {{ scores = [{literal}, {{ value = {literal} }}] }}\r\n')
+                    if existing_project:
+                        source += (f'[projects.{json.dumps(str(self.cwd), ensure_ascii=False)}]\r\n'
+                                   "trust_level = 'untrusted' # preserve comment\r\n")
+                    original = source.encode()
+                    self.config.write_bytes(original)
+
+                    changed = trust_cwd(self.cwd, self.config)
+
+                    saved = self.config.read_bytes()
+                    if existing_project:
+                        self.assertEqual(saved, original.replace(b"'untrusted'", b'"trusted"'))
+                    else:
+                        self.assertTrue(saved.startswith(original))
+                    self.assertEqual(tomllib.loads(saved.decode())["projects"][str(self.cwd)]["trust_level"],
+                                     "trusted")
+                    self.assertEqual(Path(changed["backup"]).read_bytes(), original)
+
     def test_adds_missing_trust_to_existing_project_and_ignores_multiline_decoy(self):
         original = (f'note = """\n[projects.{json.dumps(str(self.cwd))}]\ntrust_level = "untrusted"\n"""\n'
                     f'[projects.{json.dumps(str(self.cwd))}]\nother = 7 # keep\n').encode()

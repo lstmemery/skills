@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -156,6 +157,19 @@ def _parse(raw):
         raise JobError("invalid_input", "Codex config.toml is malformed; repair it before launch") from error
 
 
+def _same_toml_values(left, right):
+    """Compare parsed TOML values, treating corresponding NaNs as equal."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_toml_values(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_toml_values(a, b) for a, b in zip(left, right))
+    if isinstance(left, float) and math.isnan(left):
+        return math.isnan(right)
+    return left == right
+
+
 @contextmanager
 def _locked(path):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -241,7 +255,7 @@ def trust_cwd(cwd, path=None):
                 replacement = source + f'\n[projects.{json.dumps(cwd, ensure_ascii=False)}]\ntrust_level = "trusted"\n'
         expected = deepcopy(document)
         expected.setdefault("projects", {}).setdefault(cwd, {})["trust_level"] = "trusted"
-        if _parse(replacement.encode()) != expected:
+        if not _same_toml_values(_parse(replacement.encode()), expected):
             raise JobError("invalid_input", "Codex trust edit could not preserve the TOML structure")
         backup = _replace(path, original, replacement.encode())
         return {"changed": True, "config": str(path), "cwd": cwd, "backup": backup}
