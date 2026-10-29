@@ -14,6 +14,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / "scripts/herdr-jobs.py"
 DRIVER = PACKAGE / "tests/driver.py"
 POLICY = PACKAGE / "launch-policy.json"
+ALLOCATOR = PACKAGE / "scripts/lease-worktree.py"
 sys.path.insert(0, str(PACKAGE / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -32,6 +33,8 @@ class JobsTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
         self.jail_root = self.root / "test-jail"
         self.jail_work = self.jail_root / "work"
         self.jail_work.mkdir(parents=True)
@@ -162,6 +165,7 @@ class JobsTest(unittest.TestCase):
     def call(self, operation="run", real=False, **kwargs):
         env = os.environ.copy()
         env["PII_JAIL_S0_TEST_ROOT"] = str(self.jail_root)
+        env["HOME"] = str(self.home)
         process = subprocess.run(self.argv(operation, real, **kwargs), capture_output=True, text=True,
                                  cwd=self.root, timeout=10, env=env)
         self.assertEqual(process.stderr, "", process.stderr)
@@ -172,6 +176,49 @@ class JobsTest(unittest.TestCase):
 
     def state(self):
         return json.loads((self.run / "state.json").read_text())
+
+    def configure_repository_writer(self, *, merge_candidate):
+        repo = self.root / "candidate-repo"
+        repo.mkdir()
+
+        def git(*args):
+            return subprocess.run(["git", *args], check=True, capture_output=True,
+                                  text=True).stdout.strip()
+
+        git("-C", str(repo), "init", "-q")
+        git("-C", str(repo), "branch", "-m", "main")
+        git("-C", str(repo), "config", "user.name", "Offline Test")
+        git("-C", str(repo), "config", "user.email", "offline@example.invalid")
+        (repo / "base.txt").write_text("base\n")
+        git("-C", str(repo), "add", "base.txt")
+        git("-C", str(repo), "commit", "-qm", "base")
+        base = git("-C", str(repo), "rev-parse", "HEAD")
+        environment = {**os.environ, "HOME": str(self.home)}
+        acquired = subprocess.run(
+            [sys.executable, str(ALLOCATOR), "acquire", "--repo", str(repo),
+             "--lease-holder", "task-finish", "--expected-base", base],
+            cwd=self.root, env=environment, capture_output=True, text=True, timeout=15)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        worktree = Path(record["path"])
+        git("-C", str(worktree), "switch", "-c", "candidate")
+        (worktree / "candidate.txt").write_text("candidate\n")
+        git("-C", str(worktree), "add", "candidate.txt")
+        git("-C", str(worktree), "commit", "-qm", "candidate")
+        head = git("-C", str(worktree), "rev-parse", "HEAD")
+        if merge_candidate:
+            git("-C", str(repo), "merge", "--no-ff", "-qm", "merge candidate", "candidate")
+
+        manifest = json.loads(self.manifest.read_text())
+        job = manifest["jobs"][0]
+        job["cwd"] = record["path"]
+        job["writes_repository"] = True
+        job["repository_worktree"] = record
+        job["worker_result"] = {"task_id": "task-finish", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        candidate = {"repo": "fixture/repo", "branch": "candidate", "base": base, "head": head}
+        self.configure(worker_results={"job0": {"candidate": candidate}})
+        return record, candidate
 
     def restore_pending_checkpoint(self, task_kind):
         state = self.state()
@@ -604,6 +651,60 @@ class JobsTest(unittest.TestCase):
         self.assertEqual(result["next_action"]["kind"], "review")
         self.assertIn("Validated each worker result.json schema", result["next_action"]["message"])
         self.assertNotIn("accept the work", result["next_action"]["message"].lower())
+
+    def test_finish_releases_merged_repository_candidate_lease(self):
+        record, _ = self.configure_repository_writer(merge_candidate=True)
+        run_code, _ = self.call()
+        self.assertEqual(run_code, 0)
+
+        finish_code, result = self.call("finish")
+
+        self.assertEqual((finish_code, result["finish_complete"]), (0, True))
+        self.assertFalse(Path(record["path"]).exists())
+        outcome = result["finish"]["jobs"]["job0"]
+        self.assertTrue(outcome["repository_worktree_released"])
+
+    def test_finish_keeps_unmerged_repository_candidate_lease(self):
+        record, _ = self.configure_repository_writer(merge_candidate=False)
+        run_code, _ = self.call()
+        self.assertEqual(run_code, 0)
+
+        finish_code, result = self.call("finish")
+
+        self.assertEqual((finish_code, result["finish_complete"]), (0, True))
+        self.assertTrue(Path(record["path"]).is_dir())
+        outcome = result["finish"]["jobs"]["job0"]
+        self.assertFalse(outcome["repository_worktree_released"])
+        self.assertIn("not merged into main", outcome["repository_worktree_retained_reason"])
+        status = subprocess.run(
+            [sys.executable, str(ALLOCATOR), "status", "--lease-id", record["lease_id"]],
+            cwd=self.root, env={**os.environ, "HOME": str(self.home)},
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertFalse(json.loads(status.stdout)["lease"]["merged_into_main"])
+
+    def test_finish_force_releases_an_explicitly_abandoned_repository_candidate(self):
+        record, _ = self.configure_repository_writer(merge_candidate=False)
+        run_code, _ = self.call()
+        self.assertEqual(run_code, 0)
+
+        finish_code, result = self.call(
+            "finish", coordinator_disposition_override="job0=failed",
+            coordinator_override_reason="Candidate explicitly abandoned after review.")
+
+        self.assertEqual(finish_code, 0)
+        self.assertTrue(result["finish_complete"])
+        self.assertFalse(Path(record["path"]).exists())
+        outcome = result["finish"]["jobs"]["job0"]
+        self.assertTrue(outcome["repository_worktree_released"])
+        self.assertIn("Force-released abandoned repository worktrees for: job0",
+                      result["next_action"]["message"])
+        release_history = json.loads(
+            (self.home / ".local/share/orchestrator/worktrees/lease-history.json").read_text())
+        release = release_history["leases"][record["lease_id"]]
+        self.assertTrue(release["forced"])
+        self.assertEqual(release["who"], "herdr-jobs finish")
+        self.assertIn("Candidate explicitly abandoned after review", release["why"])
 
     def test_preflight_rejects_task_declaring_conflicting_output_directory(self):
         self.task.write_bytes((PACKAGE / "tests/fixtures/managed-jobs/conflicting-output-task.md").read_bytes())

@@ -24,6 +24,7 @@ from .worker_records import (DispositionInput, WorkerIdentity, record_dispositio
 from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
 from .store import CoordinatorCheckpointStore
 from .review_jobs import pin_candidate, render_brief, waiting_reason
+from .worktrees import release_local_lease, status_local_lease
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted", "failed"}
@@ -1084,6 +1085,57 @@ class Engine:
         job["worker_disposition"] = disposition
         self.checkpoint()
 
+    @staticmethod
+    def repository_worktree_release(job, candidate, abandoned_reason=None):
+        record = job["spec"].get("repository_worktree")
+        if not isinstance(record, dict):
+            return None
+        lease_id = record.get("lease_id")
+        try:
+            status = status_local_lease(lease_id)
+        except JobError as error:
+            return {"released": False, "retained": True,
+                    "reason": f"repository worktree lease status could not be verified: {error}"}
+        if (status.get("path") != record.get("path")
+                or status.get("lease_holder") != record.get("lease_holder")):
+            return {"released": False, "retained": True,
+                    "reason": "repository worktree lease identity does not match the job record"}
+        if status.get("released") is True:
+            return {"released": True, "already_released": True,
+                    "release": status.get("release", status)}
+        if abandoned_reason is not None:
+            force = status.get("dirty") is True or status.get("merged_into_main") is not True
+            reason = f"coordinator abandoned repository candidate: {abandoned_reason}"
+            try:
+                release = release_local_lease(lease_id, "herdr-jobs finish", reason, force=force)
+            except JobError as error:
+                return {"released": False, "retained": True,
+                        "reason": f"abandoned repository worktree lease release could not be verified: {error}"}
+            return {"released": True, "already_released": release["already_released"],
+                    "release": release["release"]}
+        if not isinstance(candidate, dict):
+            return {"released": False, "retained": True,
+                    "reason": "worker result has no candidate to verify against the repository worktree"}
+        if (candidate.get("branch") != status.get("branch")
+                or str(candidate.get("head", "")).lower() != status.get("head")
+                or str(candidate.get("base", "")).lower() != str(record.get("base_commit", "")).lower()):
+            return {"released": False, "retained": True,
+                    "reason": "candidate branch, head, or base does not match the leased worktree"}
+        if status.get("merged_into_main") is not True:
+            return {"released": False, "retained": True,
+                    "reason": "candidate is not merged into main; repository worktree lease remains held"}
+        if status.get("dirty") is not False:
+            return {"released": False, "retained": True,
+                    "reason": "repository worktree has uncommitted changes; lease remains held"}
+        reason = f"candidate {candidate['head']} is merged into main"
+        try:
+            release = release_local_lease(lease_id, "herdr-jobs finish", reason)
+        except JobError as error:
+            return {"released": False, "retained": True,
+                    "reason": f"repository worktree lease release could not be verified: {error}"}
+        return {"released": True, "already_released": release["already_released"],
+                "release": release["release"]}
+
     def finish(self, disposition_overrides=None, override_reason=None, coordinator_grades=None):
         """Record worker dispositions and close only settled, collected jobs."""
         disposition_overrides = disposition_overrides or {}
@@ -1120,6 +1172,7 @@ class Engine:
         for job in self.state["jobs"]:
             job_id = job["spec"]["job_id"]
             worker = job["spec"].get("worker_result")
+            result = None
             validation = "pending" if worker else "not_requested"
             startup_failure = (job["phase"] == "failed" and job["settled"]
                                and job.get("issue_code") == "codex_cwd_untrusted"
@@ -1256,6 +1309,18 @@ class Engine:
                     self.checkpoint()
                     continue
 
+            candidate = result.get("candidate") if isinstance(result, dict) else None
+            override = job.get("worker_disposition_override")
+            abandoned_reason = (override["reason"] if isinstance(override, dict)
+                                and override.get("disposition") == "failed" else None)
+            repository_release = self.repository_worktree_release(
+                job, candidate, abandoned_reason=abandoned_reason)
+            if repository_release is not None:
+                if repository_release != job.get("repository_worktree_release"):
+                    job["repository_worktree_release"] = repository_release
+                    job["history"].append({"action": "repository_worktree_release",
+                                           "observed_at": now(), **repository_release})
+                    self.checkpoint()
             release = self.admission.release(job["admission_lease_id"])
             job["admission_acquired"] = False
             job["history"].append({"action": "finish_release", "released": release["released"],
@@ -1298,10 +1363,16 @@ class Engine:
                                 "worker_result_validation": validation,
                                 "coordinator_grade": self.coordinator_grades.get(job_id, {}).get("grade", "pending"),
                                 "independent_validation": job["telemetry"]["independent_validation"]["status"]}
+            if repository_release is not None:
+                outcomes[job_id]["repository_worktree_released"] = repository_release["released"]
+                if repository_release.get("retained"):
+                    outcomes[job_id]["repository_worktree_retained_reason"] = repository_release["reason"]
             if worker and not startup_failure:
                 outcomes[job_id]["worker_result_outcome"] = result["outcome"]
                 if job.get("worker_disposition_override") is not None:
                     outcomes[job_id]["coordinator_override_reason"] = job["worker_disposition_override"]["reason"]
+            if "repository_worktree_release" in job:
+                outcomes[job_id]["repository_worktree_release"] = job["repository_worktree_release"]
         return {"jobs": outcomes, "complete": all(item["finished"] for item in outcomes.values())}
 
     def ensure_snapshot(self, path, expected):
@@ -1608,6 +1679,8 @@ class Engine:
                          "start_diagnostic": job.get("start_diagnostic"),
                          "workspace_id": job.get("workspace_id"),
                          "workspace_closed": job.get("workspace_closed", False),
+                         **({"repository_worktree_release": job["repository_worktree_release"]}
+                            if job.get("repository_worktree_release") is not None else {}),
                          "worker_disposition": job.get("worker_disposition"),
                          "admission_wait": job.get("admission_wait"),
                          "collection": job["collection"], "collection_error": job["collection_error"]})
