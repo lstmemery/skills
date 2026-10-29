@@ -98,8 +98,8 @@ acceptance of worker output.
   work (shopping) launches with the host pane-command route. Exact jail
   model selection there is unsupported until its separate catalog is
   verified, so confirm at admission that the jail's runtime default is
-  `gpt-6-astra` at xhigh effort; if it cannot be confirmed, hold the launch —
-  do not substitute.
+  `gpt-6-astra` at xhigh effort and attest that exact pair in the host
+  contract; if it cannot be confirmed, hold the launch — do not substitute.
   Managed jailed Codex jobs use optional `task_class` for their per-run
   stream idle timeout: `short_routine` and missing or unknown classes use
   300000 ms; explicitly setting `long_form_research` uses 600000 ms. This is

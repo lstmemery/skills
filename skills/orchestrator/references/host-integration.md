@@ -15,6 +15,23 @@ Copy [host-contract.example.json](../examples/host-contract.example.json) to the
 7. For jail jobs, verify the actual launcher/export mechanism. This version supports a stable host directory that mirrors the worker workspace root and preserves job-specific relative paths. Bind `host_root` and `worker_root` only when that property has been demonstrated. Ensure the launcher returns after artifacts have been exported. If this host instead allocates dynamic per-container export paths, adapt `check_export` and the output binding before enabling jail work; do not invent a mapping or use publication markers as transport.
 8. Check that the internal Python launcher monitor is recognized appropriately during the finite `jail-agent --harness codex exec` run. Its host-side exit record must survive agent exit. Confirm native model and effort arguments for every ordinary runtime/model combination to be enabled.
 
+For the managed jail route, after verifying the launcher and the jail's
+`gpt-6-astra` xhigh default, add this top-level sibling to `jail_export` in
+`host-contract.json`:
+
+```json
+"jail_default": {
+  "verified": true,
+  "harness": "codex",
+  "model": "gpt-6-astra",
+  "effort": "xhigh"
+}
+```
+
+Set `verified` only after the actual jailed default has been confirmed. The
+managed helper refuses a missing attestation and any model or effort other than
+this verified pair.
+
 Set `verified: true` only after those facts are established. It is an operator assertion about a verified contract, not a script-generated attestation. No keys or private configuration snapshots belong in this file. A changed socket endpoint, server version, or help digest stops execution rather than silently retargeting an existing run. The endpoint binding cannot identify a process replacement that reuses the same socket path; Herdr must expose a process-generation value before the contract can enforce that stronger guarantee.
 
 ## Exercise the integration

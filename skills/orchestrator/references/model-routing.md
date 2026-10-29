@@ -205,7 +205,7 @@ fallback is a gap, not permission to invent another route.
 ## Preserved routes and migration
 
 The ladder applies only to ordinary host agents. Deep research keeps jailed
-Codex `gpt-6-astra` at max effort and its independent source/claim check and
+Codex `gpt-6-astra` at xhigh effort and its independent source/claim check and
 privacy guard. The jail default must still be confirmed at admission; exact
 jail model discovery remains outside the managed adapter. Shopping keeps
 jailed Claude Opus 5.5 at xhigh effort via the host pane-command route; the
