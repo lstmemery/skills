@@ -228,9 +228,13 @@ SHA-256 in its report, and the coordinator verifies that source and records the
 hash in disposition evidence. Treat any other pre-launch file as stale. Workers
 write a small `result.json` in their task output folder and return its path.
 Large findings and logs remain separate artifacts. The roster records expected
-attempts, and closeout also scans the run tree for worker-shaped directories
-containing `brief.md`, `result.json`, or `disposition.json`; an unrostered match
-blocks closeout.
+attempts, and closeout also scans the run tree for directories carrying a
+worker-contract marker. A `brief.md` must contain the generated worker
+result-record heading; a `result.json` must have the required result fields and
+a valid task identity; a `disposition.json` must have its required fields and a
+valid task identity. Generic skill notes and fixture records do not count. An
+unrostered match blocks closeout. Symlinked directories are skipped without
+traversal.
 
 ```json
 {
@@ -328,11 +332,12 @@ Discovery skips a subtree only when the directory itself carries copy evidence:
 a `.git` checkout or linked-worktree marker, or a code-review capture
 (`manifest.json` with `COMPLETE`). Names alone never exclude a directory, so an
 unrostered worker named like a copy is still reported. An evidence-carrying
-directory that also holds worker markers directly (`brief.md`, `result.json`,
-or `disposition.json` at its own root) is itself a live worker's task
-directory, not a copy, and is reported like any other unrostered worker;
-markers nested below an evidence-carrying root stay excluded, and rostered
-workers are always validated from the roster regardless of discovery.
+directory that also holds a worker-contract marker directly at its own root is
+itself a live worker task directory, not a copy, and is reported like any other
+unrostered worker; markers nested below an evidence-carrying root stay
+excluded, and rostered workers are always validated from the roster regardless
+of discovery. Symlinked directories inside the run tree are skipped and never
+traversed.
 
 Repository changes also require the candidate record in
 [review.md](review.md). Use paths for the complete patch, file inventory,
