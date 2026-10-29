@@ -1,4 +1,43 @@
 {
+  "failed": {
+    "result": {
+      "batch_state": "partial",
+      "jobs": [
+        {
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": "Codex startup failed because the managed worker cwd is untrusted",
+          "job_id": "compatibility-job",
+          "observed": {"identity_verified": false, "state": "blocked"},
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "failed",
+          "settled": true,
+          "workspace_closed": false
+        }
+      ],
+      "request_id": "compatibility-request",
+      "schema_version": 1,
+      "unresolved_effect": false
+    },
+    "state": {
+      "jobs": [
+        {
+          "admission_acquired": false,
+          "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "issue": "Codex startup failed because the managed worker cwd is untrusted",
+          "job_id": "compatibility-job",
+          "observed": {"identity_verified": false, "state": "blocked"},
+          "pane_id": "pane-new",
+          "pending_effect": null,
+          "phase": "failed",
+          "previous_pane_ids": [],
+          "settled": true,
+          "workspace_id": "workspace-1"
+        }
+      ],
+      "request_id": "compatibility-request"
+    }
+  },
   "moved": {
     "result": {
       "batch_state": "active",

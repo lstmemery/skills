@@ -109,9 +109,44 @@ when supplied, must match the run's pinned value; omit it to inherit that value
 for matching workers in the added jobs. Additions append to `state.json`;
 they do not replace earlier attempts, receipts, or collections. Use the same
 run directory for the lifetime of that fleet. `finish` does not launch work and
-closes only jobs that are settled and have a valid collected receipt. A missing
+normally closes only jobs that are settled and have a valid collected receipt. A missing
 workspace ID or failed worker-result validation leaves the job open with an
 actionable issue.
+
+Immediately before an ordinary Codex launch, the helper writes trust for the
+canonical, exact `-C` cwd to `$CODEX_HOME/config.toml` (default
+`~/.codex/config.toml`). The coordinator and Herdr worker must use the same
+Codex home. A sibling `config.toml.orchestrator.lock` serializes managed writers.
+The TOML-aware edit preserves unrelated bytes, makes a durable mode-0600
+`config.toml.orchestrator-backup-*` copy first, and atomically replaces the config.
+Already trusted entries require no rewrite or backup. Auth and MCP settings stay
+in the existing home; the helper does not read auth files or create an overlay.
+The former `-c projects.*.trust_level` override did not suppress the live trust
+dialog and is not the prevention mechanism. Jail `exec` workers keep their
+existing launcher and config; this pre-trust applies to ordinary host workers.
+
+A Codex startup trust dialog is a failed launch with an actionable config/cwd
+message. No dialog input or task replay is sent. The pending start is resolved
+as failed, admission is released, and `finish` can close that owned workspace
+without a worker receipt. Its disposition defaults to `failed`; a coordinator
+may explicitly override it to `blocked` with a reason. `completed` is refused.
+The validation status is `not_started`, and no worker result or receipt is
+fabricated. Resume/session dialogs remain unresolved for coordinator inspection.
+
+Inspect stale scoped trust entries with:
+
+```sh
+python3 scripts/herdr-jobs.py prune-codex-trust
+python3 scripts/herdr-jobs.py prune-codex-trust --config TEMP_CODEX_HOME/config.toml --dry-run
+```
+
+Only trust entries under `/home/deadhand/.local/share/orchestrator/` whose paths
+no longer exist qualify. Existing paths, dangling symlinks, sibling roots,
+parent traversals, and unrelated project keys are preserved. The default dry-run
+does not write a lock, config, or backup. `--apply` opts into removal under the
+same lock/backup/atomic-replacement protocol. Cooperating managed writers share
+the lock; other config editors do not. A detected external edit aborts rather
+than overwriting it, but an editor racing the final replace cannot be excluded.
 
 A matching receipt and collected artifacts also prove submission after manual
 continuation in the same pane, even if the checkpoint still says `moved`,

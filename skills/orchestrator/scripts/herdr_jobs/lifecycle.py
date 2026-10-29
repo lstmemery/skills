@@ -13,13 +13,18 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, MutableMapping
 
 
-PHASES = frozenset({"pending", "split", "moved", "retry_ready", "ready", "submitted"})
+PHASES = frozenset({"pending", "split", "moved", "retry_ready", "ready", "submitted", "failed"})
 TERMINAL_STATES = frozenset({"idle", "done", "exited"})
 OBSERVATION_STATES = TERMINAL_STATES | frozenset({"working", "blocked", "unknown"})
 EFFECT_ACTIONS = frozenset({
     "admission_acquire", "admission_release", "split", "move", "retry_setup",
     "start", "prompt", "jail", "collect", "workspace_close",
 })
+
+
+def is_untrusted_cwd_issue(issue: Any) -> bool:
+    return isinstance(issue, str) and ("cwd is untrusted" in issue.casefold()
+                                     or "codex is showing a trust dialog" in issue.casefold())
 
 
 class InvalidState(ValueError):
@@ -251,7 +256,8 @@ class JobLifecycle:
                 return Transition(state, reason="no effect required")
 
         state["pending_effect"] = {"action": action}
-        _set_issue(state, None)
+        if state.get("phase") != "failed":
+            _set_issue(state, None)
         return Transition(state, [_effect(state, action)], reason=f"schedule {action}")
 
     @staticmethod
@@ -318,6 +324,8 @@ class JobLifecycle:
         if pending == "admission_release" and observation.get("effect_receipt") is True:
             state["admission_acquired"] = False
             state["pending_effect"] = None
+            if state.get("phase") == "failed":
+                state["settled"] = True
             current = state.get("observed")
             if isinstance(current, Mapping):
                 self._settle(state, current)
@@ -347,6 +355,17 @@ class JobLifecycle:
                 return Transition(state, reason=f"reconciled {pending}")
             if not receipt:
                 return None
+
+        startup = observation.get("observation")
+        startup = startup if isinstance(startup, Mapping) else {}
+        issue = observation.get("launch_issue") or observation.get("issue") or startup.get("launch_issue")
+        if (pending == "start" and (lifecycle == "blocked" or observation.get("launch_blocked") is True)
+                and _route(state).get("runtime") == "codex" and is_untrusted_cwd_issue(issue)):
+            state.update(phase="failed", settled=state.get("admission_acquired") is not True,
+                         pending_effect=None, issue_code="codex_cwd_untrusted")
+            _set_issue(state, issue)
+            _with_history(state, {"action": "start_failed", "reason": "codex_cwd_untrusted", "issue": issue})
+            return Transition(state, reason="Codex cwd trust failed at startup")
 
         if pending in ("start", "prompt", "jail") and (receipt or identity and lifecycle in OBSERVATION_STATES):
             prompt_verified = observation.get("prompt_verified") is True
@@ -418,6 +437,8 @@ class JobLifecycle:
     @staticmethod
     def _next_action(state: Mapping[str, Any]) -> str | None:
         phase = state.get("phase", "pending")
+        if phase == "failed":
+            return "admission_release" if state.get("admission_acquired") is True else None
         route = _route(state)
         mode = route.get("mode")
         if phase == "retry_ready" and state.get("rate_limit_seen") is True \

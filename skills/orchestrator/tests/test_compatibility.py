@@ -76,7 +76,16 @@ def legacy_engine_at_phase(request_value, run_dir, phase):
              "binding": {}},
             None,
         )
-        if phase == "ready":
+        if phase == "failed":
+            engine.state["jobs"][0].update(
+                phase="failed", pane_id="pane-new", workspace_id="workspace-1",
+                observed={"state": "blocked", "identity_verified": False},
+                issue="Codex startup failed because the managed worker cwd is untrusted",
+                issue_code="codex_cwd_untrusted", settled=True,
+            )
+            seed = deepcopy(engine.state)
+            engine.checkpoint()
+        elif phase == "ready":
             engine.state["jobs"][0].update(
                 phase="ready",
                 pane_id="pane-new",
