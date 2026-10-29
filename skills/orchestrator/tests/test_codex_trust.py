@@ -1,8 +1,9 @@
 import concurrent.futures
+from contextlib import redirect_stdout
+import io
 import json
 import multiprocessing
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import tomllib
@@ -13,14 +14,18 @@ PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
 from herdr_jobs.codex_trust import prune_trust, trust_cwd
+from herdr_jobs.cli import main
 from herdr_jobs.records import JobError
 
 
 class CodexTrustTest(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(dir=PACKAGE / "tests")
+        temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
+        prune_root = patch("herdr_jobs.codex_trust.ORCHESTRATOR_ROOT", self.root)
+        prune_root.start()
+        self.addCleanup(prune_root.stop)
         self.config = self.root / "config.toml"
         self.cwd = self.root / 'quoted "project" ☃'
         self.cwd.mkdir()
@@ -138,11 +143,11 @@ class CodexTrustTest(unittest.TestCase):
                     f'[projects.{json.dumps(str(self.cwd))}]\ntrust_level="trusted"\n'
                     f'[projects.{json.dumps(outside)}]\ntrust_level="trusted"\n').encode()
         self.config.write_bytes(original)
-        result = subprocess.run([sys.executable, str(PACKAGE / "scripts/herdr-jobs.py"),
-                                 "prune-codex-trust", "--config", str(self.config)],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = json.loads(result.stdout)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["prune-codex-trust", "--config", str(self.config)])
+        self.assertEqual(code, 0, output.getvalue())
+        report = json.loads(output.getvalue())
         self.assertTrue(report["dry_run"])
         self.assertEqual(report["count"], 1)
         self.assertEqual(report["paths"], [str(missing)])
@@ -190,7 +195,7 @@ class CodexTrustTest(unittest.TestCase):
     def test_prune_keeps_dangling_symlinks_sibling_roots_and_parent_traversals(self):
         link = self.root / "dangling"
         link.symlink_to(self.root / "missing-target")
-        paths = [str(link), "/home/deadhand/.local/share/orchestrator-other/missing",
-                 "/home/deadhand/.local/share/orchestrator/../missing"]
+        paths = [str(link), str(self.root.with_name(self.root.name + "-other") / "missing"),
+                 f"{self.root}/../missing"]
         self.config.write_text("".join(f'[projects.{json.dumps(path)}]\ntrust_level="trusted"\n' for path in paths))
         self.assertEqual(prune_trust(self.config)["count"], 0)
