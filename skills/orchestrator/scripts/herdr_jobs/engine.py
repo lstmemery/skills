@@ -23,6 +23,7 @@ from .worker_records import (DispositionInput, WorkerIdentity, record_dispositio
                              result_schema_markdown, validate_result)
 from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
 from .store import CoordinatorCheckpointStore
+from .review_jobs import pin_candidate, render_brief, waiting_reason
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted", "failed"}
@@ -488,7 +489,7 @@ class Engine:
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
                     "worker_disposition", "worker_disposition_override", "admission_wait", "start_diagnostic",
-                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted", "issue_code"],
+                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted", "issue_code", "review_binding"],
                    label="stored job")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
@@ -839,7 +840,7 @@ class Engine:
             )
         if spec.get("writes_repository"):
             optional_blocks.append(
-                "repository_change: preserve the recorded worktree/base; do not edit protected controls or acceptance tests; return the candidate record; inspect the full diff and run git diff --check and every acceptance test at every model level; implementation escalation requires a concrete reasoning failure"
+                "repository_change: preserve the recorded worktree/base; do not edit protected controls or acceptance tests; return the candidate record; inspect the full diff and run git diff --check and every acceptance test at every model level; implementation escalation requires a concrete reasoning failure; self-review is optional, independent review is mandatory before integration"
             )
         if spec.get("local_lane") is True:
             optional_blocks.append(local_lane_instruction(
@@ -867,7 +868,7 @@ class Engine:
                 f"Launcher-injected result identity (copy exactly; mismatch is rejected): "
                 f"{encoded(identity).decode()}\n"
                 + result_schema_markdown() + "\n")
-        task = spec.get("task", "")
+        task = render_brief(job) if "review_of" in spec else spec.get("task", "")
         expectation = spec.get("output_expectation", task or "Complete the assigned task.")
         telemetry_contract = (
             "Launcher-owned telemetry.json (schema_version 1) records route {lane, level, choice, model, effort, harness, provider}, "
@@ -965,6 +966,17 @@ class Engine:
             job["issue"] = "fresh quota recovery deferred; coordinator effect reconciliation required"
             return
         spec = job["spec"]
+        reason = waiting_reason(self.state, spec)
+        if reason:
+            job["issue"] = reason
+            return
+        if "review_of" in spec and "review_binding" not in job:
+            try:
+                job["review_binding"] = pin_candidate(self.root, self.state, spec)
+            except (JobError, OSError, ValueError, KeyError) as error:
+                job["issue"] = f"cannot pin independent review: {error}"
+                return
+            self.checkpoint()
         ensure_task_admitted(spec["task_kind"], spec["job_id"])
         while job["phase"] not in ("submitted", "failed") and job["pending_effect"] is None:
             if not self.acquire_admission(job):
@@ -1570,6 +1582,7 @@ class Engine:
                     launchable = any(not job["workspace_closed"]
                                      and job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
                                      and job["pending_effect"] is None
+                                     and waiting_reason(self.state, job["spec"]) is None
                                      and not self.fresh_quota_recovery_deferred(job) for job in self.state["jobs"])
                     if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:
                         return

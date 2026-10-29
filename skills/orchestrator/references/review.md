@@ -109,14 +109,16 @@ prefix in the archive.
 Link each sidecar to the coding job's `worker_result.task_id`; the review job
 may have a different job/task ID.
 
-In managed review briefs, instruct the reviewer to omit `author_identity` and
-`reviewer_identity` from the sidecar. The adapter fills these from the coding
-and reviewing jobs' `agent_name` values and takes panes from helper state.
+In managed review briefs, supply the coding and reviewing jobs' full `agent_name`
+values as `author_identity` and `reviewer_identity` for `validate-review`.
+The adapter can fill omitted identities in older collected sidecars and takes
+panes from helper state.
 Supplied identities must agree with that state. The adapter refuses a shared
-author/reviewer identity or pane. Omit `done.json` to have the adapter derive
-counts and capture ID from the sidecar; a supplied `done.json` is checked as
-usual. For findings, collect the coordinator-owned `review-response.md` with
-the coding job and recollect sidecars after disposition sync. The adapter never
+author/reviewer identity or pane. New reviewer briefs require `done.json`,
+including the explicit verdict. For older collected outputs, the adapter can
+derive counts and capture ID from the sidecar when `done.json` is absent;
+a supplied record is checked as usual. For findings, collect the coordinator-owned
+`review-response.md` with the coding job and recollect sidecars after disposition sync. The adapter never
 decides a finding's disposition.
 
 The adapter verifies receipt request/job/attempt identity, collection revision,
@@ -160,7 +162,10 @@ python3 scripts/worker-records.py prepare-preflight \
 ```
 
 Repeat `--review-job` in review order; it cannot be combined with
-`--review-output`. Each job ID must resolve exactly once in managed state.
+`--review-output`. With neither option, the helper selects jobs whose `review_of`
+names `AUTHOR_JOB`, in managed request order, and requires their settled,
+complete, unresolved-free collections. Each job ID must resolve exactly once in
+managed state.
 The helper looks only in that job's `host_output` and declared `editable_paths`
 (relative paths use the job's `cwd`), directly or under `review/` or `review-r*/`.
 Exactly one sidecar directory must exist per job; multiple matching directories,
@@ -183,8 +188,9 @@ author and every declared fix author. The assembly provenance records source
 identities and alias job IDs.
 
 Every generated `done.json` includes task ID, capture ID, regenerated round
-counts, and the reviewer's explicit verdict. The verdict must appear in the
-source `done.json`, or as a standalone `Verdict: approve.` (also
+counts, and the reviewer's explicit verdict. For scheduled `review_of` jobs the
+verdict must appear in source `done.json`. For older manually assigned reviewers
+it may also appear as a standalone `Verdict: approve.` (also
 `approve-with-nits` or `changes-requested`) line in `review.md` or the output's
 `report.md`. Missing or conflicting verdicts, and supplied task/capture IDs that
 disagree with the sidecar, are refused. Verdicts retain the reviewer's judgment
@@ -282,6 +288,7 @@ Write review.md, review-evidence.json, done.json, and one completed capture unde
 that review directory. Preserve the actual capture_id from capture/manifest.json
 in BOTH JSON records. Capture evidence must include capture/COMPLETE and every
 payload required by capture.py verify. Do not fabricate or repair capture metadata.
+Put the explicit verdict in done.json: approve, approve-with-nits, or changes-requested.
 Use the exact Markdown grammar and JSON fields below; counts must match findings.
 Review findings start unresolved; the coordinator owns terminal dispositions.
 
@@ -302,6 +309,7 @@ actual task, identities, capture ID and counts; do not copy placeholder values:
 {
   "task_id": "TASK_ID",
   "capture_id": "CAPTURE_ID",
+  "verdict": "approve",
   "standards_findings": 0,
   "spec_findings": 0
 }
@@ -314,6 +322,7 @@ fields in `review-rN/done.json`:
 {
   "task_id": "TASK_ID",
   "capture_id": "CAPTURE_ID",
+  "verdict": "approve",
   "new_findings": 0,
   "unfixed": 0
 }
@@ -353,10 +362,11 @@ For nonempty axes, use the finding records and Markdown grammar below, increasin
 the corresponding full count or delta total. Required envelope fields are exactly
 those in the sidecar example; `axis_reviewers` is the only optional envelope
 field. It belongs in the sidecar, not in a finding or axis record. Each axis
-record has exactly `status` and `findings`. The current preflight does not require
-or inspect a `verdict` field in `done.json`; the required fields are the task,
-capture ID, and the counts for the chosen kind. A prose verdict cannot replace
-these fields. Additional done-record metadata is not validated.
+record has exactly `status` and `findings`. New reviewer contracts require an
+explicit verdict in `done.json`; scheduled-job preparation enforces it. The
+bundle validator retains compatibility with historical count-only records.
+The task, capture ID and counts for the chosen kind are always required;
+a prose verdict cannot replace these fields.
 
 The command reuses the preflight's `ReviewBundle` checks and capture verifier.
 It permits `disposition: "unresolved"` for reviewer-owned findings before

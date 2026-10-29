@@ -168,9 +168,50 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator`, `local_lane_scope` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator`, `local_lane_scope`, `review_of`, `review_kind`, `prior_head` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
+
+### Schedule the independent review up front
+
+Coding work requires an independent review; the author's self-review is optional.
+Add this entry alongside the coding job, or supply it as the one job in an `add`
+manifest for an existing run:
+
+```json
+{"job_id": "review-code", "review_of": "code"}
+```
+
+`review_of` must name a distinct coding job with `writes_repository: true` and
+`worker_result`. Review jobs are ordinary, read-only jobs. The helper supplies
+their name, cwd, output expectation, template and distinct worker task identity;
+normal model routing and concurrency/admission limits apply. Optional routing
+overrides select the reviewer independently. Do not supply `task_file`,
+`repository_worktree`, or `worker_result` on a linked review job.
+
+The reviewer waits without allocating a pane until the author settles with a
+complete, unresolved-free collection and a valid, ready worker result. The
+helper verifies the receipt-pinned candidate and current branch head, then
+renders the [review-worker template](review.md#copyable-review-worker-brief-full-or-delta)
+with the coding task ID, author/reviewer identities and candidate base/head.
+The originating author brief and required context are supplied as spec evidence.
+The reviewer writes its explicit verdict in `done.json`, alongside the task,
+capture ID and counts. Its launcher `result.json` uses the distinct reviewer
+task ID; the sidecar and `done.json` use the coding task ID.
+
+`review_kind` defaults to `full`. For a delta, also provide
+`"review_kind": "delta", "prior_head": "FULL_PREVIOUSLY_REVIEWED_SHA"`.
+The helper verifies that `prior_head` lies between the candidate base and head
+and uses it as the capture base. Full bundles use `review/`; each separate delta
+job uses `review-r1/` in its own output directory. Supply prior review/finding
+records through `required_context` when needed. Preparation renumbers the
+ordered review chain into one batch and checks coverage through the candidate.
+
+`worker-records.py prepare-preflight` selects jobs linked to `--job-id` by default,
+in managed request order. Put full and delta jobs in review order. Explicit
+`--review-job` selection remains available. Preparation requires settled,
+complete linked reviews and refuses a missing verdict in `done.json`; the
+integration gate must still return `ready` before integration.
 
 Request/job identifiers contain 1–64 letters, digits, underscores or hyphens and begin with a letter or digit. Job IDs are unique within the batch. `task_kind` is `ordinary` or `deep_research`; the coordinator supplies it explicitly. Managed Herdr Jobs refuse `shopping`; use the host pane-command workflow documented in [PREFERENCES.md](../PREFERENCES.md), not an unmanaged `herdr agent start` workaround. Claude Code maps to runtime `claude-code` and Herdr kind `claude`; managed launch is available only after the live host contract lists `claude` following the verification steps in [host integration](host-integration.md). Until that binding is verified, the `unavailable_capability` refusal stands. Task paths and working directories resolve relative to the manifest. A job's output expectation states what useful work must be in its result.
 
