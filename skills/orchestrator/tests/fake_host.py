@@ -68,7 +68,7 @@ class FakeHost:
             review = output / source.name
             shutil.copytree(source, review, dirs_exist_ok=True)
             with tarfile.open(review / "capture.tar", "w") as archive:
-                archive.add(review / "capture", arcname="capture")
+                archive.add(review / "capture", arcname=f"{review.name}/capture")
             review_paths = [str((review / name).relative_to(output)) for name in
                             ("review.md", "review-evidence.json", "done.json", "capture.tar")]
             artifact_paths.extend(review_paths)

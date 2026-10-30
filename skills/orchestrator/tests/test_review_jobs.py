@@ -87,6 +87,7 @@ class ReviewJobsTests(unittest.TestCase):
         self.assertIn("supplied as review evidence", prompt)
         self.assertIn("verdict", prompt)
         self.assertIn("validate-review", prompt)
+        self.assertIn("archive paths rooted at review/capture/", prompt)
         self.assertFalse(reviewer["spec"]["writes_repository"])
         events = json.loads((self.root / "events.json").read_text())
         author_done = next(i for i, e in enumerate(events)
@@ -176,6 +177,7 @@ class ReviewJobsTests(unittest.TestCase):
         self.assertIn(f"Capture base: {prior}; capture head: {self.head}", prompt)
         self.assertIn("--kind delta", prompt)
         self.assertIn("/review-r1/", prompt)
+        self.assertIn("archive paths rooted at review-r1/capture/", prompt)
 
     def test_invalid_review_declarations_are_refused_before_launch(self):
         invalid = [

@@ -139,5 +139,5 @@ def render_brief(job):
             "Use the CODING task ID above in review-evidence.json and done.json; the separate launcher task ID belongs only in result.json.\n"
             "Include the supplied full author/reviewer identities in the sidecar so validate-review can check them.\n"
             "Collect review.md, review-evidence.json, done.json, and capture.tar in the receipt. "
-            "Create capture.tar from the completed capture with archive paths rooted at capture/. "
+            f"Create capture.tar from the completed capture with archive paths rooted at {directory.name}/capture/. "
             "Retain the loose capture for prepare-preflight.\n")
