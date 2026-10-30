@@ -129,6 +129,13 @@ def finish_message(finish):
             detail += f" by coordinator override ({item['coordinator_override_reason']})"
         dispositions.append(detail)
     closed = [job_id for job_id, item in validations.items() if item["workspace_closed"]]
+    released_worktrees = [job_id for job_id, item in validations.items()
+                          if item.get("repository_worktree_released") is True]
+    forced_worktrees = [job_id for job_id, item in validations.items()
+                        if item.get("repository_worktree_release", {}).get("release", {}).get("forced") is True]
+    retained_worktrees = {job_id: item["repository_worktree_retained_reason"]
+                          for job_id, item in validations.items()
+                          if item.get("repository_worktree_retained_reason")}
     parts = []
     if not_started:
         parts.append("Recorded startup-failure dispositions without worker result or receipt for: "
@@ -144,6 +151,13 @@ def finish_message(finish):
         parts.append("Worker result validation was not requested for legacy receipt-only job(s): " + ", ".join(legacy) + ".")
     if closed:
         parts.append("Closed workspaces for: " + ", ".join(closed) + ".")
+    if released_worktrees:
+        parts.append("Released repository worktree leases for: " + ", ".join(released_worktrees) + ".")
+    if forced_worktrees:
+        parts.append("Force-released abandoned repository worktrees for: " + ", ".join(forced_worktrees) + ".")
+    if retained_worktrees:
+        parts.append("Kept repository worktree leases for review: " + "; ".join(
+            f"{job_id} ({reason})" for job_id, reason in retained_worktrees.items()) + ".")
     parts.append("Acceptance remains pending; review the collected artifacts and outcomes.")
     return " ".join(parts)
 

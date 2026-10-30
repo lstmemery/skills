@@ -6,8 +6,11 @@ import re
 import shutil
 import subprocess
 import uuid
+from datetime import datetime, timezone
+import fcntl
 
-from .records import JobError, encoded, is_commit_id, load_json, parse_json, repository_worktree_record
+from .records import (JobError, atomic_bytes, encoded, is_commit_id, load_json, parse_json,
+                      repository_worktree_record)
 
 
 TREEHOUSE_GET_FIELDS = {"path", "lease_id", "lease_holder", "name", "leased_at",
@@ -20,6 +23,7 @@ GIT_LEASE_PREFIX = "git-worktree-"
 # Reserve the allocator's exact UUID form; arbitrary legacy IDs keep the Treehouse verifier.
 GIT_LEASE_ID = re.compile(re.escape(GIT_LEASE_PREFIX) + r"[0-9a-f]{32}")
 GIT_LEASE_MARKER = "orchestrator-lease.json"
+GIT_LEASE_HISTORY = "lease-history.json"
 
 
 def unavailable(message):
@@ -237,6 +241,285 @@ def _write_git_lease_marker(record, worktree, run_command):
             os.fsync(stream.fileno())
     except OSError as error:
         unavailable(f"cannot write local Git worktree lease marker {marker}: {error.strerror}")
+
+
+def _lease_root():
+    home = _canonical(Path.home(), "home directory")
+    root = _canonical(home / ".local/share/orchestrator/worktrees",
+                      "Git worktree lease directory", strict=False)
+    if home not in root.parents:
+        unavailable("Git worktree lease directory must remain below the home directory")
+    return root
+
+
+def _read_local_lease(marker, worktree, run_command):
+    try:
+        record = repository_worktree_record(load_json(marker, 16384))
+    except FileNotFoundError:
+        return None
+    except (OSError, JobError) as error:
+        unavailable(f"local Git worktree lease marker is invalid: {error}")
+    if not GIT_LEASE_ID.fullmatch(record["lease_id"]):
+        unavailable("local Git worktree lease marker has an invalid lease identity")
+    canonical_worktree = _canonical(worktree, "leased worktree")
+    recorded_path = _canonical(record["path"], "recorded worktree")
+    if canonical_worktree != recorded_path:
+        unavailable("local Git worktree lease marker names a different worktree")
+    repo_root, common_dir, _ = _git_identity(
+        canonical_worktree, _canonical(record["repo_root"], "expected repository"),
+        run_command, expected_common=record["git_common_dir"])
+    if (repo_root != _canonical(record["repo_root"], "expected repository")
+            or common_dir != _canonical(record["git_common_dir"], "recorded Git common directory")):
+        unavailable("local Git worktree lease marker does not match its repository")
+    _verify_git_lease_marker(record, canonical_worktree, run_command)
+    return record
+
+
+def _lease_metadata(record, marker, run_command):
+    worktree = _canonical(record["path"], "recorded worktree")
+    git = shutil.which("git")
+    if not git:
+        unavailable("git is unavailable for repository worktree status")
+    branch_code, branch_output, _ = run_command(
+        [git, "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"], worktree)
+    if branch_code not in (0, 1):
+        unavailable("Git could not read the leased worktree branch")
+    branch = _decode(branch_output, "Git branch lookup") if branch_code == 0 else None
+    head = _git_text(run_command, git, worktree, "rev-parse", "HEAD").lower()
+    status_output = _call(run_command, [git, "-C", str(worktree), "status", "--porcelain",
+                                       "--untracked-files=all"], worktree,
+                          "Git worktree status")
+    dirty = bool(status_output.strip())
+    main_code, _, _ = run_command(
+        [git, "-C", record["repo_root"], "show-ref", "--verify", "--quiet", "refs/heads/main"],
+        Path(record["repo_root"]))
+    if main_code == 0:
+        merge_code, _, _ = run_command(
+            [git, "-C", str(worktree), "merge-base", "--is-ancestor", "HEAD", "refs/heads/main"],
+            worktree)
+        if merge_code not in (0, 1):
+            unavailable("Git could not determine whether the worktree is merged into main")
+        merged = merge_code == 0
+    elif main_code == 1:
+        merged = None
+    else:
+        unavailable("Git could not inspect the repository main branch")
+    created = datetime.fromtimestamp(marker.stat().st_mtime, timezone.utc).isoformat().replace("+00:00", "Z")
+    return {"lease_id": record["lease_id"], "lease_holder": record["lease_holder"],
+            "path": str(worktree), "created": created, "branch": branch, "head": head,
+            "merged_into_main": merged, "dirty": dirty,
+            "active_use": _local_lease_active_use(record)}
+
+
+def _local_lease_active_use(record):
+    worktree = Path(record["path"]).resolve()
+    holder_pid = re.fullmatch(r"(?:pid:)?([1-9][0-9]*)", record["lease_holder"])
+    if holder_pid and len(holder_pid[1]) <= 10 and int(holder_pid[1]) <= 2147483647:
+        try:
+            os.kill(int(holder_pid[1]), 0)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return "lease holder process is alive"
+        else:
+            return "lease holder process is alive"
+
+    runs = Path.home() / ".local/share/orchestrator/runs"
+    for state_path in runs.glob("**/state.json"):
+        try:
+            state = load_json(state_path, 67108864)
+        except (OSError, JobError) as error:
+            unavailable(f"cannot verify registered worktree jobs in {state_path}: {error}")
+        if not isinstance(state, dict) or not isinstance(state.get("jobs"), list):
+            continue
+        request = state.get("request", {})
+        for job in state["jobs"]:
+            if not isinstance(job, dict) or job.get("settled") is True:
+                continue
+            spec = job.get("spec", {})
+            if not isinstance(spec, dict):
+                continue
+            lease = spec.get("repository_worktree", {})
+            worker = spec.get("worker_result", {})
+            holder_matches = (
+                (isinstance(request, dict) and request.get("request_id") == record["lease_holder"])
+                or (isinstance(worker, dict) and worker.get("task_id") == record["lease_holder"]))
+            lease_matches = isinstance(lease, dict) and lease.get("lease_id") == record["lease_id"]
+            cwd = spec.get("cwd")
+            cwd_path = Path(cwd).resolve() if isinstance(cwd, str) else None
+            path_matches = cwd_path is not None and (cwd_path == worktree or worktree in cwd_path.parents)
+            if holder_matches or lease_matches or path_matches:
+                return f"registered job {spec.get('job_id')} is not settled ({state_path})"
+    proc = Path("/proc")
+    try:
+        processes = list(proc.iterdir())
+    except OSError as error:
+        unavailable(f"cannot verify worktree process use: {error}")
+    for process in processes:
+        if not process.name.isdecimal():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            cwd = (process / "cwd").resolve(strict=True)
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        except OSError as error:
+            unavailable(f"cannot verify worktree process {process.name}: {error}")
+        if cwd == worktree or worktree in cwd.parents:
+            return f"process {process.name} has its cwd inside the worktree"
+    return None
+
+
+def _active_local_lease_records(root, run_command):
+    if not root.exists():
+        return []
+    try:
+        worktrees = sorted(path for path in root.iterdir() if path.is_dir() and not path.is_symlink())
+    except OSError as error:
+        unavailable(f"cannot list Git worktree leases: {error.strerror}")
+    records = []
+    for worktree in worktrees:
+        if not (worktree / ".git").exists():
+            continue
+        git_dir = _worktree_git_dir(worktree, run_command)
+        marker = git_dir / GIT_LEASE_MARKER
+        if not marker.exists():
+            continue
+        record = _read_local_lease(marker, worktree, run_command)
+        if record is not None:
+            records.append((record, marker))
+    return records
+
+
+def _load_lease_history(path):
+    try:
+        history = load_json(path, 16777216)
+    except FileNotFoundError:
+        return {"schema_version": 1, "leases": {}}
+    except (OSError, JobError) as error:
+        unavailable(f"local worktree lease history is invalid: {error}")
+    if (not isinstance(history, dict) or set(history) != {"schema_version", "leases"}
+            or history["schema_version"] != 1 or not isinstance(history["leases"], dict)):
+        unavailable("local worktree lease history has an unrecognized format")
+    return history
+
+
+def _save_lease_history(path, history):
+    try:
+        atomic_bytes(path, encoded(history) + b"\n")
+    except OSError as error:
+        unavailable(f"cannot record local worktree lease release: {error.strerror}")
+
+
+def list_local_leases(*, run_command=None):
+    """List verified active local Git worktree leases under the current home."""
+    run_command = run_command or _run_command
+    root = _lease_root()
+    return [_lease_metadata(record, marker, run_command)
+            for record, marker in _active_local_lease_records(root, run_command)]
+
+
+def status_local_lease(lease_id, *, run_command=None):
+    """Return status for one verified active local Git worktree lease."""
+    run_command = run_command or _run_command
+    if not isinstance(lease_id, str) or not GIT_LEASE_ID.fullmatch(lease_id):
+        raise JobError("invalid_input", "lease ID must be a local Git worktree lease ID")
+    root = _lease_root()
+    for record, marker in _active_local_lease_records(root, run_command):
+        if record["lease_id"] == lease_id:
+            return _lease_metadata(record, marker, run_command)
+    history = _load_lease_history(root / GIT_LEASE_HISTORY)
+    released = history["leases"].get(lease_id)
+    if released is not None:
+        return {**released, "released": released.get("state", "released") == "released"}
+    raise JobError("invalid_input", f"active local Git worktree lease was not found: {lease_id}")
+
+
+def release_local_lease(lease_id, who, why, *, force=False, run_command=None):
+    """Remove one local worktree after safety checks and retain its release audit."""
+    run_command = run_command or _run_command
+    if not isinstance(lease_id, str) or not GIT_LEASE_ID.fullmatch(lease_id):
+        raise JobError("invalid_input", "lease ID must be a local Git worktree lease ID")
+    who = _string(who, "release actor")
+    why = _string(why, "release reason")
+    if type(force) is not bool:
+        raise JobError("invalid_input", "force must be a boolean")
+
+    root = _lease_root()
+    if not root.is_dir():
+        raise JobError("invalid_input", f"active local Git worktree lease was not found: {lease_id}")
+    lock_path = root / ".lease-history.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as error:
+        unavailable(f"cannot lock local worktree lease history: {error.strerror}")
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        history_path = root / GIT_LEASE_HISTORY
+        history = _load_lease_history(history_path)
+        prior_release = history["leases"].get(lease_id)
+        if prior_release is not None and prior_release.get("state", "released") == "released":
+            return {"lease_id": lease_id, "released": False, "already_released": True,
+                    "release": prior_release}
+
+        found = next(((record, marker) for record, marker
+                      in _active_local_lease_records(root, run_command)
+                      if record["lease_id"] == lease_id), None)
+        if found is None:
+            if prior_release is not None:
+                path = Path(prior_release["path"])
+                git = shutil.which("git")
+                if not git:
+                    unavailable("git is unavailable for repository worktree release recovery")
+                registered = _call(run_command, [git, "-C", prior_release["repo_root"], "worktree",
+                                                "list", "--porcelain", "-z"],
+                                   Path(prior_release["repo_root"]), "Git worktree release recovery")
+                paths = [Path(os.fsdecode(field[len(b"worktree "):])).resolve()
+                         for field in registered.split(b"\0") if field.startswith(b"worktree ")]
+                if path.exists() or path.resolve() in paths:
+                    raise JobError("conflict", "pending release no longer has its matching worktree lease marker")
+                prior_release.update(
+                    state="released", released_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+                _save_lease_history(history_path, history)
+                return {"lease_id": lease_id, "released": True, "already_released": False,
+                        "release": prior_release}
+            raise JobError("invalid_input", f"active local Git worktree lease was not found: {lease_id}")
+        record, marker = found
+        status = _lease_metadata(record, marker, run_command)
+        if prior_release is not None:
+            if any(prior_release[key] != status[key] for key in ("path", "lease_holder", "head")):
+                raise JobError("conflict", "pending release no longer matches the leased worktree")
+            force = prior_release["forced"]
+        if not force and status["active_use"]:
+            raise JobError("conflict", f"cannot release a worktree in use without --force: {status['active_use']}")
+        if not force and status["dirty"]:
+            raise JobError("conflict", "cannot release a dirty worktree without --force")
+        if not force and status["merged_into_main"] is not True:
+            raise JobError("conflict", "cannot release an unmerged worktree without --force")
+
+        release_record = prior_release or {
+            **status, "repo_root": record["repo_root"], "state": "pending",
+            "release_started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "who": who, "why": why, "forced": force}
+        history["leases"][lease_id] = release_record
+        _save_lease_history(history_path, history)
+
+        git = shutil.which("git")
+        if not git:
+            unavailable("git is unavailable for repository worktree release")
+        argv = [git, "-C", record["repo_root"], "worktree", "remove"]
+        if force:
+            argv.append("--force")
+        argv.append(record["path"])
+        _call(run_command, argv, Path(record["repo_root"]), "Git worktree release")
+        release_record.update(
+            state="released", released_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        _save_lease_history(history_path, history)
+        return {"lease_id": lease_id, "released": True, "already_released": False,
+                "release": release_record}
+    finally:
+        os.close(descriptor)
 
 
 def verify_repository_worktree(record, cwd, run_command, treehouse="treehouse"):

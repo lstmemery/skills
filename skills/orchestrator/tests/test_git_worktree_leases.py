@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -15,7 +16,7 @@ MANAGED_JOBS = SCRIPTS / "herdr-jobs.py"
 sys.path.insert(0, str(SCRIPTS))
 
 from herdr_jobs.records import JobError, repository_worktree_record
-from herdr_jobs.worktrees import verify_repository_worktree
+from herdr_jobs.worktrees import release_local_lease, status_local_lease, verify_repository_worktree
 
 
 class GitWorktreeLeaseTest(unittest.TestCase):
@@ -28,6 +29,7 @@ class GitWorktreeLeaseTest(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
         self.git("init", "-q", str(self.repo))
+        self.git("-C", str(self.repo), "branch", "-m", "main")
         self.git("-C", str(self.repo), "config", "user.name", "Offline Test")
         self.git("-C", str(self.repo), "config", "user.email", "offline@example.invalid")
         (self.repo / "fixture.txt").write_text("base\n")
@@ -69,10 +71,229 @@ class GitWorktreeLeaseTest(unittest.TestCase):
         validated = repository_worktree_record(record)
         self.assertEqual(verify_repository_worktree(validated, str(worktree), self.run_git), record)
 
+    def test_list_and_status_report_local_lease_metadata(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        environment = {**os.environ, "HOME": str(self.home)}
+
+        listed = subprocess.run([sys.executable, str(ALLOCATOR), "list"], cwd=self.root,
+                                env=environment, capture_output=True, text=True, timeout=15)
+        status = subprocess.run([sys.executable, str(ALLOCATOR), "status", "--lease-id",
+                                 record["lease_id"]], cwd=self.root, env=environment,
+                                capture_output=True, text=True, timeout=15)
+
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        listing = json.loads(listed.stdout)["leases"]
+        lease = json.loads(status.stdout)["lease"]
+        self.assertEqual(len(listing), 1)
+        for value in (listing[0], lease):
+            self.assertEqual(value["lease_id"], record["lease_id"])
+            self.assertEqual(value["lease_holder"], "task-1277")
+            self.assertEqual(value["path"], record["path"])
+            self.assertTrue(value["created"])
+            self.assertIsNone(value["branch"])
+            self.assertTrue(value["merged_into_main"])
+
+    def test_release_refuses_unmerged_or_dirty_worktrees_without_force(self):
+        unmerged_result = self.acquire(self.base)
+        dirty_result = self.acquire(self.base)
+        self.assertEqual(unmerged_result.returncode, 0, unmerged_result.stderr)
+        self.assertEqual(dirty_result.returncode, 0, dirty_result.stderr)
+        unmerged = json.loads(unmerged_result.stdout)
+        dirty = json.loads(dirty_result.stdout)
+        self.git("-C", unmerged["path"], "switch", "-c", "candidate")
+        (Path(unmerged["path"]) / "candidate.txt").write_text("unmerged\n")
+        self.git("-C", unmerged["path"], "add", "candidate.txt")
+        self.git("-C", unmerged["path"], "commit", "-qm", "candidate")
+        (Path(dirty["path"]) / "fixture.txt").write_text("dirty\n")
+        environment = {**os.environ, "HOME": str(self.home)}
+
+        refused_unmerged = subprocess.run(
+            [sys.executable, str(ALLOCATOR), "release", "--lease-id", unmerged["lease_id"],
+             "--who", "test-runner", "--why", "candidate is under review"], cwd=self.root,
+            env=environment, capture_output=True, text=True, timeout=15)
+        refused_dirty = subprocess.run(
+            [sys.executable, str(ALLOCATOR), "release", "--lease-id", dirty["lease_id"],
+             "--who", "test-runner", "--why", "candidate is under review"], cwd=self.root,
+            env=environment, capture_output=True, text=True, timeout=15)
+
+        self.assertNotEqual(refused_unmerged.returncode, 0)
+        self.assertIn("unmerged", refused_unmerged.stderr)
+        self.assertTrue(Path(unmerged["path"]).is_dir())
+        self.assertNotEqual(refused_dirty.returncode, 0)
+        self.assertIn("dirty", refused_dirty.stderr)
+        self.assertTrue(Path(dirty["path"]).is_dir())
+
+    def test_forced_release_records_reason_and_is_idempotent(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        worktree = Path(record["path"])
+        self.git("-C", str(worktree), "switch", "-c", "abandoned")
+        (worktree / "candidate.txt").write_text("committed candidate\n")
+        self.git("-C", str(worktree), "add", "candidate.txt")
+        self.git("-C", str(worktree), "commit", "-qm", "candidate")
+        (worktree / "uncommitted.txt").write_text("discarded by force\n")
+        environment = {**os.environ, "HOME": str(self.home)}
+        command = [sys.executable, str(ALLOCATOR), "release", "--lease-id", record["lease_id"],
+                   "--who", "coordinator", "--why", "abandoned candidate", "--force"]
+
+        released = subprocess.run(command, cwd=self.root, env=environment, capture_output=True,
+                                  text=True, timeout=15)
+        repeated = subprocess.run(
+            [sys.executable, str(ALLOCATOR), "release", "--lease-id", record["lease_id"],
+             "--who", "another-caller", "--why", "different reason", "--force"],
+            cwd=self.root, env=environment, capture_output=True, text=True, timeout=15)
+        status = subprocess.run(
+            [sys.executable, str(ALLOCATOR), "status", "--lease-id", record["lease_id"]],
+            cwd=self.root, env=environment, capture_output=True, text=True, timeout=15)
+
+        self.assertEqual(released.returncode, 0, released.stderr)
+        first = json.loads(released.stdout)
+        self.assertTrue(first["released"])
+        self.assertFalse(worktree.exists())
+        self.assertEqual(first["release"]["who"], "coordinator")
+        self.assertEqual(first["release"]["why"], "abandoned candidate")
+        self.assertTrue(first["release"]["forced"])
+        self.assertFalse(first["release"]["merged_into_main"])
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertTrue(json.loads(repeated.stdout)["already_released"])
+        self.assertEqual(json.loads(repeated.stdout)["release"], first["release"])
+        self.assertTrue(json.loads(status.stdout)["lease"]["released"])
+
+    def test_release_refuses_a_live_process_inside_a_clean_merged_worktree(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        nested = Path(record["path"]) / "nested"
+        nested.mkdir()
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=nested)
+        try:
+            refused = subprocess.run(
+                [sys.executable, str(ALLOCATOR), "release", "--lease-id", record["lease_id"],
+                 "--who", "test-runner", "--why", "finished review"], cwd=self.root,
+                env={**os.environ, "HOME": str(self.home)}, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(refused.returncode, 0, refused.stdout)
+            self.assertIn("in use", refused.stderr)
+            self.assertTrue(nested.is_dir())
+            self.assertIsNone(process.poll())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
     def run_git(self, argv, cwd):
         result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=10, check=False)
         return result.returncode, result.stdout, result.stderr
+
+    def test_release_refuses_registered_running_jobs_and_live_holders(self):
+        for identity in ("lease", "holder", "pid"):
+            with self.subTest(identity=identity):
+                acquired = self.acquire(self.base)
+                self.assertEqual(acquired.returncode, 0, acquired.stderr)
+                record = json.loads(acquired.stdout)
+                if identity == "pid":
+                    marker = Path(self.git("-C", record["path"], "rev-parse", "--absolute-git-dir")) / "orchestrator-lease.json"
+                    record["lease_holder"] = f"pid:{os.getpid()}"
+                    marker.write_text(json.dumps(record))
+                else:
+                    run = self.home / ".local/share/orchestrator/runs" / identity
+                    run.mkdir(parents=True)
+                    job = {"spec": {"job_id": "writer", "repository_worktree": record},
+                           "settled": False, "phase": "submitted"}
+                    if identity == "holder":
+                        job["spec"].pop("repository_worktree")
+                    (run / "state.json").write_text(json.dumps({
+                        "request": {"request_id": (record["lease_holder"] if identity == "holder"
+                                                   else "unrelated-holder")}, "jobs": [job]}))
+                refused = subprocess.run(
+                    [sys.executable, str(ALLOCATOR), "release", "--lease-id", record["lease_id"],
+                     "--who", "test-runner", "--why", "finished review"], cwd=self.root,
+                    env={**os.environ, "HOME": str(self.home)}, capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(refused.returncode, 0, refused.stdout)
+                self.assertIn("in use", refused.stderr)
+                self.assertTrue(Path(record["path"]).is_dir())
+                if identity != "pid":
+                    (run / "state.json").unlink()
+
+    def test_failed_audit_write_preserves_the_worktree_and_lease_for_retry(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        marker = Path(self.git("-C", record["path"], "rev-parse", "--absolute-git-dir")) / "orchestrator-lease.json"
+        history = self.home / ".local/share/orchestrator/worktrees/lease-history.json"
+        replace = os.replace
+
+        def disk_full(source, destination):
+            if Path(destination) == history:
+                raise OSError(28, "No space left on device")
+            return replace(source, destination)
+
+        with patch.dict(os.environ, {"HOME": str(self.home)}):
+            with patch("herdr_jobs.records.os.replace", side_effect=disk_full):
+                with self.assertRaisesRegex(JobError, "cannot record.*release"):
+                    release_local_lease(record["lease_id"], "reviewer", "finished review")
+            self.assertTrue(Path(record["path"]).is_dir())
+            self.assertEqual(json.loads(marker.read_text()), record)
+            self.assertFalse(status_local_lease(record["lease_id"])["dirty"])
+            released = release_local_lease(record["lease_id"], "reviewer", "finished review")
+            repeated = release_local_lease(record["lease_id"], "retry", "different reason")
+        self.assertTrue(released["released"])
+        self.assertTrue(repeated["already_released"])
+        self.assertEqual(repeated["release"], released["release"])
+
+    def test_pending_release_retries_failed_removal_with_the_original_audit(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        history = self.home / ".local/share/orchestrator/worktrees/lease-history.json"
+
+        def removal_fails(argv, cwd):
+            if "remove" in argv:
+                return 1, b"", b"fixture removal failure"
+            return self.run_git(argv, cwd)
+
+        with patch.dict(os.environ, {"HOME": str(self.home)}):
+            with self.assertRaisesRegex(JobError, "Git worktree release exited"):
+                release_local_lease(record["lease_id"], "first-actor", "first reason", run_command=removal_fails)
+            self.assertTrue(Path(record["path"]).is_dir())
+            pending = json.loads(history.read_text())["leases"][record["lease_id"]]
+            self.assertEqual(pending["state"], "pending")
+            released = release_local_lease(record["lease_id"], "retry-actor", "retry reason")
+        self.assertTrue(released["released"])
+        self.assertFalse(released["already_released"])
+        self.assertFalse(Path(record["path"]).exists())
+        self.assertEqual(released["release"]["who"], "first-actor")
+        self.assertEqual(released["release"]["why"], "first reason")
+
+    def test_retry_finalizes_audited_removal_after_the_final_history_write_fails(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        history = self.home / ".local/share/orchestrator/worktrees/lease-history.json"
+        replace = os.replace
+
+        def fail_final_write(source, destination):
+            if Path(destination) == history and not Path(record["path"]).exists():
+                raise OSError(28, "No space left on device")
+            return replace(source, destination)
+
+        with patch.dict(os.environ, {"HOME": str(self.home)}):
+            with patch("herdr_jobs.records.os.replace", side_effect=fail_final_write):
+                with self.assertRaisesRegex(JobError, "cannot record.*release"):
+                    release_local_lease(record["lease_id"], "first-actor", "first reason")
+            self.assertFalse(Path(record["path"]).exists())
+            self.assertFalse(status_local_lease(record["lease_id"])["released"])
+            released = release_local_lease(record["lease_id"], "retry", "retry reason")
+            repeated = release_local_lease(record["lease_id"], "retry", "retry reason")
+            self.assertTrue(status_local_lease(record["lease_id"])["released"])
+        self.assertEqual(released["release"]["state"], "released")
+        self.assertEqual(released["release"]["who"], "first-actor")
+        self.assertEqual(released["release"]["why"], "first reason")
+        self.assertTrue(repeated["already_released"])
+        self.assertEqual(repeated["release"], released["release"])
 
     def test_record_passes_managed_jobs_offline_preview(self):
         acquired = self.acquire(self.base)

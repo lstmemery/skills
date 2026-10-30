@@ -79,9 +79,30 @@ or ambiguous. Do not manually release a live or ambiguously owned worker's slot.
 `finish` maps worker outcomes to coordinator dispositions using the worker
 contract: `ready` → `completed`, `blocked` → `blocked`, `partial` → `failed`,
 and `failed` → `failed`. It validates result records, confirms each receipt lists `result.json`
-and every declared artifact file, records dispositions, releases leases, and
-closes settled workspaces. A successful cleanup returns `next_action.kind`
+and every declared artifact file, records dispositions, releases provider leases,
+and closes settled workspaces. A successful cleanup returns `next_action.kind`
 `review`; it does not accept the work, and `acceptance` remains pending.
+
+For a repository-writing job, `finish` compares the candidate's branch, head,
+and base with the leased worktree. It normally releases the repository-worktree
+lease only when that candidate is clean and its head is merged into the
+repository's local `main` branch. A dirty, mismatched, or unmerged worktree
+stays leased and the per-job finish result explains why. Use
+`lease-worktree.py status` to inspect it. Release or retention and its reason
+are checkpointed and validated on reload. After a retained candidate merges,
+rerun `finish` to release it, even if its workspace was already closed.
+For managed jobs, a coordinator disposition override to `failed` with its
+required reason records abandonment and lets `finish` force-release that job's
+unmerged or dirty worktree.
+An explicit abandonment after an earlier normal finish can supersede the
+completed, blocked, or failed disposition (including partial worker results and
+startup failures); the prior disposition and its replacement are preserved
+in job history. A startup failure has no worker candidate to verify, so normal
+finish retains its lease even after a later merge; explicit abandonment permits
+release. Detected active use always retains the worktree during `finish`,
+including abandonment; rerun after that use ends.
+Direct use of `lease-worktree.py release` requires `--who` and `--why`, and requires
+`--force` to remove in-use, dirty, or unmerged worktrees.
 
 For an opted-in `local_lane` job, `finish` also runs the declared independent
 validator against the collected output directory. Record coordinator review
@@ -506,6 +527,6 @@ Every successful operation emits one JSON object naming request/run identity, ba
 | 10 | Partial batch or work needing attention |
 | 130 | Interrupted; resume from durable state |
 
-Host calls can create workspaces/panes, start provider-backed workers, and submit task content under existing task authority. The helper writes only its run state, configured artifact locations, collected snapshots, and explicit finish dispositions. `finish` releases the job's provider lease and closes the exact workspace ID recorded from its pane-move response; Herdr 0.9.3 exposes that ID at `result.move_result.created_workspace.workspace_id` (the helper also accepts `workspace.workspace_id` or `workspace_id`). It performs no installation, registration, automatic cancellation, background-adapter launch, or successor handoff.
+Host calls can create workspaces/panes, start provider-backed workers, and submit task content under existing task authority. The helper writes only its run state, configured artifact locations, collected snapshots, and explicit finish dispositions. `finish` releases the job's provider lease and closes the exact workspace ID recorded from its pane-move response; Herdr 0.9.3 exposes that ID at `result.move_result.created_workspace.workspace_id` (the helper also accepts `workspace.workspace_id` or `workspace_id`). For repository writers, it releases the separate worktree lease after verifying that the candidate branch/head/base matches the lease and is cleanly merged into `main`; it keeps an unmerged lease for review unless the coordinator explicitly abandons it. It performs no installation, registration, automatic cancellation, background-adapter launch, or successor handoff.
 
 If the helper or required binding is unavailable, return the capability gap and its recovery path. A manual continuation must be explicit, preserve policy and receipt obligations, and account for existing owned resources. Unknown effects are not evidence that nothing happened.

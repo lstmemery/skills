@@ -101,6 +101,45 @@ error after Treehouse may have reserved a slot, inspect `treehouse status --json
 and reconcile that lease before retrying; do not launch from an unverified path.
 Lease ownership persists through worker exit and human review.
 
+For locally allocated Git worktree leases, inspect active leases without changing
+them:
+
+```sh
+python3 scripts/lease-worktree.py list
+python3 scripts/lease-worktree.py status --lease-id <lease-id>
+```
+
+The output includes the holder, canonical path, marker creation time, current
+branch and `HEAD`, whether the worktree is clean, and whether `HEAD` is an
+ancestor of the repository's local `main` branch. `merged_into_main` is `null`
+when that branch is unavailable. `status` also returns the saved release record
+after a lease has been released.
+
+Release a lease by its exact ID and record the responsible person or process and
+reason:
+
+```sh
+python3 scripts/lease-worktree.py release --lease-id <lease-id> \
+  --who <person-or-process> --why "<reason>"
+```
+
+Release removes the linked worktree only when it is clean and merged into
+`main` and has no detected active use. It checks visible same-user process
+working directories (including subdirectories), live numeric or `pid:<PID>`
+holders, and unsettled managed jobs registered in checkpoints below
+`~/.local/share/orchestrator/runs` by lease ID, worktree path, or holder task/run
+identity. `list` and `status` expose the detected reason as `active_use`.
+Processes hidden by OS permissions cannot be inspected. It refuses in-use,
+dirty, or unmerged worktrees unless `--force` is supplied.
+Forced release removes the worktree and may discard uncommitted files; use it
+only after deciding that worktree can be abandoned. The helper writes a pending
+audit record to `~/.local/share/orchestrator/worktrees/lease-history.json` before
+removing the worktree and its marker. If that write fails, both remain intact.
+It marks the record released after removal; a retry completes a pending release
+with the original actor, reason, and force policy. A completed release returns
+the original record unchanged on subsequent calls. Pending history alone does
+not report the lease as released.
+
 For research or other work with no repository writes, create an ordinary output
 folder and supply any read-only source paths. A Git repository is unnecessary.
 If scope expands to repository writes, isolate them before proceeding.

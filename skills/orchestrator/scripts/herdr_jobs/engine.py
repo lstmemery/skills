@@ -24,6 +24,7 @@ from .worker_records import (DispositionInput, WorkerIdentity, record_dispositio
 from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
 from .store import CoordinatorCheckpointStore
 from .review_jobs import pin_candidate, render_brief, waiting_reason
+from .worktrees import release_local_lease, status_local_lease
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted", "failed"}
@@ -489,8 +490,28 @@ class Engine:
                    ["provider", "admission_model", "admission_lease_id", "admission_acquired", "rate_limit_seen",
                     "rate_limit_until", "retry_override", "retry_profile", "workspace_id", "workspace_closed",
                     "worker_disposition", "worker_disposition_override", "admission_wait", "start_diagnostic",
-                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted", "issue_code", "review_binding"],
+                    "telemetry", "rate_limit_recoveries", "rate_limit_exhausted", "issue_code", "review_binding",
+                    "repository_worktree_release"],
                    label="stored job")
+            if "repository_worktree_release" in job:
+                release = job["repository_worktree_release"]
+                fields(release, ["released"], ["retained", "reason", "already_released", "release"],
+                       label="stored repository worktree release")
+                if type(release["released"]) is not bool:
+                    raise JobError("conflict", "stored repository worktree released must be boolean")
+                if release["released"]:
+                    if (type(release.get("already_released")) is not bool
+                            or not isinstance(release.get("release"), dict)
+                            or release.get("retained", False) is not False):
+                        raise JobError("conflict", "stored repository worktree release audit is invalid")
+                    for key in ("lease_id", "path", "lease_holder", "who", "why"):
+                        text(release["release"].get(key), f"stored repository worktree release.{key}", 4096)
+                else:
+                    if release.get("retained") is not True:
+                        raise JobError("conflict", "stored repository worktree retention is invalid")
+                    reason = text(release.get("reason"), "stored repository worktree retention reason", 16384)
+                    if not reason.strip():
+                        raise JobError("conflict", "stored repository worktree retention reason must not be blank")
             if job["spec"] != spec or not isinstance(job["phase"], str) or job["phase"] not in PHASES:
                 raise JobError("conflict", "stored job differs from its request or has an invalid phase")
             if not isinstance(job["attempt_id"], str) or re.fullmatch(r"[0-9a-f]{32}", job["attempt_id"]) is None:
@@ -1054,6 +1075,40 @@ class Engine:
         self.checkpoint()
         self.release_admission(job)
 
+    @staticmethod
+    def can_abandon_retained(job):
+        return (job.get("repository_worktree_release", {}).get("retained") is True
+                and job.get("worker_disposition") in WORKER_DISPOSITIONS)
+
+    def record_worker_disposition(self, job, disposition):
+        target = Path(job["host_output"]) / "disposition.json"
+        replace = False
+        if target.exists():
+            previous = load_json(target)
+            fields(previous, ["task_id", "assignment_revision", "disposition", "summary", "evidence"],
+                   label="disposition.json")
+            if previous == disposition:
+                return
+            override = job.get("worker_disposition_override")
+            if not (self.can_abandon_retained(job) and override
+                    and override["disposition"] == "failed"
+                    and disposition["disposition"] == "failed"
+                    and all(previous[key] == disposition[key]
+                            for key in ("task_id", "assignment_revision", "summary"))
+                    and previous["disposition"] == job["worker_disposition"]):
+                raise JobError("conflict", "existing disposition differs from the recorded worker decision")
+            if not any(entry.get("action") == "worker_disposition_superseded"
+                       and entry.get("replacement") == disposition for entry in job["history"]):
+                job["history"].append({"action": "worker_disposition_superseded",
+                                       "observed_at": now(), "previous": previous,
+                                       "replacement": disposition})
+                self.checkpoint()
+            replace = True
+        record_disposition(Path(job["host_output"]), DispositionInput(
+            identity=WorkerIdentity(disposition["task_id"], disposition["assignment_revision"]),
+            disposition=disposition["disposition"], summary=disposition["summary"],
+            evidence=disposition["evidence"]), replace=replace)
+
     def record_startup_disposition(self, job, requested, reason):
         worker = job["spec"].get("worker_result")
         stored = job.get("worker_disposition_override")
@@ -1062,7 +1117,8 @@ class Engine:
         if requested is not None:
             override = {"disposition": requested, "reason": reason}
             if stored is not None and stored != override:
-                raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
+                if not (self.can_abandon_retained(job) and requested == "failed"):
+                    raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
             job["worker_disposition_override"] = stored = override
         disposition = stored["disposition"] if stored else "failed"
         if worker:
@@ -1074,15 +1130,58 @@ class Engine:
             record = {"task_id": identity.task_id, "assignment_revision": identity.assignment_revision,
                       "disposition": disposition, "summary": "Codex startup failed before worker execution.",
                       "evidence": evidence}
-            target = Path(job["host_output"]) / "disposition.json"
-            if target.exists():
-                if load_json(target) != record:
-                    raise JobError("conflict", "existing startup disposition differs from its recorded decision")
-            else:
-                record_disposition(Path(job["host_output"]), DispositionInput(
-                    identity=identity, disposition=disposition, summary=record["summary"], evidence=evidence))
+            self.record_worker_disposition(job, record)
         job["worker_disposition"] = disposition
         self.checkpoint()
+
+    @staticmethod
+    def repository_worktree_release(job, candidate, abandoned_reason=None):
+        record = job["spec"].get("repository_worktree")
+        if not isinstance(record, dict):
+            return None
+        lease_id = record.get("lease_id")
+        try:
+            status = status_local_lease(lease_id)
+        except JobError as error:
+            return {"released": False, "retained": True,
+                    "reason": f"repository worktree lease status could not be verified: {error}"}
+        if (status.get("path") != record.get("path")
+                or status.get("lease_holder") != record.get("lease_holder")):
+            return {"released": False, "retained": True,
+                    "reason": "repository worktree lease identity does not match the job record"}
+        if status.get("released") is True:
+            return {"released": True, "already_released": True,
+                    "release": status.get("release", status)}
+        if status.get("active_use"):
+            return {"released": False, "retained": True,
+                    "reason": f"repository worktree is in use: {status['active_use']}"}
+        force = False
+        if abandoned_reason is not None:
+            force = status.get("dirty") is True or status.get("merged_into_main") is not True
+            reason = f"coordinator abandoned repository candidate: {abandoned_reason}"
+        else:
+            if not isinstance(candidate, dict):
+                return {"released": False, "retained": True,
+                        "reason": "worker result has no candidate to verify against the repository worktree"}
+            if (candidate.get("branch") != status.get("branch")
+                    or str(candidate.get("head", "")).lower() != status.get("head")
+                    or str(candidate.get("base", "")).lower() != str(record.get("base_commit", "")).lower()):
+                return {"released": False, "retained": True,
+                        "reason": "candidate branch, head, or base does not match the leased worktree"}
+            if status.get("merged_into_main") is not True:
+                return {"released": False, "retained": True,
+                        "reason": "candidate is not merged into main; repository worktree lease remains held"}
+            if status.get("dirty") is not False:
+                return {"released": False, "retained": True,
+                        "reason": "repository worktree has uncommitted changes; lease remains held"}
+            reason = f"candidate {candidate['head']} is merged into main"
+        try:
+            release = release_local_lease(lease_id, "herdr-jobs finish", reason, force=force)
+        except JobError as error:
+            return {"released": False, "retained": True,
+                    "reason": f"repository worktree lease release could not be verified: {error}"}
+        return {"released": True, "already_released": release["already_released"],
+                "release": release["release"]}
 
     def finish(self, disposition_overrides=None, override_reason=None, coordinator_grades=None):
         """Record worker dispositions and close only settled, collected jobs."""
@@ -1120,6 +1219,7 @@ class Engine:
         for job in self.state["jobs"]:
             job_id = job["spec"]["job_id"]
             worker = job["spec"].get("worker_result")
+            result = None
             validation = "pending" if worker else "not_requested"
             startup_failure = (job["phase"] == "failed" and job["settled"]
                                and job.get("issue_code") == "codex_cwd_untrusted"
@@ -1211,11 +1311,13 @@ class Engine:
                                             "blocked": "blocked", "failed": "failed"}[result["outcome"]]
                     requested_override = disposition_overrides.get(job_id)
                     stored_override = job.get("worker_disposition_override")
+                    can_abandon_retained = self.can_abandon_retained(job)
                     if requested_override is not None:
                         requested_record = {"disposition": requested_override, "reason": override_reason}
                         if stored_override is not None and stored_override != requested_record:
-                            raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
-                        if stored_override is None:
+                            if not (can_abandon_retained and requested_override == "failed"):
+                                raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
+                        if stored_override != requested_record:
                             job["worker_disposition_override"] = requested_record
                             stored_override = requested_record
                             self.checkpoint()
@@ -1234,17 +1336,7 @@ class Engine:
                                    "assignment_revision": worker["assignment_revision"],
                                    "disposition": worker_disposition,
                                    "summary": result["summary"], "evidence": evidence}
-                    disposition_path = Path(job["host_output"]) / "disposition.json"
-                    if disposition_path.exists():
-                        previous = load_json(disposition_path)
-                        fields(previous, ["task_id", "assignment_revision", "disposition", "summary", "evidence"],
-                               label="disposition.json")
-                        if previous != disposition:
-                            raise JobError("conflict", "existing disposition differs from the collected worker result")
-                    else:
-                        record_disposition(Path(job["host_output"]), DispositionInput(
-                            identity=identity, disposition=disposition["disposition"],
-                            summary=result["summary"], evidence=evidence))
+                    self.record_worker_disposition(job, disposition)
                     job["worker_disposition"] = disposition["disposition"]
                     job["issue"] = None
                     validation = "validated"
@@ -1256,6 +1348,18 @@ class Engine:
                     self.checkpoint()
                     continue
 
+            candidate = result.get("candidate") if isinstance(result, dict) else None
+            override = job.get("worker_disposition_override")
+            abandoned_reason = (override["reason"] if isinstance(override, dict)
+                                and override.get("disposition") == "failed" else None)
+            repository_release = self.repository_worktree_release(
+                job, candidate, abandoned_reason=abandoned_reason)
+            if repository_release is not None:
+                if repository_release != job.get("repository_worktree_release"):
+                    job["repository_worktree_release"] = repository_release
+                    job["history"].append({"action": "repository_worktree_release",
+                                           "observed_at": now(), **repository_release})
+                    self.checkpoint()
             release = self.admission.release(job["admission_lease_id"])
             job["admission_acquired"] = False
             job["history"].append({"action": "finish_release", "released": release["released"],
@@ -1298,10 +1402,16 @@ class Engine:
                                 "worker_result_validation": validation,
                                 "coordinator_grade": self.coordinator_grades.get(job_id, {}).get("grade", "pending"),
                                 "independent_validation": job["telemetry"]["independent_validation"]["status"]}
+            if repository_release is not None:
+                outcomes[job_id]["repository_worktree_released"] = repository_release["released"]
+                if repository_release.get("retained"):
+                    outcomes[job_id]["repository_worktree_retained_reason"] = repository_release["reason"]
             if worker and not startup_failure:
                 outcomes[job_id]["worker_result_outcome"] = result["outcome"]
                 if job.get("worker_disposition_override") is not None:
                     outcomes[job_id]["coordinator_override_reason"] = job["worker_disposition_override"]["reason"]
+            if "repository_worktree_release" in job:
+                outcomes[job_id]["repository_worktree_release"] = job["repository_worktree_release"]
         return {"jobs": outcomes, "complete": all(item["finished"] for item in outcomes.values())}
 
     def ensure_snapshot(self, path, expected):
@@ -1608,6 +1718,8 @@ class Engine:
                          "start_diagnostic": job.get("start_diagnostic"),
                          "workspace_id": job.get("workspace_id"),
                          "workspace_closed": job.get("workspace_closed", False),
+                         **({"repository_worktree_release": job["repository_worktree_release"]}
+                            if job.get("repository_worktree_release") is not None else {}),
                          "worker_disposition": job.get("worker_disposition"),
                          "admission_wait": job.get("admission_wait"),
                          "collection": job["collection"], "collection_error": job["collection_error"]})
