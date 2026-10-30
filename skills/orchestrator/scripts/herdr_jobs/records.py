@@ -620,6 +620,9 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
                                validate_provider_harness)
     from .review_jobs import expand_jobs
 
+    # Also deferred for records.py -> routing_decision.py -> records.py.
+    from .routing_decision import decision_for
+
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
     ladder_config = policy.get("model_ladder")
@@ -650,7 +653,7 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
                 "protected_paths", "editable_paths", "acceptance_tests", "required_context",
                 "tracker_writes", "local_lane", "independent_validator", "local_lane_scope",
                 "prompt_transport", "dependencies", "mutation_targets", "remote_authority",
-                "review_of", "review_kind", "prior_head"], "job")
+                "review_of", "review_kind", "prior_head", "routing_assessment"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         brief_contract_record(job)
@@ -689,6 +692,7 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
             fields(override, ["instruction"], ["runtime", "model", "provider", "effort"], "override")
             text(override["instruction"], "override instruction", 10000)
         explicit = override is not None and any(key in override for key in ("runtime", "model", "provider", "effort"))
+        requested_override = dict(override or {})
         local_route_selection = None
         local_config = policy.get("local_lane")
         if local_lane_opt_in:
@@ -795,6 +799,10 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
                     route["runtime"] = completed["runtime"]
                     model = completed["model"]
                     provider = completed["provider"]
+                    if not any(key in pin_fields for key in ("model", "effort")):
+                        # Harness/provider pins restrict selection, not capacity.
+                        # Keep them distinct from user-specified model/effort.
+                        selection = {**completed, "ladder_sha256": digest(ladder_bytes)}
                     override = {**override, "runtime": completed["runtime"],
                                 "model": completed["model"],
                                 "provider": completed["provider"],
@@ -897,6 +905,10 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
                 task_class, timeout_policy["default"])
         for error in brief_contract_errors(prepared_job):
             invalid(f"{job_id}: {error}")
+        if selection is not None and explicit and not local_lane_opt_in:
+            prepared_job["override"] = requested_override
+        prepared_job["requested_override"] = requested_override
+        prepared_job["route_decision"] = decision_for(prepared_job, policy)
         jobs.append(prepared_job)
     if retry_override:
         if ("pi" in retry_override

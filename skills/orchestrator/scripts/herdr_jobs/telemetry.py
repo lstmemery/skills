@@ -1,6 +1,7 @@
 """Launcher-owned task telemetry shared by managed and direct routes."""
 
 from .records import JobError, fields, version
+from .routing_decision import decision_digest
 
 
 COORDINATOR_GRADES = {"accepted", "rework", "rejected"}
@@ -39,10 +40,20 @@ def task_telemetry(spec, resolved_model, provider):
                                        "evidence": None}}
 
 
+def launch_telemetry(spec, backend, lease_id):
+    return {"backend": backend, "lease_id": lease_id,
+            "decision_sha256": decision_digest(spec), "decision": spec["route_decision"]}
+
+
 def validate_task_telemetry(value, expected_route):
     fields(value, ["schema_version", "route", "started_at", "ended_at", "continuation_count",
                    "continuation_reasons", "quota_signals", "coordinator_grade",
-                   "independent_validation"], label="task telemetry")
+                   "independent_validation"], ["launch"], label="task telemetry")
+    if "launch" in value:
+        launch = fields(value["launch"], ["backend", "lease_id", "decision_sha256", "decision"],
+                        label="launch telemetry")
+        if launch["backend"] not in ("managed", "native"):
+            raise JobError("conflict", "invalid launch telemetry backend")
     version(value["schema_version"])
     route = fields(value["route"], ["lane", "level", "choice", "model", "effort", "harness", "provider"],
                    label="task telemetry route")

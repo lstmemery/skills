@@ -10,7 +10,7 @@ import unittest
 
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE.parents[1] / "tests"))
-from compatibility.builders import review_bundle, write_json
+from compatibility.fixture_builders import review_bundle, write_json
 
 SCRIPT = PACKAGE / "scripts/worker-records.py"
 

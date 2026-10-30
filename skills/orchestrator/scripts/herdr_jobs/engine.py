@@ -7,7 +7,7 @@ import time
 import uuid
 
 from .continuation import record_continuation_working
-from .admission import AdmissionStore, backoff_delay, normalize_model, normalize_provider
+from .admission import AdmissionStore, backoff_delay, dispatch_lease_id, normalize_model, normalize_provider
 from .edit_scope import declared_brief_contract
 from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
                       ensure_local_lane_admitted, ensure_task_admitted, integer, load_json, now,
@@ -21,7 +21,7 @@ from .model_ladder import billing_pool
 from .lifecycle import JobLifecycle, is_untrusted_cwd_issue
 from .worker_records import (DispositionInput, WorkerIdentity, record_disposition,
                              result_schema_markdown, validate_result)
-from .telemetry import COORDINATOR_GRADES, task_telemetry, validate_task_telemetry
+from .telemetry import COORDINATOR_GRADES, launch_telemetry, task_telemetry, validate_task_telemetry
 from .store import CoordinatorCheckpointStore
 from .review_jobs import pin_candidate, render_brief, waiting_reason
 from .worktrees import release_local_lease, status_local_lease
@@ -78,9 +78,7 @@ class Engine:
         return normalize_provider(spec["route"]["runtime"])
 
     def admission_lease_id(self, request_id, job_id, attempt_id):
-        identity = encoded({"run_dir": str(self.root), "request_id": request_id,
-                            "job_id": job_id, "attempt_id": attempt_id})
-        return "managed-" + digest(identity)[:40]
+        return dispatch_lease_id(request_id, job_id, attempt_id, self.root)
 
     def acquire_admission(self, job, bypass_admission=False):
         result = self.admission.acquire(job["provider"], job["admission_model"],
@@ -178,6 +176,8 @@ class Engine:
         job["admission_lease_id"] = self.admission_lease_id(
             self.state["request"]["request_id"], job["spec"]["job_id"], attempt)
         job["admission_acquired"] = False
+        if "launch" in job["telemetry"]:
+            job["telemetry"]["launch"]["lease_id"] = job["admission_lease_id"]
         job["rate_limit_seen"] = False
         job["rate_limit_until"] = None
         job["phase"] = "pending"
@@ -471,7 +471,9 @@ class Engine:
                        ["retry_override"], label="state")
         version(state["schema_version"])
         fields(state["request"], ["schema_version", "request_id", "concurrency", "jobs", "policy", "policy_digest"],
-               ["retry_override"], label="stored request")
+               ["retry_override", "backend"], label="stored request")
+        if state["request"].get("backend", "managed") not in ("managed", "native"):
+            raise JobError("conflict", "stored dispatch backend is invalid")
         if state.get("retry_override") != state["request"].get("retry_override"):
             raise JobError("conflict", "run retry override does not match the pinned request")
         if not isinstance(state["request"]["jobs"], list):
@@ -543,6 +545,9 @@ class Engine:
             job.setdefault("admission_wait", None)
             job.setdefault("start_diagnostic", None)
             expected_telemetry = task_telemetry(spec, job["resolved_model"], job["provider"])
+            if "route_decision" in spec:
+                expected_telemetry["launch"] = launch_telemetry(
+                    spec, state["request"].get("backend", "managed"), job["admission_lease_id"])
             embedded_telemetry = job.pop("telemetry", None)
             telemetry = expected_telemetry if embedded_telemetry is None else embedded_telemetry
             text(job["host_output"], "stored host_output", 4096)
@@ -564,6 +569,11 @@ class Engine:
             # Sidecars commit before state.json; a crash must not restore a spent recovery budget.
             if job["telemetry"]["continuation_count"] >= 1:
                 job["rate_limit_recoveries"] = 1
+            if "route_decision" in spec:
+                expected_launch = launch_telemetry(spec, state["request"].get("backend", "managed"),
+                                                   job["admission_lease_id"])
+                if job["telemetry"].get("launch") != expected_launch:
+                    raise JobError("conflict", "launch telemetry differs from the coordinator decision or lease")
             if job["start_diagnostic"] is not None:
                 diagnostic = fields(job["start_diagnostic"], ["command", "exit_code", "stdout", "stderr"],
                                     label="managed start diagnostic")
@@ -675,7 +685,7 @@ class Engine:
                 raise JobError("conflict", "this run directory already holds a different request or policy")
             self.bind(capabilities)
             return
-        if any(path.name != ".lock" for path in self.root.iterdir()):
+        if any(path.name not in (".lock", "preflight-holds") for path in self.root.iterdir()):
             raise JobError("conflict", "new run directory contains unrelated files")
         jobs = [self.new_job(spec, request, capabilities) for spec in request["jobs"]]
         self.state = {"schema_version": 1, "request": request, "request_digest": digest(encoded(request)),
@@ -707,6 +717,10 @@ class Engine:
             profile_root = self.root / "runtime" / "pi" / spec["job_id"] / attempt
             retry_profile = prepare_pi_run_profile(profile_root / "agent", profile_root / "sessions",
                                                    retry_override)
+        telemetry = task_telemetry(spec, resolved_model, provider)
+        lease_id = self.admission_lease_id(request["request_id"], spec["job_id"], attempt)
+        if "route_decision" in spec:
+            telemetry["launch"] = launch_telemetry(spec, request.get("backend", "managed"), lease_id)
         return {"spec": spec, "attempt_id": attempt, "agent_name": "c9-" + attempt[:24],
                 "resolved_model": resolved_model, "provider": provider,
                 "admission_model": (resolved_model or "default").casefold(),
@@ -722,7 +736,7 @@ class Engine:
                 "activity_seen": False, "settled": False, "collection": None,
                 "collection_error": None, "host_output": host_output,
                 "worker_output": worker_output, "issue": None, "issue_code": None, "start_diagnostic": None,
-                "telemetry": task_telemetry(spec, resolved_model, provider),
+                "telemetry": telemetry,
                 "exit_record": str(self.root / "lifecycle" / spec["job_id"] / "exit.json")}
 
     def reducer_runtime_job(self, state_job, capabilities):
@@ -915,6 +929,9 @@ class Engine:
 
     def effect(self, job, action):
         self.deadline.check()
+        authorize = getattr(self.transport, "authorize", None)
+        if authorize is not None:
+            authorize(job, self.admission, self.state["request"]["request_id"], self.root)
         prompt = self.prompt(job)
         if len(prompt.encode()) > 100000:
             raise JobError("invalid_input", "managed prompt exceeds 100000 UTF-8 bytes")

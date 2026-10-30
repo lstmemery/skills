@@ -30,12 +30,13 @@ derivations and technical-paper audits, and require an independent
 recomputation before relying on the result. The trial is a task-class
 comparison, not an automatic route change.
 
-An explicit user model, effort, provider, or harness remains pinned. Record it
-in `override` with the user's instruction. Those fields take precedence over
-`model_level` and bypass ladder model/effort defaults. Missing runtime uses the
-selected level's harness (or the default level's harness); missing model/effort
-uses that harness's native default. Supply the complete explicit tuple when
-the user pins one. A named `omp` stays `omp`; `pi` is never its alias.
+An explicit user model, effort, provider, or harness remains pinned by dimension.
+Record only the requested dimensions in `override`, together with the user's
+instruction. A harness/provider preference is not a model/effort override.
+The coordinator decision records the original pins separately from the resolved
+tuple. See [route decisions](route-decisions.md) for constraint completion,
+per-task evidence, actionable holds and the shared native dispatch entrypoint.
+A named `omp` stays `omp`; `pi` is never its alias.
 
 For an unpinned worker, set `model_level` to an integer 1–8; omission selects
 level 1 unless an older policy explicitly sets an ordinary runtime. An
@@ -50,13 +51,16 @@ python3 scripts/model-route.py --level 4 --fallback-reason rate_limit \
 ```
 
 The returned argv contains only model/provider/effort arguments. It is not
-launch authorization or capability validation. A direct launcher must apply
-the same native catalog/config/effort checks as managed preflight and reserve
-shared provider admission before creating a pane. Preserve the existing host
+launch authorization or capability validation. Ordinary native dispatch must
+use `scripts/native-dispatch.py` with the managed manifest and host contract.
+It consumes the same coordinator decision, exact discovery and shared provider
+lease before creating a pane; do not run preview argv directly. Preserve the existing host
 binding, startup verification, isolated worktree, and route-specific isolation;
 the explicit local lane uses a host worktree and no jail. Direct local Pi starts
 must use `scripts/local-lane.py start`, which applies the same
-`task_class`/`local_lane_scope` validator as managed jobs. Do not start the
+`task_class`/`local_lane_scope` validator as managed jobs, validates the retained
+coordinator decision from `local-lane.py preview`, and requires exact offline
+Pi discovery before acquiring a lease or resetting the pane. Do not start the
 local model through a raw `herdr agent start --approve` command.
 The managed local lane requires an allowlisted `task_class` (`triage`,
 `summary`, `contract_artifact`, `bounded_code_edit`, `inventory`, or

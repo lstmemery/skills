@@ -5,6 +5,7 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -23,6 +24,17 @@ LOCK_NAME = ".provider-admission.lock"
 POLICY_PATH = Path(__file__).resolve().parents[2] / "launch-policy.json"
 
 
+def dispatch_lease_id(request_id, job_id, attempt_id, root=None):
+    identity = {"request_id": request_id, "job_id": job_id, "attempt_id": attempt_id}
+    if root is not None:
+        identity["run_dir"] = str(root)
+        payload = encoded(identity)
+    else:
+        # Preserve the reducer's existing durable identity encoding.
+        payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return "managed-" + hashlib.sha256(payload).hexdigest()[:40]
+
+
 def normalize_provider(value):
     value = billing_pool(text(value, "provider", 100))
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", value) is None:
@@ -32,7 +44,7 @@ def normalize_provider(value):
 
 def normalize_model(value):
     value = text(value, "model", 200).strip().casefold()
-    if "/" in value and billing_pool(value.split("/", 1)[0]) in ("codex", "claude", "opencode-go"):
+    if "/" in value and billing_pool(value.split("/", 1)[0]) in ("codex", "claude", "opencode-go", "llama-local"):
         return text(value.split("/", 1)[1], "native model", 200)
     return value
 

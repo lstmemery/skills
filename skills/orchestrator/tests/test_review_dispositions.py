@@ -9,7 +9,7 @@ import unittest
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / "scripts/worker-records.py"
 sys.path.insert(0, str(PACKAGE.parents[1] / "tests"))
-from compatibility.builders import review_evidence
+from compatibility.fixture_builders import review_evidence
 
 
 class ReviewDispositionsTest(unittest.TestCase):

@@ -10,7 +10,11 @@ from typing import Any, Mapping
 from .lifecycle import Effect, EffectPort, EffectReceipt, EffectUnknown, job_id_of
 from .admission_service import AdmissionService
 from .engine import Engine
-from .transport import Deadline, EffectUnknown as TransportEffectUnknown, NativeTransport, RateLimited
+from .transport import BudgetExpired, Deadline, EffectUnknown as TransportEffectUnknown, RateLimited
+from .launch_transport import LaunchTransport
+from .preflight_holds import record_hold
+from .records import JobError, load_json, now, save
+from .telemetry import launch_telemetry, validate_task_telemetry
 
 
 class NativeHerdrAdapter(EffectPort):
@@ -23,7 +27,7 @@ class NativeHerdrAdapter(EffectPort):
 
     def __init__(self, binding_path: str | None = None, deadline: Deadline | None = None,
                  transport: Any | None = None, admission_service: AdmissionService | None = None):
-        self.transport = transport or NativeTransport(binding_path, deadline or Deadline(30))
+        self.transport = transport or LaunchTransport(binding_path, deadline or Deadline(30))
         self.admission_service = admission_service
         self.engine = None
         self.capabilities = None
@@ -39,7 +43,13 @@ class NativeHerdrAdapter(EffectPort):
                 "resolved_model": job.get("resolved_model"),
                 "pending_effect": job.get("pending_effect"),
             } for job in state.get("jobs", [])]}
-            self.capabilities = self.transport.preflight(request, existing=existing)
+            try:
+                self.capabilities = self.transport.preflight(request, existing=existing)
+            except (JobError, BudgetExpired) as error:
+                store_path = getattr(store, "path", None)
+                if store_path is not None:
+                    record_hold(Path(store_path).parent, request, error)
+                raise
         else:
             self.capabilities = {
                 "models": {spec["job_id"]: spec.get("model") for spec in request["jobs"]},
@@ -93,6 +103,17 @@ class NativeHerdrAdapter(EffectPort):
         for name in runtime_job:
             if name in state_job and name not in ("spec", "attempt_id"):
                 runtime_job[name] = deepcopy(state_job[name])
+        if callable(getattr(self.transport, "authorize", None)):
+            telemetry_path = Path(runtime_job["host_output"]) / "telemetry.json"
+            if telemetry_path.exists():
+                telemetry = load_json(telemetry_path, 67108864)
+                validate_task_telemetry(telemetry, runtime_job["telemetry"]["route"])
+                expected = launch_telemetry(runtime_job["spec"],
+                                            self.engine.state["request"].get("backend", "managed"),
+                                            runtime_job["admission_lease_id"])
+                if telemetry.get("launch") != expected:
+                    raise JobError("conflict", "native telemetry differs from its decision or lease")
+                runtime_job["telemetry"] = telemetry
         return runtime_job
 
     def prepare_effect(self, effect: Effect, state_job: Mapping[str, Any]) -> Effect:
@@ -108,6 +129,20 @@ class NativeHerdrAdapter(EffectPort):
         job = payload.get("job", payload)
         prompt = payload.get("prompt", "")
         try:
+            if effect.action in {"split", "move", "retry_setup", "start", "prompt", "jail"}:
+                authorize = getattr(self.transport, "authorize", None)
+                if authorize is not None:
+                    if self.admission_service is None or self.engine is None:
+                        raise EffectUnknown("native dispatch requires shared admission and a prepared run", effect)
+                    authorize(job, self.admission_service.store,
+                              self.engine.state["request"]["request_id"], None)
+                    if "launch" in job["telemetry"]:
+                        job["telemetry"]["launch"]["lease_id"] = job["admission_lease_id"]
+                    if effect.action in {"start", "prompt", "jail"} and job["telemetry"]["started_at"] is None:
+                        job["telemetry"]["started_at"] = now()
+                    output = Path(job["host_output"])
+                    output.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    save(output / "telemetry.json", job["telemetry"])
             if effect.action == "workspace_close":
                 result = self.transport.close_workspace(job)
             elif effect.action == "collect":
@@ -161,6 +196,13 @@ class NativeHerdrAdapter(EffectPort):
                 and isinstance(observation.get("rate_limit"), Mapping)):
             observation = deepcopy(dict(observation))
             observation["rate_limit"] = self._record_rate_limit(runtime_job, observation["rate_limit"])
+        if (callable(getattr(self.transport, "authorize", None))
+                and observation.get("identity_verified") is True
+                and observation.get("state") in ("done", "exited", "idle")
+                and job.get("phase") == "submitted"
+                and (job.get("activity_seen") or observation.get("receipt_valid"))):
+            runtime_job["telemetry"]["ended_at"] = runtime_job["telemetry"]["ended_at"] or now()
+            save(Path(runtime_job["host_output"]) / "telemetry.json", runtime_job["telemetry"])
         return observation
 
     def workspace_is_open(self, job: Mapping[str, Any]) -> bool:

@@ -283,7 +283,9 @@ class NativeTransport:
             raise JobError("unavailable_capability", "supported_kinds must list verified Herdr kinds")
         previous = {job["spec"]["job_id"]: job for job in existing["jobs"]} if existing else {}
         planned = [job for job in request["jobs"] if not status_only and
-                   (job["job_id"] not in previous or previous[job["job_id"]]["phase"] in ("pending", "split", "moved"))]
+                   (job["job_id"] not in previous or
+                    (previous[job["job_id"]]["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
+                     and previous[job["job_id"]].get("pending_effect") is None))]
         planned_ids = {job["job_id"] for job in planned}
         for job in planned:
             if job.get("local_lane") is True:
@@ -498,7 +500,7 @@ class NativeTransport:
                 argv += provider_arguments("codex", spec.get("provider"))
                 if job["resolved_model"] is not None:
                     argv += ["-m", job["resolved_model"]]
-                effort = (spec.get("override") or {}).get("effort")
+                effort = _effort_for(job)
                 argv += effort_arguments("codex", effort)
                 if job.get("retry_override") and "provider_id" in job["retry_override"]:
                     argv += codex_retry_cli_args(job["retry_override"])
@@ -508,7 +510,7 @@ class NativeTransport:
                 runtime_args += provider_arguments("pi", spec.get("provider"))
                 if job["resolved_model"] is not None:
                     runtime_args += ["--model", _native_model("pi", job["resolved_model"], spec.get("provider"))]
-                effort = (spec.get("override") or {}).get("effort")
+                effort = _effort_for(job)
                 if spec.get("local_lane") is not True:
                     runtime_args += effort_arguments("pi", effort)
                 else:
@@ -521,7 +523,7 @@ class NativeTransport:
                 runtime_args = []
                 if job["resolved_model"] is not None:
                     runtime_args += ["--model", job["resolved_model"]]
-                effort = (spec.get("override") or {}).get("effort")
+                effort = _effort_for(job)
                 runtime_args += effort_arguments(spec["route"]["runtime"], effort)
                 if runtime_args:
                     argv += ["--", *runtime_args]
