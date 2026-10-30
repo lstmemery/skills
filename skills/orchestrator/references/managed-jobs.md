@@ -260,7 +260,8 @@ validation was not requested for these receipt-only jobs.
 For integration evidence, enable `worker_result` on coding jobs and have review
 jobs collect their `review/` (or `review-rN/`) Markdown, sidecar and completed
 capture as a single uncompressed `capture.tar` artifact. This avoids consuming
-one receipt slot per capture file; the usual artifact size limits still apply.
+one receipt slot per capture file; retain the `review/` or `review-rN/` prefix
+on capture paths inside the archive. The usual artifact size limits still apply.
 Run `integration-preflight.py --managed-run RUN_DIR` once per source
 run, with the usual `--repo`, `--target`, `--run-dir` evidence destination and
 `--candidate` arguments. The managed adapter generates the roster, derives

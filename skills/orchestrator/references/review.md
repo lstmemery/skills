@@ -85,23 +85,27 @@ unresolved-free collections. Coding jobs must enable `worker_result` and collect
 their assignment-bound `result.json` with its candidate block and declared
 artifacts. Review jobs collect `review/review.md`,
 `review/review-evidence.json`, and `review/capture.tar` in their receipt. Create
-the uncompressed archive from the completed capture, with paths rooted at
-`capture/`:
+the uncompressed archive from the completed capture directories, preserving
+their `review/` or `review-rN/` prefixes inside the archive:
 
 ```sh
-tar -cf OUTPUT_DIR/review/capture.tar -C OUTPUT_DIR/review capture
+tar -cf OUTPUT_DIR/review/capture.tar -C OUTPUT_DIR review/capture
 ```
+
+When the bundle includes delta captures, add each `review-rN/capture` path as
+another input to `tar`.
 
 The archive counts as one receipt artifact regardless of the capture's file
 count. Normal receipt limits still apply: 1–32 artifacts, at most 16 MiB per
 artifact and 64 MiB in total. The adapter permits at most 20002 archive entries,
 16 MiB per payload file and 64 MiB of expanded evidence per job. It accepts
-only regular capture files and the `capture/` and `capture/blobs/` directories;
-links, special files, unsafe paths, duplicate members and collisions with
-individually collected evidence are refused. The manifest, completion marker,
-diff, history and source blobs still undergo full capture verification. Small
-captures may also collect every capture file individually, as before. Use
-`review-rN/` for delta reviews, including the archive's parent directory.
+only regular capture files and the `review/capture/` and
+`review-rN/capture/` directories; links, special files, unsafe paths, duplicate
+members and collisions with individually collected evidence are refused. The
+manifest, completion marker, diff, history and source blobs still undergo full
+capture verification. Small captures may also collect every capture file
+individually, as before. Use `review-rN/` for delta reviews and preserve that
+prefix in the archive.
 Link each sidecar to the coding job's `worker_result.task_id`; the review job
 may have a different job/task ID.
 

@@ -21,6 +21,8 @@ PREFLIGHT_SPEC = importlib.util.spec_from_file_location("integration_preflight",
 PREFLIGHT = importlib.util.module_from_spec(PREFLIGHT_SPEC)
 PREFLIGHT_SPEC.loader.exec_module(PREFLIGHT)
 from herdr_jobs.engine import Engine
+from herdr_jobs.managed_preflight import expand_capture_bundles
+from herdr_jobs.review_evidence import ReviewEvidenceError
 from herdr_jobs.records import save
 
 
@@ -79,6 +81,30 @@ class IntegrationPreflightTests(unittest.TestCase):
             },
         }
         (self.task_dir / "result.json").write_text(json.dumps(result) + "\n")
+
+    def test_managed_capture_expansion_accepts_real_worker_bundle(self):
+        bundle = SKILL_DIR / "tests/fixtures/integration-preflight/real-worker-capture.tar"
+
+        expanded = expand_capture_bundles({"review/capture.tar": bundle.read_bytes()})
+
+        self.assertNotIn("review/capture.tar", expanded)
+        self.assertIn("review/capture/manifest.json", expanded)
+        self.assertIn("review/capture/COMPLETE", expanded)
+        self.assertIn("review/capture/diff.patch", expanded)
+        self.assertIn("review/capture/commits.txt", expanded)
+        self.assertIn("review-r1/capture/manifest.json", expanded)
+        self.assertGreater(len(expanded), 600)
+
+    def test_managed_capture_expansion_enforces_payload_size_limit(self):
+        payload = b"x" * (16 * 1024 * 1024 + 1)
+        bundle = io.BytesIO()
+        member = tarfile.TarInfo("review/capture/diff.patch")
+        member.size = len(payload)
+        with tarfile.open(fileobj=bundle, mode="w:") as archive:
+            archive.addfile(member, io.BytesIO(payload))
+
+        with self.assertRaisesRegex(ReviewEvidenceError, "exceeds payload size limits"):
+            expand_capture_bundles({"review/capture.tar": bundle.getvalue()})
 
     def write_review(
         self,
@@ -219,7 +245,7 @@ class IntegrationPreflightTests(unittest.TestCase):
                     if capture_transform is not None:
                         capture_transform(capture)
                     with tarfile.open(output / "review/capture.tar", "w") as archive:
-                        archive.add(capture, arcname="capture")
+                        archive.add(capture, arcname="review/capture")
                     shutil.rmtree(capture)
             artifacts = sorted(str(path.relative_to(output)) for path in output.rglob("*") if path.is_file())
             save(output / "receipt.json", {
@@ -744,11 +770,11 @@ class IntegrationPreflightTests(unittest.TestCase):
         cases = (
             ("../escaped", tarfile.REGTYPE, "", b"bad", "unsafe member"),
             ("/tmp/escaped", tarfile.REGTYPE, "", b"bad", "unsafe member"),
-            ("capture/../review.md", tarfile.REGTYPE, "", b"bad", "unsafe member"),
-            ("capture/blobs/" + "0" * 64, tarfile.SYMTYPE, "/tmp/escaped", b"", "unsafe member"),
-            ("capture/blobs/" + "0" * 64, tarfile.LNKTYPE, "capture/diff.patch", b"", "unsafe member"),
-            ("capture/blobs/" + "0" * 64, tarfile.FIFOTYPE, "", b"", "unsafe member"),
-            ("capture/manifest.json", tarfile.REGTYPE, "", b"{}", "repeats a path"),
+            ("review/capture/../review.md", tarfile.REGTYPE, "", b"bad", "unsafe member"),
+            ("review/capture/blobs/" + "0" * 64, tarfile.SYMTYPE, "/tmp/escaped", b"", "unsafe member"),
+            ("review/capture/blobs/" + "0" * 64, tarfile.LNKTYPE, "review/capture/diff.patch", b"", "unsafe member"),
+            ("review/capture/blobs/" + "0" * 64, tarfile.FIFOTYPE, "", b"", "unsafe member"),
+            ("review/capture/manifest.json", tarfile.REGTYPE, "", b"{}", "repeats a path"),
         )
         for name, kind, link, data, diagnostic in cases:
             with self.subTest(member=name, kind=kind):

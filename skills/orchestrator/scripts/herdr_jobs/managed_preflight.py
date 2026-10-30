@@ -12,7 +12,10 @@ from .worker_records import WorkerIdentity, validate_result
 
 REVIEW_SIDECAR = re.compile(r"^(review|review-r[1-9][0-9]*)/review-evidence\.json$")
 CAPTURE_BUNDLE = re.compile(r"^(review|review-r[1-9][0-9]*)/capture\.tar$")
-CAPTURE_PAYLOAD = re.compile(r"^capture/(manifest\.json|COMPLETE|diff\.patch|commits\.txt|blobs/[0-9a-f]{64})$")
+CAPTURE_DIRECTORY = re.compile(r"^(review|review-r[1-9][0-9]*)/capture(?:/blobs)?$")
+CAPTURE_PAYLOAD = re.compile(
+    r"^(review|review-r[1-9][0-9]*)/capture/(manifest\.json|COMPLETE|diff\.patch|commits\.txt|blobs/[0-9a-f]{64})$"
+)
 TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
@@ -102,15 +105,15 @@ def expand_capture_bundles(files):
                 if member.name in seen:
                     raise ReviewEvidenceError("managed capture bundle repeats a path")
                 seen.add(member.name)
-                if member.isdir() and member.name in ("capture", "capture/blobs"):
+                if member.isdir() and CAPTURE_DIRECTORY.fullmatch(member.name):
                     continue
-                if (member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
-                        or not CAPTURE_PAYLOAD.fullmatch(member.name)):
+                payload = CAPTURE_PAYLOAD.fullmatch(member.name)
+                if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) or payload is None:
                     raise ReviewEvidenceError("managed capture bundle has an unsafe member")
                 total += member.size
                 if not 0 <= member.size <= 16777216 or total > 67108864:
                     raise ReviewEvidenceError("managed capture bundle exceeds payload size limits")
-                path = f"{match[1]}/{member.name}"
+                path = member.name
                 if path in expanded:
                     raise ReviewEvidenceError("managed capture bundle conflicts with collected evidence")
                 with archive.extractfile(member) as stream:

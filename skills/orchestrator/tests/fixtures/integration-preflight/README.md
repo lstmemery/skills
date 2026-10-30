@@ -1,5 +1,9 @@
 # Synthetic integration preflight records
 
+`real-worker-capture.tar` is copied unchanged from the 2026-10-28 wave1 worker
+`t1308` review bundle. Its entries preserve the `review/capture/` prefix and
+include a delta round under `review-r1/capture/`.
+
 These records use the same run layout as the batch records: a batch-level
 `workers.txt`, a task `result.json`, `review/` with Markdown and `done.json`,
 and a capture placeholder. Identities and task content are synthetic. The test
