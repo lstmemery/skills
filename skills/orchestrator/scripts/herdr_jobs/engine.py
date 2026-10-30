@@ -1075,6 +1075,40 @@ class Engine:
         self.checkpoint()
         self.release_admission(job)
 
+    @staticmethod
+    def can_abandon_retained(job):
+        return (job.get("repository_worktree_release", {}).get("retained") is True
+                and job.get("worker_disposition") in WORKER_DISPOSITIONS)
+
+    def record_worker_disposition(self, job, disposition):
+        target = Path(job["host_output"]) / "disposition.json"
+        replace = False
+        if target.exists():
+            previous = load_json(target)
+            fields(previous, ["task_id", "assignment_revision", "disposition", "summary", "evidence"],
+                   label="disposition.json")
+            if previous == disposition:
+                return
+            override = job.get("worker_disposition_override")
+            if not (self.can_abandon_retained(job) and override
+                    and override["disposition"] == "failed"
+                    and disposition["disposition"] == "failed"
+                    and all(previous[key] == disposition[key]
+                            for key in ("task_id", "assignment_revision", "summary"))
+                    and previous["disposition"] == job["worker_disposition"]):
+                raise JobError("conflict", "existing disposition differs from the recorded worker decision")
+            if not any(entry.get("action") == "worker_disposition_superseded"
+                       and entry.get("replacement") == disposition for entry in job["history"]):
+                job["history"].append({"action": "worker_disposition_superseded",
+                                       "observed_at": now(), "previous": previous,
+                                       "replacement": disposition})
+                self.checkpoint()
+            replace = True
+        record_disposition(Path(job["host_output"]), DispositionInput(
+            identity=WorkerIdentity(disposition["task_id"], disposition["assignment_revision"]),
+            disposition=disposition["disposition"], summary=disposition["summary"],
+            evidence=disposition["evidence"]), replace=replace)
+
     def record_startup_disposition(self, job, requested, reason):
         worker = job["spec"].get("worker_result")
         stored = job.get("worker_disposition_override")
@@ -1083,7 +1117,8 @@ class Engine:
         if requested is not None:
             override = {"disposition": requested, "reason": reason}
             if stored is not None and stored != override:
-                raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
+                if not (self.can_abandon_retained(job) and requested == "failed"):
+                    raise JobError("conflict", "coordinator disposition override differs from its recorded decision")
             job["worker_disposition_override"] = stored = override
         disposition = stored["disposition"] if stored else "failed"
         if worker:
@@ -1095,13 +1130,7 @@ class Engine:
             record = {"task_id": identity.task_id, "assignment_revision": identity.assignment_revision,
                       "disposition": disposition, "summary": "Codex startup failed before worker execution.",
                       "evidence": evidence}
-            target = Path(job["host_output"]) / "disposition.json"
-            if target.exists():
-                if load_json(target) != record:
-                    raise JobError("conflict", "existing startup disposition differs from its recorded decision")
-            else:
-                record_disposition(Path(job["host_output"]), DispositionInput(
-                    identity=identity, disposition=disposition, summary=record["summary"], evidence=evidence))
+            self.record_worker_disposition(job, record)
         job["worker_disposition"] = disposition
         self.checkpoint()
 
@@ -1282,8 +1311,7 @@ class Engine:
                                             "blocked": "blocked", "failed": "failed"}[result["outcome"]]
                     requested_override = disposition_overrides.get(job_id)
                     stored_override = job.get("worker_disposition_override")
-                    can_abandon_retained = (job.get("repository_worktree_release", {}).get("retained") is True
-                                            and job.get("worker_disposition") in ("completed", "blocked"))
+                    can_abandon_retained = self.can_abandon_retained(job)
                     if requested_override is not None:
                         requested_record = {"disposition": requested_override, "reason": override_reason}
                         if stored_override is not None and stored_override != requested_record:
@@ -1308,31 +1336,7 @@ class Engine:
                                    "assignment_revision": worker["assignment_revision"],
                                    "disposition": worker_disposition,
                                    "summary": result["summary"], "evidence": evidence}
-                    disposition_path = Path(job["host_output"]) / "disposition.json"
-                    if disposition_path.exists():
-                        previous = load_json(disposition_path)
-                        fields(previous, ["task_id", "assignment_revision", "disposition", "summary", "evidence"],
-                               label="disposition.json")
-                        if previous != disposition:
-                            if not (can_abandon_retained and effective_override
-                                    and effective_override["disposition"] == "failed"
-                                    and all(previous[key] == disposition[key]
-                                            for key in ("task_id", "assignment_revision", "summary"))
-                                    and previous["disposition"] == job["worker_disposition"]):
-                                raise JobError("conflict", "existing disposition differs from the collected worker result")
-                            if not any(entry.get("action") == "worker_disposition_superseded"
-                                       and entry.get("replacement") == disposition for entry in job["history"]):
-                                job["history"].append({"action": "worker_disposition_superseded",
-                                                       "observed_at": now(), "previous": previous,
-                                                       "replacement": disposition})
-                                self.checkpoint()
-                            record_disposition(Path(job["host_output"]), DispositionInput(
-                                identity=identity, disposition=disposition["disposition"],
-                                summary=result["summary"], evidence=evidence), replace=True)
-                    else:
-                        record_disposition(Path(job["host_output"]), DispositionInput(
-                            identity=identity, disposition=disposition["disposition"],
-                            summary=result["summary"], evidence=evidence))
+                    self.record_worker_disposition(job, disposition)
                     job["worker_disposition"] = disposition["disposition"]
                     job["issue"] = None
                     validation = "validated"

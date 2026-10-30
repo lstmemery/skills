@@ -772,6 +772,143 @@ class JobsTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("retention reason", result["message"])
 
+    def assert_retained_repository_lifecycle(self, terminal, later, initial_disposition=None):
+        record, candidate = self.configure_repository_writer(merge_candidate=False)
+        if terminal == "startup_failed":
+            self.configure(jobs={"job0": "untrusted_cwd"})
+        else:
+            outcome = {"completed": "ready", "blocked": "blocked",
+                       "failed": "failed", "partial": "partial"}[terminal]
+            self.configure(worker_results={"job0": {
+                "candidate": candidate, "outcome": outcome,
+                "unresolved": [] if outcome == "ready" else ["Fixture needs review."],
+            }})
+        expected_code = 0 if terminal == "completed" else 10
+        code, launched = self.call()
+        self.assertEqual(code, expected_code, launched)
+        initial_options = {}
+        if initial_disposition is not None:
+            initial_options = {"coordinator_disposition_override": f"job0={initial_disposition}",
+                               "coordinator_override_reason": "Coordinator reviewed the terminal failure."}
+        code, first = self.call("finish", **initial_options)
+        self.assertEqual((code, first["finish_complete"]), (expected_code, True), first)
+        self.assertFalse(first["finish"]["jobs"]["job0"]["repository_worktree_released"])
+        self.assertTrue(Path(record["path"]).is_dir())
+        job = self.state()["jobs"][0]
+        self.assertTrue(job["repository_worktree_release"]["retained"])
+        self.assertTrue(job["repository_worktree_release"]["reason"])
+        output = Path(job["host_output"])
+        previous = json.loads((output / "disposition.json").read_text())
+        expected_disposition = {"completed": "completed", "blocked": "blocked",
+                                "failed": "failed", "partial": "failed",
+                                "startup_failed": "failed"}[terminal]
+        self.assertEqual(previous["disposition"], initial_disposition or expected_disposition)
+
+        reason = "Candidate explicitly abandoned after terminal review."
+        options = {}
+        if later == "merged":
+            subprocess.run(["git", "-C", record["repo_root"], "merge", "--no-ff", "-qm",
+                            "merge reviewed candidate", "candidate"], check=True, capture_output=True)
+        elif later == "abandoned":
+            options = {"coordinator_disposition_override": "job0=failed",
+                       "coordinator_override_reason": reason}
+
+        code, second = self.call("finish", **options)
+        self.assertEqual(code, expected_code, second)
+        self.assertTrue(second["finish_complete"], second)
+        release = second["finish"]["jobs"]["job0"]["repository_worktree_release"]
+        # A startup failure has no worker candidate whose identity can be verified.
+        should_release = later == "abandoned" or (later == "merged" and terminal != "startup_failed")
+        self.assertEqual(release["released"], should_release)
+        self.assertEqual(Path(record["path"]).exists(), not should_release)
+        disposition = json.loads((output / "disposition.json").read_text())
+        superseded = [entry for entry in self.state()["jobs"][0]["history"]
+                      if entry["action"] == "worker_disposition_superseded"]
+        if later == "abandoned":
+            self.assertEqual(disposition["disposition"], "failed")
+            self.assertIn(reason, disposition["evidence"])
+            self.assertEqual(len(superseded), 1)
+            self.assertEqual(superseded[0]["previous"], previous)
+            self.assertEqual(superseded[0]["replacement"], disposition)
+        else:
+            self.assertEqual(disposition, previous)
+            self.assertEqual(superseded, [])
+        if should_release:
+            audit = release["release"]
+            self.assertEqual(audit["who"], "herdr-jobs finish")
+            self.assertEqual(audit["forced"], later == "abandoned")
+            self.assertIn(reason if later == "abandoned" else candidate["head"], audit["why"])
+            audit_path = self.home / ".local/share/orchestrator/worktrees/lease-history.json"
+            audit_bytes = audit_path.read_bytes()
+        else:
+            self.assertTrue(release["retained"])
+            self.assertIn("no candidate" if terminal == "startup_failed" else "not merged into main",
+                          release["reason"])
+        self.assertEqual(self.call("status")[0], expected_code)
+        code, repeated = self.call("finish", **options)
+        self.assertEqual((code, repeated["finish_complete"]), (expected_code, True), repeated)
+        self.assertEqual(json.loads((output / "disposition.json").read_text()), disposition)
+        self.assertEqual([entry for entry in self.state()["jobs"][0]["history"]
+                          if entry["action"] == "worker_disposition_superseded"], superseded)
+        self.assertEqual(sum(event["action"] == "workspace_close" for event in self.events()), 1)
+        if should_release:
+            self.assertTrue(repeated["finish"]["jobs"]["job0"]["repository_worktree_released"])
+            self.assertEqual(audit_path.read_bytes(), audit_bytes)
+        if terminal == "startup_failed":
+            self.assertFalse((output / "result.json").exists())
+            self.assertFalse((output / "receipt.json").exists())
+
+    def test_retained_lease_completed_merged_later(self):
+        self.assert_retained_repository_lifecycle("completed", "merged")
+
+    def test_retained_lease_completed_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("completed", "abandoned")
+
+    def test_retained_lease_completed_still_unmerged(self):
+        self.assert_retained_repository_lifecycle("completed", "unmerged")
+
+    def test_retained_lease_blocked_merged_later(self):
+        self.assert_retained_repository_lifecycle("blocked", "merged")
+
+    def test_retained_lease_blocked_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("blocked", "abandoned")
+
+    def test_retained_lease_blocked_still_unmerged(self):
+        self.assert_retained_repository_lifecycle("blocked", "unmerged")
+
+    def test_retained_lease_failed_merged_later(self):
+        self.assert_retained_repository_lifecycle("failed", "merged")
+
+    def test_retained_lease_failed_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("failed", "abandoned")
+
+    def test_retained_lease_failed_still_unmerged(self):
+        self.assert_retained_repository_lifecycle("failed", "unmerged")
+
+    def test_retained_lease_partial_merged_later(self):
+        self.assert_retained_repository_lifecycle("partial", "merged")
+
+    def test_retained_lease_partial_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("partial", "abandoned")
+
+    def test_retained_lease_partial_still_unmerged(self):
+        self.assert_retained_repository_lifecycle("partial", "unmerged")
+
+    def test_retained_lease_startup_failed_merged_later(self):
+        self.assert_retained_repository_lifecycle("startup_failed", "merged")
+
+    def test_retained_lease_startup_failed_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("startup_failed", "abandoned")
+
+    def test_retained_lease_startup_failed_still_unmerged(self):
+        self.assert_retained_repository_lifecycle("startup_failed", "unmerged")
+
+    def test_retained_lease_startup_blocked_override_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("startup_failed", "abandoned", initial_disposition="blocked")
+
+    def test_retained_lease_failed_blocked_override_abandoned_later(self):
+        self.assert_retained_repository_lifecycle("failed", "abandoned", initial_disposition="blocked")
+
     def test_finish_retains_an_abandoned_candidate_while_a_process_uses_it(self):
         record, _ = self.configure_repository_writer(merge_candidate=False)
         self.assertEqual(self.call()[0], 0)

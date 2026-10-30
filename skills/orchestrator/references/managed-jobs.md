@@ -95,8 +95,11 @@ For managed jobs, a coordinator disposition override to `failed` with its
 required reason records abandonment and lets `finish` force-release that job's
 unmerged or dirty worktree.
 An explicit abandonment after an earlier normal finish can supersede the
-completed disposition; the prior disposition and its replacement are preserved
-in job history. Detected active use always retains the worktree during `finish`,
+completed, blocked, or failed disposition (including partial worker results and
+startup failures); the prior disposition and its replacement are preserved
+in job history. A startup failure has no worker candidate to verify, so normal
+finish retains its lease even after a later merge; explicit abandonment permits
+release. Detected active use always retains the worktree during `finish`,
 including abandonment; rerun after that use ends.
 Direct use of `lease-worktree.py release` requires `--who` and `--why`, and requires
 `--force` to remove in-use, dirty, or unmerged worktrees.
