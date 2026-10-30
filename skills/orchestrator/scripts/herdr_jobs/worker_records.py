@@ -714,9 +714,9 @@ def build_parser():
     prepare_parser.add_argument("--repo", type=Path, required=True)
     prepare_parser.add_argument("--target", default="main")
     prepare_parser.add_argument("--candidate", required=True)
-    reviews = prepare_parser.add_mutually_exclusive_group(required=True)
+    reviews = prepare_parser.add_mutually_exclusive_group()
     reviews.add_argument("--review-output", type=Path, action="append")
-    reviews.add_argument("--review-job", action="append", help="review job ID, in round order")
+    reviews.add_argument("--review-job", action="append", help="review job ID, in round order; defaults to jobs linked by review_of")
     prepare_parser.add_argument("--author-alias-job", action="append", default=[],
                                 help="explicit fix-author job ID accepted in source sidecars")
     prepare_parser.add_argument("--output", type=Path, required=True)

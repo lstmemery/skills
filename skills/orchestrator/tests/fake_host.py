@@ -2,6 +2,8 @@
 
 import os
 from pathlib import Path
+import shutil
+import tarfile
 import time
 
 from herdr_jobs.records import JobError, load_json, save
@@ -52,13 +54,27 @@ class FakeHost:
                       "unresolved": worker_fixture.get("unresolved", []),
                       "next_action": "Review the fixture result."}
             if job["spec"]["writes_repository"]:
-                result["candidate"] = {"repo": "fixture/repo", "branch": "fixture-branch",
-                                        "base": "a" * 40, "head": "b" * 40}
+                result["candidate"] = worker_fixture.get("candidate", {
+                    "repo": "fixture/repo", "branch": "fixture-branch",
+                    "base": "a" * 40, "head": "b" * 40})
             save(output / "result.json", result)
             artifact_paths = ["result.json", "worker-report.md"]
         else:
             (output / "result.md").write_text("Independent fixture result.\n")
             artifact_paths = ["result.md"]
+        review_fixture = self.fixture.get("review_outputs", {}).get(job["spec"]["job_id"])
+        if review_fixture:
+            source = Path(review_fixture)
+            review = output / source.name
+            shutil.copytree(source, review, dirs_exist_ok=True)
+            with tarfile.open(review / "capture.tar", "w") as archive:
+                archive.add(review / "capture", arcname=f"{review.name}/capture")
+            review_paths = [str((review / name).relative_to(output)) for name in
+                            ("review.md", "review-evidence.json", "done.json", "capture.tar")]
+            artifact_paths.extend(review_paths)
+            if worker:
+                result["artifacts"].extend({"path": path, "kind": "review"} for path in review_paths)
+                save(output / "result.json", result)
         if self.fixture.get("done_marker"):
             (output / "DONE").write_text("ready\n")
             artifact_paths.append("DONE")

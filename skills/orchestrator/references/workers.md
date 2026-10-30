@@ -193,7 +193,15 @@ commands that change checkout files, give it separate isolation first. Preserve
 the candidate being inspected by the user.
 
 Follow the coding verification policy in preferences and any additional task or
-repository requirements. Load and follow `code-review` for its exact comparison,
+repository requirements. Self-review by the coding worker is optional; an
+independent review is mandatory before integration. Schedule a separate
+`review_of: CODING_JOB_ID` job in the coding manifest up front, rather than asking
+the author to act as its own reviewer. The helper generates the independent
+brief after the author settles. Require the reviewer's explicit verdict in
+`done.json`; review sidecars use the coding task ID while the review worker's
+`result.json` uses its separate launcher identity.
+
+Load and follow `code-review` for its exact comparison,
 Standards/Spec briefs, missing-spec procedure, and findings format. Give both axes
 the same candidate and sources. Route its review workers through the coordinator's
 selected backend and retain their findings separately. The implementation worker

@@ -78,17 +78,27 @@ def review_source(job):
     return sources.pop()
 
 
-def reviewer_verdict(source, evidence, *, required, report_root):
-    verdicts = set()
-    if (source / "done.json").exists():
-        done = records.parse_json(records.bounded_file(source, "done.json"))
-        for key in ("task_id", "capture_id"):
-            if key in done and done[key] != evidence[key]:
-                records.invalid(f"review done.json {key} disagrees with sidecar")
-        if "verdict" in done:
-            if done["verdict"] not in ("approve", "approve-with-nits", "changes-requested"):
-                records.invalid("invalid reviewer verdict")
-            verdicts.add(done["verdict"])
+def done_verdict(raw, evidence, *, required=False):
+    """Validate a done record from loose or receipt-pinned bytes."""
+    done = {} if raw is None else records.parse_json(raw)
+    if not isinstance(done, dict):
+        records.invalid("review done.json: expected an object")
+    for key in ("task_id", "capture_id"):
+        if key in done and done[key] != evidence[key]:
+            records.invalid(f"review done.json {key} disagrees with sidecar")
+    if "verdict" not in done:
+        if required:
+            records.invalid("scheduled review requires an explicit verdict in done.json")
+        return None
+    if done["verdict"] not in ("approve", "approve-with-nits", "changes-requested"):
+        records.invalid("invalid reviewer verdict")
+    return done["verdict"]
+
+
+def reviewer_verdict(source, evidence, *, required, report_root, done_required=False):
+    raw = records.bounded_file(source, "done.json") if (source / "done.json").exists() else None
+    verdict = done_verdict(raw, evidence, required=done_required)
+    verdicts = {verdict} if verdict is not None else set()
     if required:
         for root, filename in ((source, "review.md"), (report_root, "report.md")):
             if (root / filename).exists():
@@ -126,6 +136,16 @@ def _prepare(args):
         records.invalid("author job needs a settled, complete, unresolved-free collection")
     author_identity = safe_token(author["agent_name"])
     pane = safe_token(author["pane_id"])
+    if not args.review_job and not args.review_output:
+        linked = [job for job in state["jobs"] if job["spec"].get("review_of") == args.job_id]
+        if not linked:
+            records.invalid("no review_of jobs found; supply --review-job or --review-output")
+        for job in linked:
+            if (not job["settled"] or job["pending_effect"] or job["collection_error"]
+                    or not job["collection"] or job["collection"]["outcome"] != "complete"
+                    or job["collection"]["unresolved"]):
+                records.invalid("linked reviewer job needs a settled, complete, unresolved-free collection")
+        args.review_job = [job["spec"]["job_id"] for job in linked]
     managed_reviews = bool(args.review_job)
     if managed_reviews:
         if len(set(args.review_job)) != len(args.review_job):
@@ -238,7 +258,8 @@ def _prepare(args):
             roster.append(f"{task_id} {reviewer}" + (f" {reviewer_pane}" if managed_reviews else "") + "\n")
             source_record = {"round": name, "directory": str(source.resolve())}
             verdict = reviewer_verdict(source, evidence, required=managed_reviews,
-                                       report_root=report_root)
+                                       report_root=report_root,
+                                       done_required=managed_reviews and "review_of" in review_jobs[index]["spec"])
             if verdict:
                 source_record["verdict"] = verdict
             if managed_reviews:

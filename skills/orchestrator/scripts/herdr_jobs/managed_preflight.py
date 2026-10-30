@@ -6,6 +6,7 @@ import re
 import tarfile
 
 from . import records
+from .preflight_batch import done_verdict
 from .review_evidence import AXES, ReviewEvidenceError
 from .worker_records import WorkerIdentity, validate_result
 
@@ -209,6 +210,10 @@ def _materialize_runs(run_dirs, output_dir):
             if task_id not in authors:
                 raise ReviewEvidenceError(f"managed review has no coding job for task {task_id}")
             author, directory = authors[task_id]
+            if "review_of" in job["spec"]:
+                if job["spec"]["review_of"] != author["spec"]["job_id"]:
+                    raise ReviewEvidenceError("scheduled review_of disagrees with coding job")
+                done_verdict(files.get(f"{review_name}/done.json"), evidence, required=True)
             if author["agent_name"] == job["agent_name"] or author["pane_id"] == job["pane_id"]:
                 raise ReviewEvidenceError("managed reviewer is the candidate author or shares its pane")
             for key, expected in (("author_identity", author["agent_name"]),

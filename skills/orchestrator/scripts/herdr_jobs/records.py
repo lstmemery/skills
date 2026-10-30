@@ -613,11 +613,12 @@ def ensure_local_lane_admitted(local_config, task_class, local_lane_scope, job_i
     return task_class, local_scope
 
 
-def prepare(manifest_path, policy_path):
+def prepare(manifest_path, policy_path, existing_jobs=()):
     # Defer to break the records.py -> model_ladder.py -> records.py import cycle.
     from .model_ladder import (HARNESS_ALIASES, billing_pool, complete_tuple,
                                load_ladder, select, validate_escalation,
                                validate_provider_harness)
+    from .review_jobs import expand_jobs
 
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
@@ -641,14 +642,15 @@ def prepare(manifest_path, policy_path):
     jobs = []
     seen = set()
     worker_results = set()
-    for job in manifest["jobs"]:
+    for job in expand_jobs(manifest["jobs"], existing_jobs):
         fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
                      "writes_repository"],
                 ["override", "repository_worktree", "worker_result", "task_class",
                 "model_level", "model_fallback", "escalation", "worker_mode", "mode",
                 "protected_paths", "editable_paths", "acceptance_tests", "required_context",
                 "tracker_writes", "local_lane", "independent_validator", "local_lane_scope",
-                "prompt_transport", "dependencies", "mutation_targets", "remote_authority"], "job")
+                "prompt_transport", "dependencies", "mutation_targets", "remote_authority",
+                "review_of", "review_kind", "prior_head"], "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         brief_contract_record(job)
@@ -843,7 +845,8 @@ def prepare(manifest_path, policy_path):
         task_path = absolute(job["task_file"], manifest_path.parent)
         task = read_regular(task_path).decode("utf-8")
         text(task, "task")
-        validate_task_output_paths(task, job_id, task_path)
+        if "review_of" not in job:
+            validate_task_output_paths(task, job_id, task_path)
         cwd = absolute(job["cwd"], manifest_path.parent)
         if job["writes_repository"]:
             repository_worktree_record(job["repository_worktree"])

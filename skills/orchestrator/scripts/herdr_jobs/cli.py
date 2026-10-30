@@ -10,7 +10,7 @@ from .codex_trust import prune_trust
 from .continuation import continue_job
 from .engine import Engine, WORKER_DISPOSITIONS
 from .edit_scope import declared_brief_contract, edit_scope_warnings
-from .records import JobError, digest, effort_arguments, encoded, prepare, run_lock
+from .records import JobError, digest, effort_arguments, encoded, load_json, prepare, run_lock
 from .transport import BudgetExpired, Deadline, NativeTransport
 
 
@@ -174,7 +174,11 @@ def main(argv=None, transport_factory=NativeTransport):
                 args.coordinator_disposition_override, args.coordinator_override_reason)
             coordinator_grades = parse_coordinator_grades(args.coordinator_grade)
         root = Path(args.run_dir).absolute()
-        request = prepare(args.manifest, args.policy) if args.operation in ("run", "add") else None
+        existing_jobs = ()
+        if args.operation == "add" and (root / "state.json").exists():
+            existing_jobs = load_json(root / "state.json", 67108864)["request"]["jobs"]
+        request = (prepare(args.manifest, args.policy, existing_jobs)
+                   if args.operation in ("run", "add") else None)
         if args.operation == "add" and len(request["jobs"]) != 1:
             raise JobError("invalid_input", "add accepts exactly one new job; use run for an initial batch")
         if request is not None:
