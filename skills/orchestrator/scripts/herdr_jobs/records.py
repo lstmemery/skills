@@ -672,6 +672,8 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
         independent_validator = (independent_validator_record(job["independent_validator"])
                                 if "independent_validator" in job else None)
         editable_paths = path_list(job.get("editable_paths"), f"{job_id}.editable_paths")
+        if job["writes_repository"] and not editable_paths:
+            invalid(f"{job_id}: writes_repository=true requires non-empty editable_paths")
         protected_paths = validate_protected_paths(
             protected_paths_record(job.get("protected_paths"), acceptance_tests), editable_paths,
             base=manifest_path.parent,

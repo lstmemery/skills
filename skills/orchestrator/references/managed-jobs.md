@@ -434,7 +434,9 @@ Every job must explicitly declare `writes_repository` as `true` or `false`.
 Existing manifests without this field are rejected; omission never means
 non-writer. Set it to `false` for jobs that do not write repository files. A
 repository-writing job sets it to `true`, must include `repository_worktree`,
-and must set `cwd` to that record's `path`. A record on a `false` job is rejected.
+must declare at least one `editable_paths` entry, and must set `cwd` to that
+record's `path`. An empty or omitted editable scope is rejected during
+preparation, before launch. A record on a `false` job is rejected.
 Produce a writer record with:
 
 ```sh
