@@ -222,7 +222,7 @@ def main(argv=None, transport_factory=LaunchTransport, *, backend="managed"):
             print(encoded(result).decode())
             return 0
         deadline = Deadline(args.wait_seconds)
-        with run_lock(root):
+        with run_lock(root, deadline):
             engine = Engine(root, None, deadline)
             engine.defer_quota_recovery = args.defer_quota_recovery
             exists = (root / "state.json").exists()
@@ -292,7 +292,8 @@ def main(argv=None, transport_factory=LaunchTransport, *, backend="managed"):
             if args.operation == "continue":
                 continue_job(engine, args.job, args.reconciliation)
             else:
-                engine.drive(status_only=args.operation in ("status", "finish"))
+                engine.drive(status_only=args.operation in ("status", "finish"),
+                             wait_for_active=args.operation != "finish")
             if args.operation == "finish":
                 finish = engine.finish(disposition_overrides, override_reason, coordinator_grades)
             result = engine.result()
