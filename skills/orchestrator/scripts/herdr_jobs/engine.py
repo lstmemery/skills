@@ -1668,12 +1668,16 @@ class Engine:
                 or observation.get("identity_verified") is not True
                 or observation.get("prompt_verified") is not True):
             return
-        if any(item.get("action") == "working_observed"
-               and item.get("attempt_id") == job["attempt_id"] for item in job["history"]):
+        if Engine.has_recorded_verified_working_activity(job):
             return
         job["history"].append({"action": "working_observed", "attempt_id": job["attempt_id"],
                                "pane_id": job["pane_id"],
                                "observed_at": observation.get("observed_at", now())})
+
+    @staticmethod
+    def has_recorded_verified_working_activity(job):
+        return any(item.get("action") == "working_observed"
+                   and item.get("attempt_id") == job["attempt_id"] for item in job["history"])
 
     @staticmethod
     def has_verified_working_activity(job):
@@ -1682,13 +1686,9 @@ class Engine:
             return False
         route_mode = job["spec"]["route"]["mode"]
         if route_mode == "agent":
-            previously_verified = any(
-                item.get("action") == "working_observed"
-                and item.get("attempt_id") == job["attempt_id"]
-                for item in job["history"]
-            )
             return (observation.get("identity_verified") is True
-                    and (observation.get("prompt_verified") is True or previously_verified))
+                    and (observation.get("prompt_verified") is True
+                         or Engine.has_recorded_verified_working_activity(job)))
         return route_mode == "jail" and observation.get("identity_verified") is True
 
     def drive(self, status_only=False, wait_for_active=True):
@@ -1726,21 +1726,8 @@ class Engine:
                     self.checkpoint()
                 if all(job["settled"] for job in self.state["jobs"]):
                     return
-                verified_activity = any(self.has_verified_working_activity(job)
-                                        for job in self.state["jobs"])
-                if status_only:
-                    if not wait_for_active or not verified_activity:
-                        return
-                elif not verified_activity:
-                    launchable = any(not job["workspace_closed"]
-                                     and job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
-                                     and job["pending_effect"] is None
-                                     and waiting_reason(self.state, job["spec"]) is None
-                                     and not self.fresh_quota_recovery_deferred(job) for job in self.state["jobs"])
-                    if (not launchable
-                            or sum(self.active(job) for job in self.state["jobs"])
-                            >= self.state["request"]["concurrency"]):
-                        return
+                if not wait_for_active:
+                    return
                 time.sleep(min(0.1, self.deadline.remaining()))
         except BudgetExpired:
             self.checkpoint()

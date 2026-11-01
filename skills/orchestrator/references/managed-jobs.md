@@ -31,12 +31,13 @@ reports local checkpoint state only. Plain `status` retains its JSON output.
 
 For positive `--wait-seconds`, the helper uses a monotonic deadline for the
 whole call, including time spent waiting for another call's run lock. Lock
-contention is retried within that budget. `resume` and `status` repeatedly
-observe persisted active jobs through their recorded pane IDs; they do not use
-the focused workspace as a completion signal. `resume` continues while work can
-progress; `status` observes until jobs settle or no active job remains. Both
-checkpoint the latest observation if the deadline expires. `status` remains
-observation-only and never launches a job.
+contention is retried within that budget. Positive-budget `run`, `add`,
+`resume`, `continue`, and `status` calls repeatedly observe unsettled jobs
+through their recorded pane IDs until all jobs settle or the deadline expires,
+even when an observation does not verify active work. They do not use the
+focused workspace as a completion signal and checkpoint the latest observation
+if the deadline expires. `status` remains observation-only and never launches
+a job.
 
 `cleanup-stale` defaults to a read-only report. It maps held provider leases
 for settled jobs to managed run state and, with `--apply`, delegates mapped

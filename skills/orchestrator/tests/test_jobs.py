@@ -525,6 +525,65 @@ class JobsTest(unittest.TestCase):
                 self.assertGreaterEqual(observations, 10)
         self.assertFalse(self.state()["jobs"][0]["observed"]["prompt_verified"])
 
+    def test_status_and_resume_wait_through_unverified_observations_until_settled(self):
+        for status_only in (True, False):
+            with self.subTest(status_only=status_only):
+                self.run = self.root / f"run-wait-{status_only}"
+                self.configure(jobs={"job0": "unverified_working"})
+                self.call(wait_seconds=0.3)
+                self.assertFalse(self.state()["jobs"][0]["settled"])
+
+                class FakeClock:
+                    now = 0.0
+
+                    def monotonic(self):
+                        return self.now
+
+                    def sleep(self, seconds):
+                        self.now += seconds
+
+                clock = FakeClock()
+                observations = [
+                    {"state": "working", "identity_verified": False},
+                    {"state": "working", "identity_verified": False},
+                    {"state": "done", "identity_verified": True},
+                ]
+                with patch("herdr_jobs.transport.time.monotonic", clock.monotonic), \
+                        patch("herdr_jobs.engine.time.sleep", clock.sleep):
+                    deadline = Deadline(1.0)
+                    host = FakeHost(self.fixture, deadline)
+                    engine = Engine(self.run, host, deadline,
+                                    admission_store=AdmissionStore(self.admission_dir))
+                    engine.load()
+                    with patch.object(host, "observe", side_effect=observations) as observe:
+                        engine.drive(status_only=status_only)
+
+                self.assertEqual(observe.call_count, 3)
+                self.assertGreater(clock.now, 0)
+                self.assertTrue(engine.state["jobs"][0]["settled"])
+
+    def test_verified_working_activity_is_deduplicated_per_attempt(self):
+        job = {
+            "attempt_id": "current-attempt",
+            "pane_id": "fixture-pane",
+            "history": [{"action": "working_observed", "attempt_id": "older-attempt"}],
+            "spec": {"route": {"mode": "agent"}},
+            "observed": {"state": "working", "identity_verified": True,
+                         "prompt_verified": False},
+        }
+        self.assertFalse(Engine.has_verified_working_activity(job))
+
+        verified = {"state": "working", "identity_verified": True,
+                    "prompt_verified": True, "observed_at": "fixture-time"}
+        Engine.remember_verified_working_activity(job, verified)
+        Engine.remember_verified_working_activity(job, verified)
+        job["observed"] = {**verified, "prompt_verified": False}
+
+        self.assertTrue(Engine.has_verified_working_activity(job))
+        self.assertEqual([item["attempt_id"] for item in job["history"]
+                          if item["action"] == "working_observed"],
+                         ["older-attempt", "current-attempt"])
+
     def test_run_lock_retries_only_until_monotonic_deadline(self):
         lock_root = self.root / "locked-run"
         lock_root.mkdir()
@@ -2549,7 +2608,7 @@ class JobsTest(unittest.TestCase):
     def test_working_does_not_prove_ambiguous_prompt_delivery(self):
         self.configure(jobs={"job0": "ambiguous"})
         self.assertEqual(self.call()[0], 6)
-        self.assertEqual(sum(event["action"] == "observe" for event in self.events()), 1)
+        self.assertGreaterEqual(sum(event["action"] == "observe" for event in self.events()), 1)
         self.assertEqual(self.call("resume")[0], 6)
         self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
@@ -2562,7 +2621,7 @@ class JobsTest(unittest.TestCase):
 
         self.assertEqual(result["jobs"][0]["observed"]["state"], "working")
         self.assertFalse(self.state()["jobs"][0]["activity_seen"])
-        self.assertEqual(sum(event["action"] == "observe" for event in self.events()), 2)
+        self.assertGreaterEqual(sum(event["action"] == "observe" for event in self.events()), 2)
 
     def test_ambiguous_split_is_not_replayed_and_other_job_finishes(self):
         self.write_jobs(2)
