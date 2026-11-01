@@ -471,6 +471,27 @@ class TransportTest(unittest.TestCase):
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-m", "native-id", prompt])
 
+    def test_codex_multiline_start_round_trips_prompt_through_file_pointer(self):
+        fake = FakeHerdr(start_code=1)
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        prompt = "Review ‘café’ and \"quoted text\".\r\nSecond line: $(literal).\n"
+        output = self.root / "out" / "task"
+        self.job["host_output"] = str(output)
+        self.job["resolved_model"] = "native-id"
+
+        with patch("herdr_jobs.transport.command", fake.command):
+            result = self.adapter.effect("start", self.job, prompt)
+
+        start = next(call for call in fake.calls if call[:3] == ["herdr", "agent", "start"])
+        prompt_argument = start[-1]
+        prompt_file = self.root / "out" / "c9-fixture.prompt.md"
+        self.assertTrue(result["prompt_submitted"])
+        self.assertEqual(prompt_file.read_bytes(), prompt.encode("utf-8"))
+        self.assertNotIn("\n", prompt_argument)
+        self.assertNotIn("\r", prompt_argument)
+        self.assertIn(str(prompt_file), prompt_argument)
+        self.assertNotIn(prompt, start)
+
     def test_local_lane_start_uses_pi_with_configured_mcp_and_extensions(self):
         fake = FakeHerdr()
         self.spec.update(kind="pi", provider="llama-local", route={"mode": "agent", "runtime": "pi"},
