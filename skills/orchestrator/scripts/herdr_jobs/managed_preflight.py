@@ -359,9 +359,12 @@ def _materialize_runs(run_dirs, output_dir, native_run_dirs=(), native_author_sp
             if task_id not in authors:
                 raise ReviewEvidenceError(f"managed review has no coding job for task {task_id}")
             author, directory = authors[task_id]
+            requires_verdict = task_id in native_sources
             if "review_of" in job["spec"]:
                 if job["spec"]["review_of"] != author["spec"]["job_id"]:
                     raise ReviewEvidenceError("scheduled review_of disagrees with coding job")
+                requires_verdict = True
+            if requires_verdict:
                 done_verdict(files.get(f"{review_name}/done.json"), evidence, required=True)
             if author["agent_name"] == job["agent_name"] or author["pane_id"] == job["pane_id"]:
                 raise ReviewEvidenceError("managed reviewer is the candidate author or shares its pane")

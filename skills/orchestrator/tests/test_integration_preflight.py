@@ -877,6 +877,19 @@ class IntegrationPreflightTests(unittest.TestCase):
             report["candidates"][0]["reviews"][0]["author_identity"], "native-coder"
         )
 
+    def test_native_candidate_review_requires_explicit_verdict_without_review_of(self):
+        roots, jobs = self.managed_fixture()
+        native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
+
+        result = self.command(
+            "--native-run", str(native_run),
+            "--native-author", "task-1=native-coder,w-native:p1",
+            "--managed-run", str(roots[1]),
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("scheduled review requires an explicit verdict in done.json", result.stderr)
+
     def test_native_candidate_import_preserves_coordinator_disposition_response(self):
         finding = {
             "id": "S1", "disposition": "fixed", "reason": "Applied the fix.",
