@@ -82,6 +82,7 @@ class JobsTest(unittest.TestCase):
                     acceptance.write_text("# Local lane acceptance fixture.\n")
                     job.update(
                         local_lane=True, writes_repository=True,
+                        editable_paths=[str(self.root / f"editable-{index}.txt")],
                         task_class="summary",
                         local_lane_scope={"network_access": False, "credential_access": False,
                                           "credentials_in_environment": False,
@@ -119,6 +120,7 @@ class JobsTest(unittest.TestCase):
             acceptance.write_text("# Local lane acceptance fixture.\n")
             job.update(
                 local_lane=True,
+                editable_paths=[str(self.root / f"{job_id}-editable.txt")],
                 task_class="summary",
                 local_lane_scope={"network_access": False, "credential_access": False,
                                   "credentials_in_environment": False,
@@ -214,6 +216,7 @@ class JobsTest(unittest.TestCase):
         job["cwd"] = record["path"]
         job["writes_repository"] = True
         job["repository_worktree"] = record
+        job["editable_paths"] = [str(worktree / "candidate.txt")]
         job["worker_result"] = {"task_id": "task-finish", "assignment_revision": 1}
         self.manifest.write_text(json.dumps(manifest))
         candidate = {"repo": "fixture/repo", "branch": "candidate", "base": base, "head": head}
@@ -1736,6 +1739,7 @@ class JobsTest(unittest.TestCase):
                  "lease_holder": "test-request", "repo_root": str(self.root),
                  "git_common_dir": str(self.root / ".git"), "base_commit": "a" * 40}
         manifest["jobs"][0]["repository_worktree"] = lease
+        manifest["jobs"][0]["editable_paths"] = [str(self.root / "editable-job0.txt")]
         self.manifest.write_text(json.dumps(manifest))
         self.configure(jobs={"job0": "rate_limited_once"})
 
@@ -2670,6 +2674,29 @@ class JobsTest(unittest.TestCase):
         self.assertIn("writes_repository=true requires repository_worktree", result["message"])
         self.assertFalse((self.root / "events.json").exists())
         self.assertFalse((self.run / "state.json").exists())
+
+    def test_repository_writer_requires_editable_paths_before_launch(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0].update(
+            writes_repository=True,
+            repository_worktree={"schema_version": 1, "path": str(self.root),
+                                 "lease_id": "lease-test", "lease_holder": "test-request",
+                                 "repo_root": str(self.root), "git_common_dir": str(self.root / ".git"),
+                                 "base_commit": "a" * 40},
+        )
+        for editable_paths in ([], None):
+            with self.subTest(editable_paths=editable_paths):
+                if editable_paths is None:
+                    manifest["jobs"][0].pop("editable_paths", None)
+                else:
+                    manifest["jobs"][0]["editable_paths"] = editable_paths
+                self.manifest.write_text(json.dumps(manifest))
+                code, result = self.call(preview=True)
+                self.assertEqual((code, result["error"]), (2, "invalid_input"))
+                self.assertIn("writes_repository=true requires non-empty editable_paths",
+                              result["message"])
+                self.assertFalse((self.root / "events.json").exists())
+                self.assertFalse(self.run.exists())
 
     def test_ordinary_default_uses_cheapest_ladder_level(self):
         manifest = json.loads(self.manifest.read_text())
