@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import io
 import json
@@ -207,7 +208,7 @@ class IntegrationPreflightTests(unittest.TestCase):
         (self.run_dir / "workers.txt").write_text("\n".join(rows) + "\n")
 
     def managed_fixture(self, *, standards_findings=None, bundle_capture=False,
-                        capture_transform=None, extra_artifacts=0):
+                        capture_transform=None, extra_artifacts=0, review_of=None):
         """Collect actual job outputs, without assembling the preflight layout."""
         self.write_review(schema_version=2, standards_findings=standards_findings)
         evidence_path = self.task_dir / "review/review-evidence.json"
@@ -215,7 +216,8 @@ class IntegrationPreflightTests(unittest.TestCase):
         del evidence["author_identity"]
         del evidence["reviewer_identity"]
         evidence_path.write_text(json.dumps(evidence))
-        (self.task_dir / "review/done.json").unlink()
+        if review_of is None:
+            (self.task_dir / "review/done.json").unlink()
         result = json.loads((self.task_dir / "result.json").read_text())
         result.update(assignment_revision=1, summary="Candidate ready.",
                       artifacts=[{"path": "result.md", "kind": "report"}],
@@ -230,6 +232,8 @@ class IntegrationPreflightTests(unittest.TestCase):
                     "route": {"mode": "agent", "runtime": "codex"}}
             if writer:
                 spec["worker_result"] = {"task_id": "task-1", "assignment_revision": 1}
+            elif review_of is not None:
+                spec["review_of"] = review_of
             job = engine.new_job(spec, request, {"models": {}}, attempt_id=str(index + 1) * 32)
             job.update(pane_id=f"w-fixture:p{index + 1}", settled=True)
             output = Path(job["host_output"])
@@ -242,6 +246,11 @@ class IntegrationPreflightTests(unittest.TestCase):
                 shutil.copytree(self.task_dir / "review", output / "review")
                 for extra_index in range(extra_artifacts):
                     (output / f"support-{extra_index}.txt").write_text("support\n")
+                if review_of is not None:
+                    done_path = output / "review/done.json"
+                    done = json.loads(done_path.read_text())
+                    done["verdict"] = "approve"
+                    save(done_path, done)
                 if bundle_capture:
                     capture = output / "review/capture"
                     if capture_transform is not None:
@@ -264,6 +273,20 @@ class IntegrationPreflightTests(unittest.TestCase):
         shutil.rmtree(self.task_dir)
         (self.run_dir / "workers.txt").unlink()
         return roots, jobs
+
+    def native_fixture(self, result_path):
+        run = self.root / "native-run"
+        task_dir = run / "tasks" / "task-1"
+        task_dir.mkdir(parents=True)
+        shutil.copyfile(result_path, task_dir / "result.json")
+        response_path = Path(result_path).with_name("review-response.md")
+        if response_path.is_file():
+            shutil.copyfile(response_path, task_dir / response_path.name)
+        (run / "workers.json").write_text(json.dumps({"workers": [{
+            "task_id": "task-1", "assignment_revision": 1,
+            "directory": "tasks/task-1",
+        }]}) + "\n")
+        return run
 
     def prepare_batch(self, *outputs, candidate=None, response=None, output=None):
         managed = self.root / "legacy-managed"
@@ -819,6 +842,103 @@ class IntegrationPreflightTests(unittest.TestCase):
         self.assertEqual([item["pane_id"] for item in report["managed_jobs"]],
                          ["w-fixture:p1", "w-fixture:p2"])
         self.assertFalse((self.run_dir / "workers.txt").exists())
+
+    def test_native_candidate_can_be_reviewed_in_a_later_managed_run(self):
+        roots, jobs = self.managed_fixture(review_of="task-1")
+        native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
+
+        result = self.command(
+            "--native-run", str(native_run),
+            "--native-author", "task-1=native-coder,w-native:p1",
+            "--managed-run", str(roots[1]),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(Path(json.loads(result.stdout)["evidence"]).read_text())
+        self.assertEqual(report["outcome"], "ready")
+        imported = report["native_imports"][0]
+        self.assertEqual(imported["task_id"], "task-1")
+        self.assertEqual(imported["author_identity"], "native-coder")
+        self.assertEqual(imported["author_pane"], "w-native:p1")
+        self.assertEqual(imported["candidate"]["head"], self.head)
+        self.assertEqual(
+            imported["result_sha256"],
+            hashlib.sha256(
+                (native_run / "tasks/task-1/result.json").read_bytes()
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            imported["review_response_sha256"],
+            hashlib.sha256(
+                (native_run / "tasks/task-1/review-response.md").read_bytes()
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            report["candidates"][0]["reviews"][0]["author_identity"], "native-coder"
+        )
+
+    def test_native_candidate_review_requires_explicit_verdict_without_review_of(self):
+        roots, jobs = self.managed_fixture()
+        native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
+
+        result = self.command(
+            "--native-run", str(native_run),
+            "--native-author", "task-1=native-coder,w-native:p1",
+            "--managed-run", str(roots[1]),
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("scheduled review requires an explicit verdict in done.json", result.stderr)
+
+    def test_native_candidate_import_preserves_coordinator_disposition_response(self):
+        finding = {
+            "id": "S1", "disposition": "fixed", "reason": "Applied the fix.",
+            "confidence": "high", "reproducer": "Run the focused check; the guard holds.",
+        }
+        roots, jobs = self.managed_fixture(
+            standards_findings=[finding], review_of="task-1"
+        )
+        native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
+
+        result = self.command(
+            "--native-run", str(native_run),
+            "--native-author", "task-1=native-coder,w-native:p1",
+            "--managed-run", str(roots[1]),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(Path(json.loads(result.stdout)["evidence"]).read_text())
+        self.assertEqual(report["candidates"][0]["status"], "ready")
+
+    def test_native_candidate_result_must_match_its_roster_assignment(self):
+        roots, jobs = self.managed_fixture(review_of="task-1")
+        native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
+        roster_path = native_run / "workers.json"
+        roster = json.loads(roster_path.read_text())
+        roster["workers"][0]["assignment_revision"] = 2
+        roster_path.write_text(json.dumps(roster) + "\n")
+
+        result = self.command(
+            "--native-run", str(native_run),
+            "--native-author", "task-1=native-coder,w-native:p1",
+            "--managed-run", str(roots[1]),
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("native result does not match its worker roster", result.stderr)
+
+    def test_native_candidate_cannot_share_managed_review_identity_or_pane(self):
+        roots, jobs = self.managed_fixture(review_of="task-1")
+        native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
+
+        result = self.command(
+            "--native-run", str(native_run),
+            "--native-author", f"task-1={jobs[1]['agent_name']},w-native:p1",
+            "--managed-run", str(roots[1]),
+        )
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("candidate author or shares its pane", result.stderr)
 
     def test_managed_evidence_refuses_a_tampered_candidate_head(self):
         roots, _ = self.managed_fixture(bundle_capture=True)

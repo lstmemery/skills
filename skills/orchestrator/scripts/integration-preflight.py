@@ -119,6 +119,12 @@ def parse_args(argv=None):
     parser.add_argument("--run-dir", required=True, type=Path, help="batch run directory")
     parser.add_argument("--managed-run", action="append", default=[], type=Path,
                         help="managed job run to adapt from collected evidence (repeatable)")
+    parser.add_argument("--native-run", action="append", default=[], type=Path,
+                        help="native worker run supplying candidate results (repeatable)")
+    parser.add_argument(
+        "--native-author", action="append", default=[], metavar="TASK=IDENTITY,PANE",
+        help="explicit native candidate author identity and pane (repeatable)",
+    )
     parser.add_argument(
         "--candidate",
         action="append",
@@ -566,8 +572,11 @@ def main(argv=None):
         target_head = resolve_commit(repo, target_ref)
         input_dir = run_dir
         managed_jobs = None
-        if args.managed_run:
-            input_dir, managed_jobs = materialize_runs(args.managed_run, run_dir)
+        native_imports = []
+        if args.managed_run or args.native_run or args.native_author:
+            input_dir, managed_jobs, native_imports = materialize_runs(
+                args.managed_run, run_dir, args.native_run, args.native_author
+            )
         workers_path = input_dir / "workers.txt"
         if len(set(args.candidate)) != len(args.candidate):
             raise PreflightError("candidate arguments must be unique")
@@ -630,6 +639,8 @@ def main(argv=None):
         }
         if managed_jobs is not None:
             report.update(managed_jobs=managed_jobs, managed_input_dir=str(input_dir))
+        if native_imports:
+            report["native_imports"] = native_imports
         evidence_path = write_report(run_dir, report)
         output = {"outcome": outcome, "evidence": str(evidence_path)}
         if outcome == "blocked":

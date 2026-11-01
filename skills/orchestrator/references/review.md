@@ -133,6 +133,47 @@ digests, collection provenance, identities and panes. Managed input is explicit;
 legacy files in `EVIDENCE_DIR` are not combined with it. No job state, worker
 output, or collected evidence is rewritten.
 
+### Import a candidate from a native run
+
+When a candidate was built in a native run and independently reviewed in a
+managed run, pass both sources explicitly. The native run must contain
+`workers.json` and its task's `result.json` under the rostered `tasks/` directory.
+Supply the native author's identity and pane from verified native session
+records; preflight uses these to check the managed reviewer is independent:
+
+```sh
+python3 scripts/integration-preflight.py \
+  --repo REPO --target TARGET_BRANCH --run-dir EVIDENCE_DIR \
+  --native-run NATIVE_RUN \
+  --native-author 'TASK_ID=AUTHOR_IDENTITY,PANE_ID' \
+  --managed-run REVIEW_RUN \
+  --candidate BRANCH=SHA
+```
+
+Repeat `--native-run`, `--native-author`, and `--managed-run` as needed for a
+batch. Each `--native-author` maps a native result's `task_id` to its recorded
+author identity and pane. A managed review sidecar must use that task ID; when
+the review job declares `review_of`, it must also name that task ID. The managed
+reviewer's identity and pane still come from managed helper state, and the
+reviewer's explicit verdict and completed capture remain required.
+
+The preflight validates each imported result against the native
+`workers.json` task ID and assignment revision, then records a version-1 import
+entry with the source run, candidate fields, author identity and pane, and
+SHA-256 digests of `result.json` and `workers.json` in `native_imports` in the
+report. If the native task has a `review-response.md`, it is imported and its
+digest is recorded too. Preflight snapshots these files and checks that they did
+not change during import. Review evidence remains receipt-pinned through the
+managed adapter. The normal candidate branch, head, target merge base, result
+outcome, review ancestry, identity, disposition, and capture checks still
+apply; a branch name alone does not establish readiness.
+
+Native result files are local inputs, not receipt-pinned artifacts. Their
+digests identify the exact imported snapshot but do not attest who originally
+wrote the files. The supplied native author identity and pane are also an
+operator assertion, so verify them against native session records before using
+this path.
+
 ### Prepare older managed-job outputs
 
 When the author job collected only a report (no `worker_result`), or reviewers
