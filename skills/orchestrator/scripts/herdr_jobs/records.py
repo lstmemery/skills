@@ -15,6 +15,7 @@ from .edit_scope import brief_contract_errors
 
 
 WORKER_MODES = frozenset(("literal", "inferential"))
+MAX_RECEIPT_ARTIFACTS = 256
 CONTEXT_KINDS = frozenset(("test", "fixture", "source", "schema", "dependency", "document"))
 LOCAL_LANE_TASK_CLASSES = frozenset((
     "triage", "summary", "contract_artifact", "bounded_code_edit", "inventory",

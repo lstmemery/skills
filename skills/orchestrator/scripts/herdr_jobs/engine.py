@@ -9,7 +9,7 @@ import uuid
 from .continuation import record_continuation_working
 from .admission import AdmissionStore, backoff_delay, dispatch_lease_id, normalize_model, normalize_provider
 from .edit_scope import declared_brief_contract
-from .records import (JobError, atomic_bytes, bounded_file, digest, encoded, fields,
+from .records import (MAX_RECEIPT_ARTIFACTS, JobError, atomic_bytes, bounded_file, digest, encoded, fields,
                       ensure_local_lane_admitted, ensure_task_admitted, integer, load_json, now,
                       parse_json, read_regular, save, validate_receipt,
                       jail_context_path, protected_paths_record, text, version)
@@ -1048,8 +1048,10 @@ class Engine:
             if not isinstance(receipt["unresolved"], list) or not all(isinstance(item, str) for item in receipt["unresolved"]):
                 raise JobError("invalid_input", "receipt unresolved must be a list of strings")
             artifacts = receipt["artifacts"]
-            if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 32 or not all(isinstance(item, str) for item in artifacts):
-                raise JobError("invalid_input", "receipt needs 1–32 artifact paths")
+            if (not isinstance(artifacts, list)
+                    or not 1 <= len(artifacts) <= MAX_RECEIPT_ARTIFACTS
+                    or not all(isinstance(item, str) for item in artifacts)):
+                raise JobError("invalid_input", f"receipt needs 1–{MAX_RECEIPT_ARTIFACTS} artifact paths")
             if len(set(artifacts)) != len(artifacts) or "receipt.json" in artifacts:
                 raise JobError("invalid_input", "duplicate or self-referential receipt artifact")
             payloads = []

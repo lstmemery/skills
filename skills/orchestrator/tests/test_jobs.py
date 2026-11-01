@@ -1469,6 +1469,24 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS
                              for event in self.events()[events_before:]))
 
+    def test_finish_collects_receipts_with_more_than_32_artifacts(self):
+        job = self.manual_continuation_fixture()
+        output = Path(job["host_output"])
+        artifacts = ["result.md"]
+        for index in range(32):
+            name = f"evidence-{index}.txt"
+            (output / name).write_text(f"evidence {index}\n")
+            artifacts.append(name)
+        receipt = json.loads((output / "receipt.json").read_text())
+        receipt["artifacts"] = artifacts
+        (output / "receipt.json").write_text(json.dumps(receipt))
+
+        code, result = self.call("finish")
+
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["finish_complete"])
+        self.assertEqual(len(self.state()["jobs"][0]["collection"]["artifacts"]), 33)
+
     def test_resume_settles_manual_continuation_without_relaunching(self):
         before = self.manual_continuation_fixture()
         events_before = len(self.events())
