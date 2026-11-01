@@ -6,6 +6,47 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 
 class PremisePreflightDocsTest(unittest.TestCase):
+    def test_batch_admission_refreshes_board_git_and_artifact_evidence(self):
+        unattended = (PACKAGE / "references/unattended.md").read_text()
+        admission = unattended.split("## Admit the night", 1)[1].split(
+            "## Supervision that outlives the coordinator", 1
+        )[0]
+
+        for requirement in (
+            "refresh the status of every selected\nboard card from the live board",
+            "repository state",
+            "target\nbranch's commits and working tree",
+            "linked or retained artifacts",
+            "Drop\ncards currently marked Done",
+            "do not dispatch it",
+            "Repeat it immediately\nbefore dispatch",
+            "does not move or edit cards",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, admission)
+
+    def test_batch_match_checks_define_git_ancestry_and_delivered_evidence(self):
+        unattended = (PACKAGE / "references/unattended.md").read_text()
+        admission = unattended.split("## Admit the night", 1)[1].split(
+            "## Supervision that outlives the coordinator", 1
+        )[0]
+
+        for requirement in (
+            "git log <target> --grep='<card-id>' --oneline",
+            "git merge-base --is-ancestor <candidate-commit> <target>",
+            "exit 0 means",
+            "exit 1 means",
+            "title or\nmessage match alone is not completion evidence",
+            "linked or retained research/delivery\nartifact",
+            "A match means the target contains changes satisfying",
+            "delivered artifact contains evidence",
+            "A keyword hit without criteria evidence is only a lead",
+            "record unknown and hold the card for human reconciliation",
+            "Apply the\nsame checks again immediately before dispatch",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, admission)
+
     def test_assign_step_gates_state_dependent_implementation(self):
         skill = (PACKAGE / "SKILL.md").read_text()
         assign_step = skill.split("2. **Assign.**", 1)[1].split("3. **Launch.**", 1)[0]
