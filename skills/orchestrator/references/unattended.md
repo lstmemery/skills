@@ -37,6 +37,27 @@ This check is read-only and does not move or edit cards. Repeat it immediately
 before dispatch because the selection may have gone stale while the batch was
 being prepared.
 
+For each remaining card, use its stable card ID (and, when available, a
+distinctive phrase from its acceptance criteria) as search keys. Search the
+target branch's history with `git log <target> --grep='<card-id>' --oneline`
+and repeat for the distinctive phrase. Inspect matching commits and the
+target's current working tree against each acceptance criterion; a title or
+message match alone is not completion evidence. For any candidate branch or
+commit cited by the card or its retained artifacts, check whether its work is
+already in the target with
+`git merge-base --is-ancestor <candidate-commit> <target>` (exit 0 means
+reachable, exit 1 means not reachable); inspect reachable changes against the
+criteria and the target tree. Read each linked or retained research/delivery
+artifact, searching for the card ID and acceptance terms, and verify any stated
+result from its evidence. A match means the target contains changes satisfying
+the card's acceptance criteria, or a delivered artifact contains evidence that
+those criteria were completed; record the exact commit/artifact and criteria
+covered. A keyword hit without criteria evidence is only a lead. If no match is
+found after these checks, record the commands, searched artifact locations, and
+criteria checked as no match; if a branch, artifact, or criterion cannot be
+inspected, record unknown and hold the card for human reconciliation. Apply the
+same checks again immediately before dispatch.
+
 Before dispatch, record a `Night budget` block in `STATE.md`:
 
 ```text
