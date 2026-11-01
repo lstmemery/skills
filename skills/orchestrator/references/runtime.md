@@ -418,7 +418,29 @@ the host launcher/session.
 When an assignment explicitly authorizes edits to a normally protected jail
 path, do not send it through managed Herdr Jobs or weaken `editable_paths`.
 The coordinator must choose the separately authorized native route before
-launch. In the authorized Herdr host session, prepare a request JSON containing
+launch. Complete this setup checklist first:
+
+1. Confirm the task's explicit authorization covers the protected paths and
+   identify the task and attempt IDs. Keep the authorization with the task
+   record; this route does not grant additional authority.
+2. Verify the assigned repository worktree lease and exact worktree path with
+   `lease-worktree.py status --lease-id LEASE_ID`; if no lease exists, acquire
+   one using the [repository location procedure](#prepare-the-location). Keep
+   the lease through review and closeout.
+3. In the authorized Herdr host session, open or identify the dedicated
+   workspace and pane for this attempt, and confirm the pane's working
+   directory is the leased worktree.
+4. Confirm that the Codex environment used by `jail-agent` trusts this exact
+   worktree path. The managed host trust helper does not configure trust inside
+   the jail. If Codex presents a trust or session dialog, stop and have the
+   coordinator verify the path and resolve the setup before launching the task;
+   do not accept an unverified path or replay a possibly started prompt.
+5. Prepare the task prompt as UTF-8 text. For a multiline prompt, place the
+   complete prompt in a run-adjacent file readable from the jail and pass the
+   documented one-line file-pointer instruction as the final task argument.
+   Confirm the pointer resolves to that exact file before launch.
+
+Then prepare a request JSON containing
 `schema_version`, unique `job_id` and `attempt_id`, the assigned worktree
 `cwd`, the attempt-specific `exit_path`, and an argv array beginning with
 `jail-agent --harness codex exec --skip-git-repo-check` (or the supported

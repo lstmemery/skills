@@ -14,6 +14,15 @@ SPEC.loader.exec_module(runner)
 
 
 class NativeJailRunnerTests(unittest.TestCase):
+    def test_runtime_documents_native_route_setup_before_launch(self):
+        runtime = (PACKAGE / "references/runtime.md").read_text()
+        route = runtime.split("When an assignment explicitly authorizes edits to a normally protected jail", 1)[1]
+        route = route.split("Before spending a jail attempt", 1)[0]
+
+        for setup in ("lease", "trust", "workspace", "pointer"):
+            self.assertIn(setup, route.lower())
+        self.assertLess(route.lower().index("checklist"), route.index("native-jail-runner.py"))
+
     def test_runs_fixed_jail_command_without_shell_and_records_exit(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)
