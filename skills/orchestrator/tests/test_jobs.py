@@ -1,4 +1,5 @@
 import copy
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -22,8 +23,10 @@ from herdr_jobs.engine import Engine
 from herdr_jobs.cli import preview_runtime_argv
 from herdr_jobs.admission import AdmissionStore
 from herdr_jobs.store import CoordinatorCheckpointStore
+from herdr_jobs.transport import Deadline
+from fake_host import FakeHost
 from support import isolate_admission_state
-from herdr_jobs.records import JobError, digest, encoded, prepare
+from herdr_jobs.records import JobError, digest, encoded, prepare, run_lock
 
 
 class JobsTest(unittest.TestCase):
@@ -491,6 +494,128 @@ class JobsTest(unittest.TestCase):
         self.assertIn("managed-", completed.stdout)
         self.assertNotIn("batch_state", completed.stdout)
         self.assertEqual((self.run / "state.json").read_bytes(), before)
+
+    def test_waits_use_monotonic_deadline_for_nonfocused_active_job(self):
+        self.configure(jobs={"job0": "working"})
+        self.call(wait_seconds=0.3)
+        self.configure(focused=False,
+                       observation={"state": "working", "identity_verified": True,
+                                    "prompt_verified": True})
+
+        class FakeClock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        for status_only in (True, False):
+            with self.subTest(status_only=status_only):
+                clock = FakeClock()
+                before = sum(event["action"] == "observe" for event in self.events())
+                with patch("herdr_jobs.transport.time.monotonic", clock.monotonic), \
+                        patch("herdr_jobs.engine.time.sleep", clock.sleep):
+                    deadline = Deadline(1.0)
+                    engine = Engine(self.run, FakeHost(self.fixture, deadline), deadline,
+                                    admission_store=AdmissionStore(self.admission_dir))
+                    engine.load()
+                    engine.drive(status_only=status_only)
+
+                self.assertAlmostEqual(clock.now, 1.0)
+                observations = sum(event["action"] == "observe" for event in self.events()) - before
+                self.assertGreaterEqual(observations, 10)
+        self.assertFalse(self.state()["jobs"][0]["observed"]["prompt_verified"])
+
+    def test_status_and_resume_wait_through_unverified_observations_until_settled(self):
+        for status_only in (True, False):
+            with self.subTest(status_only=status_only):
+                self.run = self.root / f"run-wait-{status_only}"
+                self.configure(jobs={"job0": "unverified_working"})
+                self.call(wait_seconds=0.3)
+                self.assertFalse(self.state()["jobs"][0]["settled"])
+
+                class FakeClock:
+                    now = 0.0
+
+                    def monotonic(self):
+                        return self.now
+
+                    def sleep(self, seconds):
+                        self.now += seconds
+
+                clock = FakeClock()
+                observations = [
+                    {"state": "working", "identity_verified": False},
+                    {"state": "working", "identity_verified": False},
+                    {"state": "done", "identity_verified": True},
+                ]
+                with patch("herdr_jobs.transport.time.monotonic", clock.monotonic), \
+                        patch("herdr_jobs.engine.time.sleep", clock.sleep):
+                    deadline = Deadline(1.0)
+                    host = FakeHost(self.fixture, deadline)
+                    engine = Engine(self.run, host, deadline,
+                                    admission_store=AdmissionStore(self.admission_dir))
+                    engine.load()
+                    with patch.object(host, "observe", side_effect=observations) as observe:
+                        engine.drive(status_only=status_only)
+
+                self.assertEqual(observe.call_count, 3)
+                self.assertGreater(clock.now, 0)
+                self.assertTrue(engine.state["jobs"][0]["settled"])
+
+    def test_verified_working_activity_is_deduplicated_per_attempt(self):
+        job = {
+            "attempt_id": "current-attempt",
+            "pane_id": "fixture-pane",
+            "history": [{"action": "working_observed", "attempt_id": "older-attempt"}],
+            "spec": {"route": {"mode": "agent"}},
+            "observed": {"state": "working", "identity_verified": True,
+                         "prompt_verified": False},
+        }
+        self.assertFalse(Engine.has_verified_working_activity(job))
+
+        verified = {"state": "working", "identity_verified": True,
+                    "prompt_verified": True, "observed_at": "fixture-time"}
+        Engine.remember_verified_working_activity(job, verified)
+        Engine.remember_verified_working_activity(job, verified)
+        job["observed"] = {**verified, "prompt_verified": False}
+
+        self.assertTrue(Engine.has_verified_working_activity(job))
+        self.assertEqual([item["attempt_id"] for item in job["history"]
+                          if item["action"] == "working_observed"],
+                         ["older-attempt", "current-attempt"])
+
+    def test_run_lock_retries_only_until_monotonic_deadline(self):
+        lock_root = self.root / "locked-run"
+        lock_root.mkdir()
+        lock_path = lock_root / ".lock"
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        class FakeClock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        clock = FakeClock()
+        try:
+            with patch("herdr_jobs.transport.time.monotonic", clock.monotonic), \
+                    patch("herdr_jobs.records.time.sleep", clock.sleep):
+                deadline = Deadline(0.25)
+                with self.assertRaises(JobError) as raised:
+                    with run_lock(lock_root, deadline):
+                        self.fail("contended lock was acquired")
+            self.assertEqual(raised.exception.kind, "unavailable_capability")
+            self.assertAlmostEqual(clock.now, 0.25)
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def test_status_default_json_output_is_unchanged(self):
         self.call()
@@ -2505,7 +2630,7 @@ class JobsTest(unittest.TestCase):
     def test_working_does_not_prove_ambiguous_prompt_delivery(self):
         self.configure(jobs={"job0": "ambiguous"})
         self.assertEqual(self.call()[0], 6)
-        self.assertEqual(sum(event["action"] == "observe" for event in self.events()), 1)
+        self.assertGreaterEqual(sum(event["action"] == "observe" for event in self.events()), 1)
         self.assertEqual(self.call("resume")[0], 6)
         self.assertEqual(sum(event["action"] == "start" for event in self.events()), 1)
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
@@ -2518,7 +2643,7 @@ class JobsTest(unittest.TestCase):
 
         self.assertEqual(result["jobs"][0]["observed"]["state"], "working")
         self.assertFalse(self.state()["jobs"][0]["activity_seen"])
-        self.assertEqual(sum(event["action"] == "observe" for event in self.events()), 2)
+        self.assertGreaterEqual(sum(event["action"] == "observe" for event in self.events()), 2)
 
     def test_ambiguous_split_is_not_replayed_and_other_job_finishes(self):
         self.write_jobs(2)
@@ -2805,10 +2930,12 @@ class JobsTest(unittest.TestCase):
             if (self.root / "events.json").exists():
                 break
             time.sleep(0.01)
-        self.assertEqual(self.call()[0], 3)
+        waiting_code, waiting_result = self.call(wait_seconds=3)
         stdout, stderr = first.communicate(timeout=10)
         self.assertEqual(stderr, b"")
         self.assertEqual(json.loads(stdout)["batch_state"], "collected")
+        self.assertEqual(waiting_code, 0, waiting_result)
+        self.assertEqual(waiting_result["batch_state"], "collected")
         self.assertEqual(sum(event["action"] == "split" for event in self.events()), 1)
 
 

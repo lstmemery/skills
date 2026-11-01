@@ -29,6 +29,16 @@ python3 scripts/herdr-jobs.py close-workspace WORKSPACE_ID
 `disposition`, `lease`); missing values are `-`. With `--wait-seconds 0`, it
 reports local checkpoint state only. Plain `status` retains its JSON output.
 
+For positive `--wait-seconds`, the helper uses a monotonic deadline for the
+whole call, including time spent waiting for another call's run lock. Lock
+contention is retried within that budget. Positive-budget `run`, `add`,
+`resume`, `continue`, and `status` calls repeatedly observe unsettled jobs
+through their recorded pane IDs until all jobs settle or the deadline expires,
+even when an observation does not verify active work. They do not use the
+focused workspace as a completion signal and checkpoint the latest observation
+if the deadline expires. `status` remains observation-only and never launches
+a job.
+
 `cleanup-stale` defaults to a read-only report. It maps held provider leases
 for settled jobs to managed run state and, with `--apply`, delegates mapped
 settled runs to `finish` so leases are released before owned workspaces close.

@@ -191,7 +191,11 @@ class FakeHost:
         if self.fixture.get("observation_error"):
             raise JobError("unavailable_capability", self.fixture["observation_error"])
         if "observation" in self.fixture:
-            return self.fixture["observation"]
+            observation = self.fixture["observation"]
+            if (self.fixture.get("focused") is False and isinstance(observation, dict)
+                    and observation.get("state") == "working"):
+                observation = {**observation, "prompt_verified": False}
+            return observation
         mode = self.fixture.get("jobs", {}).get(job["spec"]["job_id"], "normal")
         if mode == "failed_start_diagnostic" and job.get("pending_effect", {}).get("action") == "start":
             diagnostic = cli_diagnostic(

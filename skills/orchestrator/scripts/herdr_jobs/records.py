@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tempfile
+import time
 from datetime import datetime, timezone
 
 from .edit_scope import brief_contract_errors
@@ -958,17 +959,28 @@ def save(path, value):
 
 
 @contextlib.contextmanager
-def run_lock(root):
+def run_lock(root, deadline=None):
     root = Path(root)
     if root.is_symlink():
         invalid("run directory must not be a symlink")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(root / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise JobError("conflict", "another helper call owns this run") from error
+        waited = False
+        while True:
+            if waited and deadline is not None and deadline.remaining() <= 0:
+                raise JobError("unavailable_capability", "call budget expired waiting for another helper call")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if deadline is None:
+                    raise JobError("conflict", "another helper call owns this run") from error
+                remaining = deadline.remaining()
+                if remaining <= 0:
+                    raise JobError("unavailable_capability", "call budget expired waiting for another helper call") from error
+                waited = True
+                time.sleep(min(0.1, remaining))
         yield
     finally:
         os.close(descriptor)

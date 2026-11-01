@@ -1449,6 +1449,7 @@ class Engine:
                     and job["spec"]["route"]["runtime"] == "codex")
 
     def observe(self, job):
+        self.remember_verified_working_activity(job, job["observed"])
         if job["phase"] == "failed" and job.get("issue_code") == "codex_cwd_untrusted":
             self.release_admission(job)
             return
@@ -1499,6 +1500,7 @@ class Engine:
             self.retire_absent_workspace(job)
             return
         job["observed"] = {**observation, "observed_at": now()}
+        self.remember_verified_working_activity(job, observation)
         if (self.is_codex_pending_start(job, job["pending_effect"])
                 and observation["state"] == "blocked"
                 and is_untrusted_cwd_issue(observation.get("launch_issue"))):
@@ -1663,16 +1665,35 @@ class Engine:
             self.acquire_admission(job, bypass_admission=True)
 
     @staticmethod
+    def remember_verified_working_activity(job, observation):
+        if (not observation or observation.get("state") != "working"
+                or observation.get("identity_verified") is not True
+                or observation.get("prompt_verified") is not True):
+            return
+        if Engine.has_recorded_verified_working_activity(job):
+            return
+        job["history"].append({"action": "working_observed", "attempt_id": job["attempt_id"],
+                               "pane_id": job["pane_id"],
+                               "observed_at": observation.get("observed_at", now())})
+
+    @staticmethod
+    def has_recorded_verified_working_activity(job):
+        return any(item.get("action") == "working_observed"
+                   and item.get("attempt_id") == job["attempt_id"] for item in job["history"])
+
+    @staticmethod
     def has_verified_working_activity(job):
         observation = job["observed"]
         if not observation or observation["state"] != "working":
             return False
         route_mode = job["spec"]["route"]["mode"]
         if route_mode == "agent":
-            return observation.get("identity_verified") is True and observation.get("prompt_verified") is True
+            return (observation.get("identity_verified") is True
+                    and (observation.get("prompt_verified") is True
+                         or Engine.has_recorded_verified_working_activity(job)))
         return route_mode == "jail" and observation.get("identity_verified") is True
 
-    def drive(self, status_only=False):
+    def drive(self, status_only=False, wait_for_active=True):
         try:
             self.reconcile_coordinator_checkpoint()
             self.coordinator_takeover_reconciled = True
@@ -1705,16 +1726,10 @@ class Engine:
                     self.observe(job)
                     self.restore_active_admission(job)
                     self.checkpoint()
-                if status_only or all(job["settled"] for job in self.state["jobs"]):
+                if all(job["settled"] for job in self.state["jobs"]):
                     return
-                if not any(self.has_verified_working_activity(job) for job in self.state["jobs"]):
-                    launchable = any(not job["workspace_closed"]
-                                     and job["phase"] in ("pending", "split", "moved", "retry_ready", "ready")
-                                     and job["pending_effect"] is None
-                                     and waiting_reason(self.state, job["spec"]) is None
-                                     and not self.fresh_quota_recovery_deferred(job) for job in self.state["jobs"])
-                    if not launchable or sum(self.active(job) for job in self.state["jobs"]) >= self.state["request"]["concurrency"]:
-                        return
+                if not wait_for_active:
+                    return
                 time.sleep(min(0.1, self.deadline.remaining()))
         except BudgetExpired:
             self.checkpoint()
