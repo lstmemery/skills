@@ -348,9 +348,12 @@ and inspect-before-resend guidance in
 [Herdr agent control](../../herdr/AGENT-CONTROL.md#submission-and-waits).
 Do not assume the helper implements that workaround.
 
-For a managed Codex job, start a fresh Codex session with the complete managed
-prompt as the final native argument. Scope project trust to the assigned working
-directory and pass a resolved model only when one was requested:
+For a managed Codex job, start a fresh Codex session and pass the prompt as one
+native argument. When the prompt contains a line break, the launcher writes its
+exact UTF-8 text to a run-adjacent prompt file and passes a one-line instruction
+to read that file; this avoids Herdr's unsafe multiline argument encoding. Scope
+project trust to the assigned working directory and pass a resolved model only
+when one was requested:
 
 ```python
 import json
@@ -362,10 +365,10 @@ argv = [
 ]
 if resolved_model is not None:
     argv += ["-m", resolved_model]
-argv.append(prompt)
+argv.append(prompt)  # The launcher substitutes a file pointer for multiline text.
 ```
 
-Construct this as an argv array; the prompt is one argument. Do not follow this launch with
+Construct this as an argv array; do not shell-escape or flatten the prompt. Do not follow this launch with
 `herdr agent prompt`, `pane send-text`, or text keystrokes. Herdr may time out
 while waiting for an argv-started Codex session to become idle. Treat that
 timeout as an ambiguous start until `herdr agent get` confirms the owned
