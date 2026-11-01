@@ -23,6 +23,20 @@ design choices to calibrate from run outcomes, not measured optima.
 
 ## Admit the night
 
+Before proposing or dispatching a batch, refresh the status of every selected
+board card from the live board. For each card, compare its current status and
+acceptance criteria with the relevant repository state (including the target
+branch's commits and working tree) and the card's linked or retained artifacts.
+Record the read-only sources and observations with the batch proposal. Drop
+cards currently marked Done. If the board status, repository evidence, or
+artifacts disagree, or a source cannot be checked, mark that card for human
+reconciliation and do not dispatch it. Treat a board status as a current queue
+signal, not proof that its implementation or acceptance evidence exists; do not
+infer completion or absence from a branch name or an uninspected artifact path.
+This check is read-only and does not move or edit cards. Repeat it immediately
+before dispatch because the selection may have gone stale while the batch was
+being prepared.
+
 Before dispatch, record a `Night budget` block in `STATE.md`:
 
 ```text
