@@ -414,6 +414,27 @@ lose the selected jail boundary. Observe that command's actual foreground
 process, exit/result, and supported lifecycle; do not assume a native agent API
 owns a wrapper-launched process. This branch is unavailable from a jail lacking
 the host launcher/session.
+
+When an assignment explicitly authorizes edits to a normally protected jail
+path, do not send it through managed Herdr Jobs or weaken `editable_paths`.
+The coordinator must choose the separately authorized native route before
+launch. In the authorized Herdr host session, prepare a request JSON containing
+`schema_version`, unique `job_id` and `attempt_id`, the assigned worktree
+`cwd`, the attempt-specific `exit_path`, and an argv array beginning with
+`jail-agent --harness codex exec --skip-git-repo-check` (or the supported
+`codex-jail-agent`/`omp-train` alias). Invoke the bounded runner:
+
+```sh
+python3 scripts/native-jail-runner.py --request REQUEST.json
+```
+
+The runner accepts only that jail command family, executes without a shell in
+the declared cwd, and writes an attempt-bound exit record even when launch
+fails. The coordinator observes the foreground process and verifies the exit
+record, worker result, and requested checks; a zero exit alone is not task
+acceptance. This helper does not grant edit, commit, or deployment authority.
+Keep the jail-agent boundary and all task-specific authorization in force.
+
 Before spending a jail attempt, validate its staged inputs with the
 [jailed-task brief preflight](../templates/jail-task-brief.md) and its documented
 `check-brief --jail --bundle-root` command.
