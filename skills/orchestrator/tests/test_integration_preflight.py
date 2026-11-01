@@ -207,7 +207,7 @@ class IntegrationPreflightTests(unittest.TestCase):
         (self.run_dir / "workers.txt").write_text("\n".join(rows) + "\n")
 
     def managed_fixture(self, *, standards_findings=None, bundle_capture=False,
-                        capture_transform=None):
+                        capture_transform=None, extra_artifacts=0):
         """Collect actual job outputs, without assembling the preflight layout."""
         self.write_review(schema_version=2, standards_findings=standards_findings)
         evidence_path = self.task_dir / "review/review-evidence.json"
@@ -240,6 +240,8 @@ class IntegrationPreflightTests(unittest.TestCase):
                 shutil.copy2(self.task_dir / "review-response.md", output / "review-response.md")
             else:
                 shutil.copytree(self.task_dir / "review", output / "review")
+                for extra_index in range(extra_artifacts):
+                    (output / f"support-{extra_index}.txt").write_text("support\n")
                 if bundle_capture:
                     capture = output / "review/capture"
                     if capture_transform is not None:
@@ -740,6 +742,16 @@ class IntegrationPreflightTests(unittest.TestCase):
         captures = list(snapshot.glob("task-*/review/capture"))
         self.assertEqual(len(captures), 1)
         self.assertEqual(sum(path.is_file() for path in captures[0].rglob("*")), 301)
+
+    def test_managed_preflight_accepts_more_than_32_collected_artifacts(self):
+        roots, jobs = self.managed_fixture(extra_artifacts=32)
+        self.assertGreater(len(jobs[1]["collection"]["artifacts"]), 32)
+        for job in jobs:
+            shutil.rmtree(job["host_output"])
+
+        result = self.command("--managed-run", str(roots[0]), "--managed-run", str(roots[1]))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_managed_bundle_payload_still_requires_manifest_verification(self):
         roots, _ = self.managed_fixture(

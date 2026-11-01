@@ -428,7 +428,7 @@ the actual grade in coordinator-owned `coordinator-grades.json` in the run
 directory. A local-lane `finish` requires a coordinator grade; an `accepted`
 grade additionally requires a passing independent validator.
 
-Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–32 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
+Limits: 1–128 jobs, an expanded request of at most 8 MiB, and each final worker prompt of at most 100,000 UTF-8 bytes. JSON input files are bounded to 1 MiB. Preview and execution both validate the complete batch and every synthesized prompt before any launch. The run checkpoint has a separate 64 MiB limit. Receipts and collected metadata are each bounded to 256 KiB per job, with 1–256 relative artifact paths, 16 MiB per artifact and 64 MiB total per job.
 
 Every job must explicitly declare `writes_repository` as `true` or `false`.
 Existing manifests without this field are rejected; omission never means

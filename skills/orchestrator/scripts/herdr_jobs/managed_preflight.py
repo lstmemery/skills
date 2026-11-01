@@ -56,8 +56,9 @@ def collected_files(root, request_id, job):
     if receipt["outcome"] != "complete" or receipt["unresolved"]:
         raise identity_error
     artifacts = collection["artifacts"]
-    if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 32:
-        raise ReviewEvidenceError("managed collection needs 1–32 artifacts")
+    if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= records.MAX_RECEIPT_ARTIFACTS:
+        raise ReviewEvidenceError(
+            f"managed collection needs 1–{records.MAX_RECEIPT_ARTIFACTS} artifacts")
     files = {}
     hashes = []
     for index, item in enumerate(artifacts):
