@@ -1554,6 +1554,219 @@ class JobsTest(unittest.TestCase):
         self.assertIn("not settled", result["finish"]["jobs"]["job0"]["issue"])
         self.assertFalse(any(event["action"] == "workspace_close" for event in self.events()))
 
+    def test_finish_cancels_never_launched_job_without_affecting_active_job(self):
+        self.write_jobs(2, concurrency=1)
+        self.configure(jobs={"job0": "working"})
+        self.call()
+        before = self.state()
+        self.assertEqual(before["jobs"][1]["phase"], "pending")
+        active_lease = before["jobs"][0]["admission_lease_id"]
+
+        code, result = self.call("finish", coordinator_disposition_override="job1=cancelled",
+                                 coordinator_override_reason="Offline fixture job superseded.")
+
+        self.assertEqual(code, 10, result)
+        self.assertFalse(result["finish_complete"])
+        self.assertTrue(result["finish"]["jobs"]["job1"]["finished"])
+        cancelled = self.state()["jobs"][1]
+        self.assertEqual(cancelled["worker_disposition"], "cancelled")
+        self.assertTrue(cancelled["settled"])
+        self.assertTrue(cancelled["workspace_closed"])
+        output = Path(cancelled["host_output"])
+        self.assertFalse((output / "receipt.json").exists())
+        self.assertFalse((output / "result.json").exists())
+        self.assertFalse(any(e["job_id"] == "job1" for e in self.events()))
+
+        self.assertEqual([lease["lease_id"] for lease in AdmissionStore(self.admission_dir).status()["leases"]],
+                         [active_lease])
+        self.call("resume", wait_seconds="0.1")
+        self.assertEqual(self.state()["jobs"][1]["worker_disposition"], "cancelled")
+        self.assertFalse(any(e["job_id"] == "job1" for e in self.events()))
+
+    def test_finish_cancels_an_inactive_launched_job_without_receipt(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["jobs"][0]["worker_result"] = {"task_id": "offline-cancelled", "assignment_revision": 1}
+        self.manifest.write_text(json.dumps(manifest))
+        self.configure(jobs={"job0": "missing"})
+        self.call()
+        job = self.state()["jobs"][0]
+        output = Path(job["host_output"])
+        result_before = (output / "result.json").read_bytes()
+        self.assertFalse((output / "receipt.json").exists())
+        self.configure(observation={"state": "idle", "identity_verified": True})
+
+        code, result = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                 coordinator_override_reason="Offline interrupted session superseded.")
+
+        self.assertEqual((code, result["finish_complete"]), (10, True), result)
+        self.assertEqual(result["finish"]["jobs"]["job0"]["worker_result_validation"],
+                         "cancelled_without_receipt")
+        self.assertIn("cancellation", result["next_action"]["message"])
+        self.assertEqual((output / "result.json").read_bytes(), result_before)
+        self.assertFalse((output / "receipt.json").exists())
+        disposition = json.loads((output / "disposition.json").read_text())
+        self.assertEqual(disposition["disposition"], "cancelled")
+        self.assertIn("superseded", disposition["evidence"])
+        self.assertEqual(AdmissionStore(self.admission_dir).status()["active_count"], 0)
+        self.assertTrue(self.call("finish")[1]["finish_complete"])
+        self.assertEqual(sum(e["action"] == "workspace_close" for e in self.events()), 1)
+        self.call("resume")
+        self.assertEqual(self.state()["jobs"][0]["worker_disposition"], "cancelled")
+
+    def test_first_cancellation_accepts_verified_external_workspace_retirement_without_receipt(self):
+        self.configure(jobs={"job0": "working"})
+        self.call()
+        before = self.state()["jobs"][0]
+        self.assertIsNone(before["pending_effect"])
+        self.assertFalse((Path(before["host_output"]) / "receipt.json").exists())
+        (self.root / "closed-workspaces.json").write_text(json.dumps([before["workspace_id"]]))
+        self.configure(observation_error="Offline owned pane no longer exists.")
+        self.call("status")
+        retired = self.state()["jobs"][0]
+        self.assertTrue(retired["workspace_closed"])
+        self.assertEqual(retired["issue_code"], "external_workspace_closed")
+        self.assertIsNone(retired["worker_disposition"])
+        self.assertEqual(AdmissionStore(self.admission_dir).status()["leases"], [])
+        events_before = len(self.events())
+
+        code, result = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                 coordinator_override_reason="Offline retired attempt superseded.")
+
+        self.assertEqual((code, result["finish_complete"]), (10, True), result)
+        cancelled = self.state()["jobs"][0]
+        self.assertEqual(cancelled["worker_disposition"], "cancelled")
+        self.assertTrue(cancelled["settled"])
+        self.assertIsNone(cancelled["collection"])
+        self.assertTrue(any(item["action"] == "external_workspace_closed" for item in cancelled["history"]))
+        self.assertIn("retired", next(item["evidence"] for item in cancelled["history"]
+                                     if item["action"] == "coordinator_cancelled"))
+        self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS | {"observe", "workspace_close"}
+                             for event in self.events()[events_before:]))
+        self.assertTrue(self.call("finish")[1]["finish_complete"])
+        self.call("resume")
+        self.assertEqual(self.state()["jobs"][0]["worker_disposition"], "cancelled")
+        self.assertFalse((Path(cancelled["host_output"]) / "receipt.json").exists())
+        self.assertFalse((Path(cancelled["host_output"]) / "result.json").exists())
+
+    def test_first_cancellation_refuses_retired_jobs_with_unresolved_effects_or_mismatched_evidence(self):
+        for mode in ("unresolved_effect", "mismatched_attempt"):
+            with self.subTest(mode=mode):
+                self.run = self.root / mode
+                before = self.manual_continuation_fixture(
+                    phase="ready", pending_action="start" if mode == "unresolved_effect" else None)
+                (Path(before["host_output"]) / "receipt.json").unlink()
+                (self.root / "closed-workspaces.json").write_text(json.dumps([before["workspace_id"]]))
+                self.configure(observation_error="Offline owned pane no longer exists.")
+                self.call("status")
+                state = self.state()
+                job = state["jobs"][0]
+                self.assertTrue(job["workspace_closed"])
+                if mode == "mismatched_attempt":
+                    retirement = next(item for item in job["history"] if item["action"] == "external_workspace_closed")
+                    retirement["attempt_id"] = "a" * 32
+                    (self.run / "state.json").write_bytes(encoded(state))
+                events_before = len(self.events())
+
+                code, result = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                         coordinator_override_reason="Offline refusal check.")
+
+                self.assertIn(code, (6, 10), result)
+                self.assertFalse(result["finish_complete"], result)
+                after = self.state()["jobs"][0]
+                self.assertIsNone(after["worker_disposition"])
+                self.assertFalse(after["settled"])
+                self.assertEqual(after["pending_effect"], before["pending_effect"])
+                self.assertFalse(any(event["action"] in self.TAKEOVER_EFFECT_ACTIONS | {"workspace_close"}
+                                     for event in self.events()[events_before:]))
+
+    def test_cancelled_workspace_close_retry_rechecks_worker_activity(self):
+        self.configure(jobs={"job0": "missing"})
+        self.call()
+        self.configure(jobs={"job0": "missing"}, close_workspace_error="Offline close interrupted.")
+        code, first = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                coordinator_override_reason="Offline superseded job.")
+        self.assertFalse(first["finish_complete"], first)
+        self.assertEqual(self.state()["jobs"][0]["pending_effect"]["action"], "workspace_close")
+        closes_before = sum(e["action"] == "workspace_close" for e in self.events())
+        self.configure(observation={"state": "working", "identity_verified": True, "prompt_verified": True})
+
+        code, retry = self.call("finish")
+
+        self.assertEqual((code, retry["finish_complete"]), (10, False), retry)
+        self.assertFalse(self.state()["jobs"][0]["workspace_closed"])
+        self.assertEqual(sum(e["action"] == "workspace_close" for e in self.events()), closes_before)
+        self.configure(jobs={"job0": "missing"})
+        self.assertTrue(self.call("finish")[1]["finish_complete"])
+
+    def test_cancellation_preserves_active_unverified_and_unknown_effect_leases(self):
+        for mode in ("working", "unverified", "unknown_effect", "foreign_lease"):
+            with self.subTest(mode=mode):
+                self.run = self.root / mode
+                self.configure(jobs={"job0": "working"})
+                self.call()
+                job = self.state()["jobs"][0]
+                store = AdmissionStore(self.admission_dir)
+                if mode == "unverified":
+                    self.configure(observation={"state": "idle", "identity_verified": False})
+                elif mode == "unknown_effect":
+                    self.configure(jobs={"job0": "missing"})
+                    store.record_unknown_effect(job["admission_lease_id"], {
+                        "action": "start", "status": "unknown", "pane_id": job["pane_id"],
+                        "agent_name": job["agent_name"], "observation": {"state": "unknown",
+                        "identity_verified": False, "prompt_verified": False}})
+                elif mode == "foreign_lease":
+                    self.configure(jobs={"job0": "missing"})
+                    store.release(job["admission_lease_id"])
+                    store.acquire(job["provider"], job["admission_model"], job["admission_lease_id"],
+                                  cap=4, run_id="offline-other-run")
+                before = store.status()["leases"]
+                closes = sum(e["action"] == "workspace_close" for e in self.events())
+
+                code, result = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                         coordinator_override_reason="Offline refusal check.")
+
+                if mode in ("unknown_effect", "foreign_lease"):
+                    self.assertEqual(code, 3, result)
+                else:
+                    self.assertEqual((code, result["finish_complete"]), (10, False), result)
+                self.assertEqual(store.status()["leases"], before)
+                self.assertIsNone(self.state()["jobs"][0]["worker_disposition"])
+                self.assertEqual(sum(e["action"] == "workspace_close" for e in self.events()), closes)
+                if mode != "unknown_effect":
+                    store.release(job["admission_lease_id"])
+                else:
+                    store.release(job["admission_lease_id"], reconciliation_evidence="Offline fixture cleanup.")
+
+    def test_cancellation_does_not_replace_a_collected_worker_result(self):
+        self.prepare_worker_outcome("ready")
+        code, result = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                 coordinator_override_reason="Offline refusal check.")
+        self.assertEqual((code, result["finish_complete"]), (10, False), result)
+        self.assertIn("collected", result["finish"]["jobs"]["job0"]["issue"])
+        self.assertFalse(self.state()["jobs"][0]["workspace_closed"])
+        self.assertTrue(self.call("finish")[1]["finish_complete"])
+
+    def test_cancelled_writer_retains_in_use_worktree_then_releases_abandoned_candidate(self):
+        record, _ = self.configure_repository_writer(merge_candidate=False)
+        self.configure(jobs={"job0": "missing"})
+        self.call()
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=record["path"])
+        try:
+            code, result = self.call("finish", coordinator_disposition_override="job0=cancelled",
+                                     coordinator_override_reason="Offline interrupted writer abandoned.")
+            self.assertEqual((code, result["finish_complete"]), (10, True), result)
+            outcome = result["finish"]["jobs"]["job0"]
+            self.assertFalse(outcome["repository_worktree_released"])
+            self.assertIn("in use", outcome["repository_worktree_retained_reason"])
+            self.assertTrue(Path(record["path"]).is_dir())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        code, result = self.call("finish")
+        self.assertEqual((code, result["finish_complete"]), (10, True), result)
+        self.assertTrue(result["finish"]["jobs"]["job0"]["repository_worktree_released"])
+        self.assertFalse(Path(record["path"]).exists())
+
     def manual_continuation_fixture(self, phase="moved", pending_action=None):
         self.configure(jobs={"job0": "working"})
         self.call()
@@ -1755,6 +1968,17 @@ class JobsTest(unittest.TestCase):
         self.assertEqual((code, result["batch_state"]), (10, "partial"))
         self.assertIn("dialog", result["jobs"][0]["issue"])
         self.assertEqual(sum(event["action"] == "prompt" for event in self.events()), 0)
+
+    def test_completed_pi_job_releases_its_provider_prefixed_model_lease_on_initial_run(self):
+        self.write_jobs(1, runtime="pi", provider="codex", model="codex/gpt-6-luna", effort="low")
+
+        code, result = self.call()
+
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["collection_complete"])
+        self.assertTrue(result["jobs"][0]["settled"])
+        self.assertFalse(result["jobs"][0]["admission_acquired"])
+        self.assertEqual(AdmissionStore(self.admission_dir).status()["leases"], [])
 
     def test_pi_provider_override_without_model_is_rejected_in_manifest_validation(self):
         self.write_jobs(1, runtime="pi", provider="llama-local")

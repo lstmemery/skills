@@ -128,6 +128,38 @@ flag and a non-empty `--coordinator-override-reason`. The reason is recorded in
 the run checkpoint and disposition evidence. A saved override remains in force
 for later `finish` retries.
 
+To abandon a job that has no collected receipt, use `JOB_ID=cancelled` with a
+reason. This works for pending jobs that never launched and for interrupted
+launched jobs whose exact owned worker is freshly verified idle, done, or exited.
+It also accepts an already closed workspace with a saved
+`external_workspace_closed` retirement record matching the job's exact attempt,
+pane, and workspace. This records cancellation without querying the missing pane
+again; unresolved external effects still prevent cancellation.
+It requires no `worker_result` declaration. Active or unverified workers,
+unresolved external effects, ambiguous lease ownership, and jobs with a collected
+receipt are refused. Cancellation does not stop a worker; reconcile or stop it
+through the authorized runtime path first. Normal collected-result validation
+and completed/blocked/failed overrides are unchanged.
+
+```sh
+python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR \
+  --coordinator-disposition-override job-pending=cancelled \
+  --coordinator-override-reason "Superseded by a new assignment; abandon this attempt."
+```
+
+Cancellation records a terminal `cancelled` disposition and audit evidence,
+without creating a worker result or receipt. Jobs declaring `worker_result` also
+get a `disposition.json` for their assigned task/revision. The validation status
+is `cancelled_without_receipt`; acceptance remains pending and the batch can
+still report `partial` because no worker result was collected. Later resume
+calls never relaunch a cancelled job. Finish retries retain the saved reason
+and recheck worker inactivity before retrying an open workspace close.
+Cancellation explicitly abandons a repository candidate, so it permits releasing
+an unmerged or dirty worktree with the recorded reason. Detected active use or
+unverified worktree lease identity still retains that lease; retry finish after
+the use ends. A never-launched job has no workspace to close, and cancelling it
+does not release another job's provider slot.
+
 ```sh
 python3 scripts/herdr-jobs.py finish --run-dir RUN_DIR \
   --coordinator-disposition-override job-1=completed \
@@ -459,7 +491,10 @@ Omit `--expected-base` only when the assignment does not pin a base. The record 
 `git_common_dir`, and `base_commit`. A managed writer preflight confirms the
 current Treehouse lease ID and holder, then verifies that the canonical cwd is a
 registered linked worktree of the recorded repository and that `HEAD` still
-matches `base_commit`. It does this before the first pane is created. Preview
+matches `base_commit`. It does this before the first pane is created and while
+resuming that writer's prelaunch phases. Add and resume skip the base check for
+already submitted writers, whose own commits may have advanced `HEAD`; pending
+writers still require their own recorded base. Preview
 checks the explicit writer intent, record shape, and cwd pairing offline; it
 does not claim that the live lease is valid. Every writer record is verified
 before the first pane is created.

@@ -1,4 +1,6 @@
 import ast
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,8 @@ sys.path.insert(0, str(PACKAGE / "scripts"))
 from herdr_jobs.records import JobError, digest, is_commit_id, prepare, repository_worktree_record
 from herdr_jobs.transport import Deadline, NativeTransport
 from herdr_jobs.worktrees import verify_repository_worktree
+from herdr_jobs.cli import main
+from fake_host import FakeHost
 
 
 class WorktreeAllocationTest(unittest.TestCase):
@@ -202,6 +206,79 @@ class WorktreeAllocationTest(unittest.TestCase):
             result = adapter.preflight({"jobs": [job]})
 
         self.assertEqual(result["session_id"], "fixture-socket")
+
+    def test_add_and_resume_after_submitted_writer_commits(self):
+        repo, worktree, base = self.git_fixture()
+        _, status = self.treehouse_records(worktree)
+        record = self.repository_worktree_record(worktree, repo, base)
+        task = self.root / "task.md"
+        task.write_text("Offline fixture task.\n")
+        writer = {"job_id": "writer", "name": "Offline writer", "task_kind": "ordinary",
+                  "task_file": str(task), "cwd": str(worktree), "writes_repository": True,
+                  "editable_paths": [str(worktree / "fixture.txt")],
+                  "repository_worktree": record, "output_expectation": "Fixture output.",
+                  "override": {"runtime": "codex", "model": "gpt-6-luna", "effort": "low",
+                               "instruction": "Use Codex gpt-6-luna for this offline fixture."}}
+        reader = {**writer, "job_id": "reader", "name": "Offline reader",
+                  "writes_repository": False}
+        reader.pop("repository_worktree")
+        reader.pop("editable_paths")
+        adapter = self.writer_adapter()
+        original_raw = adapter.raw
+
+        def raw(argv):
+            if argv[:2] == ["orchestrator", "models"]:
+                return b'{"models":[{"id":"gpt-6-luna"}]}'
+            return original_raw(argv)
+
+        adapter.raw = raw
+
+        class PreflightHost(FakeHost):
+            def preflight(self, request, existing=None, status_only=False):
+                adapter.deadline = self.deadline
+                return adapter.preflight(request, existing, status_only)
+
+        for operation in ("add", "resume"):
+            with self.subTest(operation=operation):
+                run = self.root / operation
+                fixture = self.root / f"{operation}-host.json"
+                fixture.write_text(json.dumps({"request_id": "offline-writers",
+                                               "jobs": {"writer": "working"}}))
+                manifest = self.root / f"{operation}-manifest.json"
+                manifest.write_text(json.dumps({"schema_version": 1, "request_id": "offline-writers",
+                    "concurrency": 1, "jobs": [writer, reader] if operation == "resume" else [writer]}))
+                environment = {"PATH": f"{self.bin}:{os.defpath}", "HOME": str(self.home),
+                               "CODEX_HOME": str(self.home / ".codex"), "STATUS_OUTPUT": status,
+                               "ORCHESTRATOR_ADMISSION_DIR": str(self.root / f"{operation}-admission"),
+                               "GIT_CALLS": str(self.git_calls), "REAL_GIT": self.real_git}
+
+                def call(action):
+                    argv = [action, "--run-dir", str(run), "--host-contract", str(fixture),
+                            "--wait-seconds", "1"]
+                    if action in ("run", "add"):
+                        argv += ["--manifest", str(manifest), "--policy", str(PACKAGE / "launch-policy.json")]
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        code = main(argv, transport_factory=PreflightHost)
+                    return code, json.loads(output.getvalue())
+
+                with patch.dict(os.environ, environment):
+                    self.git("-C", str(worktree), "reset", "--hard", base)
+                    _, initial = call("run")
+                    self.assertIn("jobs", initial, initial)
+                    self.assertEqual(initial["jobs"][0]["phase"], "submitted")
+                    (worktree / "fixture.txt").write_text(f"committed {operation}\n")
+                    self.git("-C", str(worktree), "commit", "-am", "offline writer commit")
+                    fixture.write_text(json.dumps({"request_id": "offline-writers"}))
+                    saved = json.loads((run / "state.json").read_text())
+                    FakeHost(fixture, Deadline(1)).receipt(saved["jobs"][0], "normal")
+                    if operation == "add":
+                        manifest.write_text(json.dumps({"schema_version": 1, "request_id": "offline-writers",
+                                                       "concurrency": 1, "jobs": [reader]}))
+                    code, result = call(operation)
+                self.assertEqual(code, 0, result)
+                self.assertTrue(result["collection_complete"], result)
+                self.assertEqual([job["phase"] for job in result["jobs"]], ["submitted", "submitted"])
 
     def test_legacy_lease_with_git_prefix_keeps_treehouse_verification(self):
         repo, worktree, base = self.git_fixture()
