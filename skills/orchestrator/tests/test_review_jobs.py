@@ -337,6 +337,59 @@ class ReviewJobsTests(unittest.TestCase):
 
         self.assertIn("candidate worktree Git common directory", self.blocked_review())
 
+    def admission(self, operation, *args):
+        command = [sys.executable, str(PACKAGE / "scripts/herdr-admission.py"), operation, *args]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def review_waiting_for_capacity(self):
+        main, linked = self.linked_layout()
+        self.write_candidate(repo=str(main))
+        code, result = self.call(jobs=[self.author])
+        self.assertEqual(code, 0, result)
+        policy = json.loads((PACKAGE / "launch-policy.json").read_text())
+        cap = policy["provider_admission"]["provider_caps"]["codex"]
+        for index in range(cap):
+            admitted = self.admission("acquire", "--provider", "codex", "--model", "fixture-model",
+                                      "--lease-id", f"fixture-capacity-{index}")
+            self.assertTrue(admitted["admitted"])
+        _, result = self.call("add", jobs=[{"job_id": "reviewer", "review_of": "author"}])
+        reviewer = result["jobs"][1]
+        self.assertIsNone(reviewer["pane_id"])
+        self.assertEqual(reviewer["admission_wait"]["reason"], "capacity")
+        state = json.loads((self.run / "state.json").read_text())
+        self.assertEqual(state["jobs"][1]["review_binding"]["worktree_path"], str(linked))
+        self.admission("release", "--lease-id", "fixture-capacity-0")
+        return main, linked, cap
+
+    def assert_capacity_resume_refuses_review(self, message, cap):
+        _, result = self.call("resume")
+        reviewer = result["jobs"][1]
+        self.assertIsNone(reviewer["pane_id"])
+        self.assertFalse(reviewer["admission_acquired"])
+        self.assertIn("cannot pin independent review", reviewer["issue"])
+        self.assertIn(message, reviewer["issue"])
+        self.assertFalse((self.root / "prompt-reviewer.txt").exists())
+        events = json.loads((self.root / "events.json").read_text())
+        self.assertFalse(any(event["job_id"] == "reviewer" for event in events))
+        self.assertEqual(self.admission("status")["active_count"], cap - 1)
+
+    def test_capacity_resume_refuses_foreign_clone_at_cached_worktree(self):
+        main, linked, cap = self.review_waiting_for_capacity()
+        linked.rename(self.root / "original candidate")
+        self.git("clone", "--no-hardlinks", "--branch", "candidate", str(main), str(linked))
+        self.assertEqual(self.git("-C", str(linked), "rev-parse", "HEAD"), self.head)
+
+        self.assert_capacity_resume_refuses_review("candidate worktree Git common directory", cap)
+
+    def test_capacity_resume_refuses_second_holder_of_cached_candidate_branch(self):
+        main, _, cap = self.review_waiting_for_capacity()
+        self.git("-C", str(main), "worktree", "add", "--force",
+                 str(self.root / "second holder"), "candidate")
+
+        self.assert_capacity_resume_refuses_review("checked out in several worktrees", cap)
+
     def test_resume_repins_legacy_review_binding_from_the_validated_candidate(self):
         main, linked = self.linked_layout()
         fixture = json.loads(self.fixture.read_text())
