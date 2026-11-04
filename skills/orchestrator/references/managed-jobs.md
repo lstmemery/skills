@@ -231,7 +231,7 @@ See the runnable [example manifest](../examples/manifest.json). UTF-8 JSON rejec
 | Record | Required fields | Optional fields |
 |---|---|---|
 | Manifest | `schema_version: 1`, `request_id: string`, `jobs: array` | `concurrency: integer`, `retry_override` |
-| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator`, `local_lane_scope`, `review_of`, `review_kind`, `prior_head` |
+| Job | `job_id`, `name`, `task_kind`, `task_file`, `cwd`, `output_expectation`, `writes_repository: boolean` | `override`, `repository_worktree`, `worker_result`, `task_class`, `model_level`, `model_fallback`, `worker_mode`, `protected_paths`, `editable_paths`, `acceptance_tests`, `required_context`, `tracker_writes`, `local_lane`, `independent_validator`, `local_lane_scope`, `review_of`, `review_kind`, `prior_head`, `candidate_branch`, `structured_brief` |
 | Override | `instruction: string` | `runtime: string`, `model: string`, `provider: string`, `effort: string` |
 | Worker result | `task_id`, `assignment_revision` | none |
 
@@ -361,6 +361,12 @@ also provide `required_context` entries with at least one test and one fixture;
 the helper resolves and checks each entry before the jail launcher runs, and
 the launcher repeats that check from its launch request.
 
+A task file that is a structured worker brief must carry a `json worker-brief`
+declaration matching the job’s identity, `cwd`, repository binding, and path
+scope; see [pre-launch brief validation](workers.md#pre-launch-brief-validation).
+A mismatch, leftover, or duplicate instruction is `invalid_input` before any
+run state or launch effect.
+
 Offline `run --preview` and `add --preview` include per-job
 `edit_scope_warnings` when local symlinks in declared editable paths or literal
 task path references resolve outside the declared editable locations. The
@@ -489,6 +495,12 @@ repository-writing job sets it to `true`, must include `repository_worktree`,
 must declare at least one `editable_paths` entry, and must set `cwd` to that
 record's `path`. An empty or omitted editable scope is rejected during
 preparation, before launch. A record on a `false` job is rejected.
+An optional `candidate_branch` names the branch the writer will commit to; it
+must be a plain ASCII branch name that `git check-ref-format --branch` accepts
+and is rejected on a non-writer. A job with `candidate_branch` requires a
+structured worker brief, and a brief that declares a repository requires
+`candidate_branch`. Optional `structured_brief: true` requires a structured
+worker brief on any job; see [pre-launch brief validation](workers.md#pre-launch-brief-validation).
 Produce a writer record with:
 
 ```sh

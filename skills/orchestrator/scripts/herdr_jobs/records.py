@@ -149,6 +149,18 @@ def is_commit_id(value):
             and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is not None)
 
 
+# `git check-ref-format --branch` rules for the plain names a worker may commit
+# to: no leading dash, no `HEAD`, no component that starts with a dot or ends
+# with `.lock`, no `..`, `//`, `@{`, or trailing `/` or `.`.
+BRANCH_NAME = re.compile(
+    r"^(?!-)(?!HEAD$)(?!/)(?!.*(?:\.\.|//|@\{|\.lock(?:/|$)|/$|\.$|(?:^|/)\.))"
+    r"[A-Za-z0-9._/-]{1,255}$")
+
+
+def is_branch_name(value):
+    return isinstance(value, str) and BRANCH_NAME.fullmatch(value) is not None
+
+
 def identifier(value, label):
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value):
         invalid(f"{label}: expected 1–64 letters, digits, underscores or hyphens")
@@ -615,6 +627,69 @@ def ensure_local_lane_admitted(local_config, task_class, local_lane_scope, job_i
     return task_class, local_scope
 
 
+JOB_REQUIRED_FIELDS = ("job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
+                       "writes_repository")
+JOB_OPTIONAL_FIELDS = (
+    "override", "repository_worktree", "worker_result", "task_class",
+    "model_level", "model_fallback", "escalation", "worker_mode", "mode",
+    "protected_paths", "editable_paths", "acceptance_tests", "required_context",
+    "tracker_writes", "local_lane", "independent_validator", "local_lane_scope",
+    "prompt_transport", "dependencies", "mutation_targets", "remote_authority",
+    "review_of", "review_kind", "prior_head", "routing_assessment",
+    "candidate_branch", "structured_brief")
+
+
+def job_path_scope(job, job_id, base):
+    """Normalize the worker mode and path scope a job assigns to its worker.
+
+    Shared by the launch boundary and the direct brief check so both compare a
+    brief with the same assignment.
+    """
+    if "worker_mode" in job and "mode" in job and job["worker_mode"] != job["mode"]:
+        invalid(f"{job_id}: worker_mode and mode disagree")
+    selected_worker_mode = worker_mode(job.get("worker_mode", job.get("mode", "literal")))
+    acceptance_tests = path_list(job.get("acceptance_tests"), f"{job_id}.acceptance_tests")
+    editable_paths = path_list(job.get("editable_paths"), f"{job_id}.editable_paths")
+    if job["writes_repository"] and not editable_paths:
+        invalid(f"{job_id}: writes_repository=true requires non-empty editable_paths")
+    protected_paths = validate_protected_paths(
+        protected_paths_record(job.get("protected_paths"), acceptance_tests), editable_paths,
+        base=base,
+    )
+    return {"worker_mode": selected_worker_mode, "acceptance_tests": acceptance_tests,
+            "editable_paths": editable_paths, "protected_paths": protected_paths}
+
+
+def job_repository_binding(job, job_id, base):
+    """Return a job's working directory after checking its repository binding.
+
+    Also checks the brief-declaration requirement, which the repository
+    binding (``candidate_branch``) can impose.
+    """
+    cwd = absolute(job["cwd"], base)
+    if job["writes_repository"]:
+        repository_worktree_record(job["repository_worktree"])
+        try:
+            cwd = str(Path(cwd).resolve(strict=False))
+            recorded_path = str(Path(job["repository_worktree"]["path"]).resolve(strict=False))
+        except (OSError, RuntimeError):
+            invalid(f"{job_id}: repository worktree path cannot be canonicalized")
+        if cwd != recorded_path:
+            invalid(f"{job_id}: cwd must equal repository_worktree.path")
+    if "candidate_branch" in job:
+        if not job["writes_repository"]:
+            invalid(f"{job_id}: candidate_branch requires writes_repository=true")
+        if not is_branch_name(job["candidate_branch"]):
+            invalid(f"{job_id}: candidate_branch must be a plain Git branch name")
+    if "structured_brief" in job:
+        if type(job["structured_brief"]) is not bool:
+            invalid(f"{job_id}: structured_brief must be true or false")
+        if not job["structured_brief"] and "candidate_branch" in job:
+            invalid(f"{job_id}: candidate_branch requires a structured brief; "
+                    "structured_brief cannot be false")
+    return cwd
+
+
 def prepare(manifest_path, policy_path, existing_jobs=()):
     # Defer to break the records.py -> model_ladder.py -> records.py import cycle.
     from .model_ladder import (HARNESS_ALIASES, billing_pool, complete_tuple,
@@ -624,6 +699,8 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
 
     # Also deferred for records.py -> routing_decision.py -> records.py.
     from .routing_decision import decision_for
+    # Also deferred for records.py -> worker_brief.py -> records.py.
+    from .worker_brief import job_brief_errors
 
     manifest_path = Path(manifest_path).absolute()
     policy = policy_record(load_json(policy_path))
@@ -648,14 +725,7 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
     seen = set()
     worker_results = set()
     for job in expand_jobs(manifest["jobs"], existing_jobs):
-        fields(job, ["job_id", "name", "task_kind", "task_file", "cwd", "output_expectation",
-                     "writes_repository"],
-                ["override", "repository_worktree", "worker_result", "task_class",
-                "model_level", "model_fallback", "escalation", "worker_mode", "mode",
-                "protected_paths", "editable_paths", "acceptance_tests", "required_context",
-                "tracker_writes", "local_lane", "independent_validator", "local_lane_scope",
-                "prompt_transport", "dependencies", "mutation_targets", "remote_authority",
-                "review_of", "review_kind", "prior_head", "routing_assessment"], "job")
+        fields(job, JOB_REQUIRED_FIELDS, JOB_OPTIONAL_FIELDS, "job")
         job_id = identifier(job["job_id"], "job_id")
         validate_writer_intent(job, job_id)
         brief_contract_record(job)
@@ -664,22 +734,13 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
         seen.add(job_id)
         text(job["name"], "name", 200)
         text(job["output_expectation"], "output_expectation", 10000)
-        if "worker_mode" in job and "mode" in job and job["worker_mode"] != job["mode"]:
-            invalid(f"{job_id}: worker_mode and mode disagree")
-        selected_worker_mode = worker_mode(job.get("worker_mode", job.get("mode", "literal")))
-        acceptance_tests = path_list(job.get("acceptance_tests"), f"{job_id}.acceptance_tests")
         local_lane_opt_in = job.get("local_lane", False)
         if type(local_lane_opt_in) is not bool:
             invalid(f"{job_id}.local_lane must be explicitly true or false")
         independent_validator = (independent_validator_record(job["independent_validator"])
                                 if "independent_validator" in job else None)
-        editable_paths = path_list(job.get("editable_paths"), f"{job_id}.editable_paths")
-        if job["writes_repository"] and not editable_paths:
-            invalid(f"{job_id}: writes_repository=true requires non-empty editable_paths")
-        protected_paths = validate_protected_paths(
-            protected_paths_record(job.get("protected_paths"), acceptance_tests), editable_paths,
-            base=manifest_path.parent,
-        )
+        scope = job_path_scope(job, job_id, manifest_path.parent)
+        acceptance_tests = scope["acceptance_tests"]
         if not isinstance(job["task_kind"], str) or job["task_kind"] not in policy["routes"]:
             invalid("task_kind must be ordinary, deep_research, or shopping")
         task_class = identifier(job["task_class"], "task_class") if "task_class" in job else None
@@ -859,16 +920,7 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
         text(task, "task")
         if "review_of" not in job:
             validate_task_output_paths(task, job_id, task_path)
-        cwd = absolute(job["cwd"], manifest_path.parent)
-        if job["writes_repository"]:
-            repository_worktree_record(job["repository_worktree"])
-            try:
-                cwd = str(Path(cwd).resolve(strict=False))
-                recorded_path = str(Path(job["repository_worktree"]["path"]).resolve(strict=False))
-            except (OSError, RuntimeError):
-                invalid(f"{job_id}: repository worktree path cannot be canonicalized")
-            if cwd != recorded_path:
-                invalid(f"{job_id}: cwd must equal repository_worktree.path")
+        cwd = job_repository_binding(job, job_id, manifest_path.parent)
         if "worker_result" in job:
             worker_result_record(job["worker_result"])
             identity = (job["worker_result"]["task_id"], job["worker_result"]["assignment_revision"])
@@ -888,10 +940,7 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
                         "task": task, "route": route, "model": model,
                         "prompt_transport": prompt_transport,
                         "provider": provider, "kind": policy["runtime_kinds"][runtime],
-                        "worker_mode": selected_worker_mode,
-                        "acceptance_tests": acceptance_tests,
-                        "editable_paths": editable_paths,
-                        "protected_paths": protected_paths}
+                        **scope}
         if required_context is not None:
             prepared_job["required_context"] = required_context
         if independent_validator is not None:
@@ -909,6 +958,10 @@ def prepare(manifest_path, policy_path, existing_jobs=()):
                 task_class, timeout_policy["default"])
         for error in brief_contract_errors(prepared_job):
             invalid(f"{job_id}: {error}")
+        brief_errors = job_brief_errors(prepared_job)
+        if brief_errors:
+            invalid(f"{job_id}: worker brief {task_path} must be corrected before launch: "
+                    + "; ".join(brief_errors))
         if selection is not None and explicit and not local_lane_opt_in:
             prepared_job["override"] = requested_override
         prepared_job["requested_override"] = requested_override
