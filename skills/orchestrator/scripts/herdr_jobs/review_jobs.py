@@ -74,6 +74,53 @@ def waiting_reason(state, spec):
     return None
 
 
+def worktrees(repo):
+    entries, current = [], None
+    for field in git(repo, "worktree", "list", "--porcelain", "-z").split("\0"):
+        if not field:
+            current = None
+            continue
+        key, _, value = field.partition(" ")
+        if key == "worktree":
+            current = {"path": value}
+            entries.append(current)
+        elif current is not None:
+            current[key] = value
+    return entries
+
+
+def resolve_repository(candidate, author_spec):
+    """Resolve the candidate record to exactly one repository and worktree, or refuse."""
+    declared = candidate["repo"]
+    if not Path(declared).is_absolute():
+        records.invalid("candidate.repo must be an absolute repository or worktree path")
+    if not Path(declared).is_dir():
+        records.invalid(f"candidate.repo does not exist: {declared}")
+    common = Path(git(declared, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    leased = author_spec.get("repository_worktree")
+    if leased is None or Path(leased["git_common_dir"]).resolve() != common:
+        records.invalid("candidate.repo does not match the author's leased repository")
+    entries = worktrees(declared)
+    if not entries:
+        records.invalid("candidate repository has no worktrees")
+    main = entries[0]
+    repo_path = common if "bare" in main else Path(main["path"]).resolve()
+    branch_ref = f"refs/heads/{candidate['branch']}"
+    holders = [entry for entry in entries if entry.get("branch") == branch_ref]
+    if len(holders) != 1:
+        problem = "is not checked out in any worktree" if not holders else "is checked out in several worktrees"
+        records.invalid(f"candidate branch {candidate['branch']} {problem}; repository is ambiguous")
+    worktree = Path(holders[0]["path"]).resolve()
+    if not worktree.is_dir() or "prunable" in holders[0]:
+        records.invalid(f"candidate worktree is missing: {worktree}")
+    if worktree != Path(leased["path"]).resolve():
+        records.invalid("candidate branch worktree is not the author's leased worktree")
+    worktree_common = Path(git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    if worktree_common != common:
+        records.invalid("candidate worktree Git common directory does not match the candidate repository")
+    return {"repo_path": str(repo_path), "worktree_path": str(worktree), "git_common_dir": str(common)}
+
+
 def pin_candidate(root, state, spec):
     author = author_job(state, spec)
     files = collected_files(Path(root), state["request"]["request_id"], author)
@@ -88,10 +135,11 @@ def pin_candidate(root, state, spec):
     if any(item["path"] not in files for item in result["artifacts"]):
         records.invalid("author collection is missing declared result artifacts")
     candidate = result["candidate"]
-    repo = author["spec"]["cwd"]
     base, head = candidate["base"], candidate["head"]
     if not records.is_commit_id(base) or not records.is_commit_id(head):
         records.invalid("review candidate base/head must be full Git commit IDs")
+    location = resolve_repository(candidate, author["spec"])
+    repo = location["repo_path"]
     if (git(repo, "rev-parse", "--verify", f"refs/heads/{candidate['branch']}") != head
             or git(repo, "merge-base", base, head) != base):
         records.invalid("review candidate branch moved or base is not an ancestor of head")
@@ -99,7 +147,7 @@ def pin_candidate(root, state, spec):
     if (git(repo, "merge-base", base, capture_base) != base
             or git(repo, "merge-base", capture_base, head) != capture_base):
         records.invalid("prior_head must lie between candidate base and head")
-    return {"candidate": candidate, "repo_path": repo, "capture_base": capture_base,
+    return {"candidate": candidate, **location, "capture_base": capture_base,
             "author_identity": author["agent_name"], "task_id": identity["task_id"],
             "author_task_file": author["spec"]["task_file"],
             "author_task": author["spec"]["task"],
@@ -125,7 +173,11 @@ def render_brief(job):
         template = template.replace(source, value)
     return ("Load and follow skill code-review. Review both Standards and the originating Spec.\n"
             f"Pinned candidate: {records.encoded(binding['candidate']).decode()}\n"
-            f"Repository to read: {binding['repo_path']}\n"
+            f"Resolved repository: {binding['repo_path']}\n"
+            f"Resolved worktree: {binding['worktree_path']}\n"
+            f"Resolved git common dir: {binding['git_common_dir']}\n"
+            "Read the candidate only from this resolved repository; if it disagrees with the pinned "
+            "candidate record, stop and report a blocker.\n"
             f"Capture base: {binding['capture_base']}; capture head: {binding['candidate']['head']}.\n"
             "Create any isolated checkout needed for capture under the managed output directory, "
             "at the pinned head. Treat source as read-only and do not change the author's checkout.\n"
