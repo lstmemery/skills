@@ -93,9 +93,11 @@ side is right.
   `output_directory`, `editable_paths`, `protected_paths`, `scope`,
   `scope.readable`, `scope.editable`, or `scope.protected` line
   outside the declaration (including in a copied YAML block), repeated instruction lines of 40 or more characters, and
-  repeated section headings. List markers and inline code/emphasis formatting
-  are normalized before comparison; heading text is compared across heading
-  levels. An apparent `worker-brief` fence with unsupported info syntax
+  repeated section headings. Quote/list prefixes and paired inline
+  code/emphasis formatting are normalized before comparison; heading text is compared across heading
+  levels. Duplicate comparisons preserve case in commands, paths, and headings.
+  See the [template's accepted Markdown limits](worker-brief.md). An apparent
+  `worker-brief` fence with unsupported info syntax
   (for example `JSON worker-brief` or `json worker-brief extra`) is a hard
   error, even on an otherwise legacy job. Unrelated language fences and
   marker text nested inside another fence are not themselves declaration fences.

@@ -237,7 +237,7 @@ class WorkerBriefCommandTest(unittest.TestCase):
         self.assert_rejected(render(self.record(), task=line + "\n" + line), "duplicate instruction at lines",
                              *roster)
         self.assert_rejected(render(self.record(), extra="\n## Task\n\nMore leftover work.\n"),
-                             "duplicate section heading 'task'", *roster)
+                             "duplicate section heading 'Task'", *roster)
 
     def test_roster_identity_failures(self):
         cases = {
@@ -457,12 +457,25 @@ class WorkerBriefLaunchTest(unittest.TestCase):
             "number and code styling": (
                 f"\n1. {instruction}\n2) **Run** the `fixture` checks and record their exit codes in checks.txt.\n",
                 "duplicate instruction"),
-            "heading levels": ("\n## Recovery\n\n### Recovery\n", "duplicate section heading 'recovery'"),
-            "heading styling": ("\n## `Recovery`\n\n### **Recovery**\n", "duplicate section heading 'recovery'"),
+            "heading levels": ("\n## Recovery\n\n### Recovery\n", "duplicate section heading 'Recovery'"),
+            "heading styling": ("\n## `Recovery`\n\n### **Recovery**\n", "duplicate section heading 'Recovery'"),
         }
         for name, (extra, message) in cases.items():
             with self.subTest(name=name):
                 self.assert_refused(render(self.record(), extra=extra), message, structured_brief=True)
+
+    def test_paired_emphasis_cannot_hide_leftovers_or_duplicates(self):
+        instruction = "Run the fixture checks and record their exit codes in checks.txt."
+        for delimiter in ("***", "___", "**_", "*__"):
+            closing = delimiter[::-1]
+            with self.subTest(delimiter=delimiter, scenario="leftover"):
+                self.assert_refused(
+                    render(self.record(), extra=f"\n{delimiter}task_id{closing}: copied-task\n"),
+                    "restates 'task_id'", structured_brief=True)
+            with self.subTest(delimiter=delimiter, scenario="duplicate"):
+                styled = instruction.replace("Run", delimiter + "Run" + closing, 1)
+                self.assert_refused(render(self.record(), task=instruction + "\n" + styled + "\n"),
+                                    "duplicate instruction", structured_brief=True)
 
     def test_distinct_formatted_instructions_and_inline_identifiers_launch(self):
         task = ("1. Read `fixture_one.json` and record the expected fixture fields.\n"
@@ -488,6 +501,56 @@ class WorkerBriefLaunchTest(unittest.TestCase):
                 content = render(self.record(task_id="copied-task")).replace(
                     "```json worker-brief", opening, 1)
                 self.assert_refused(content, "unsupported worker-brief declaration fence")
+
+    def test_quoted_declarations_cannot_downgrade_to_legacy_prose(self):
+        for prefix in ("> ", "> > ", "1. > - "):
+            for malformed in (False, True):
+                with self.subTest(prefix=prefix, malformed=malformed):
+                    content = render(self.record(task_id="copied-task"))
+                    if malformed:
+                        content = content.replace("```json worker-brief", "```JSON worker-brief extra", 1)
+                    quoted = "\n".join(prefix + line for line in content.splitlines())
+                    self.assert_refused(quoted, "unsupported worker-brief declaration fence" if malformed
+                                        else "task_id 'copied-task' does not match")
+
+    def test_matching_quoted_declaration_preserves_literal_json_text(self):
+        objective = "Preserve ***literal*** markers and CaseSensitivePath in fixture text."
+        content = render(self.record(objective=objective))
+        quoted = "\n".join("> " + line for line in content.splitlines())
+        parsed, issues = worker_brief.parse(quoted)
+        self.assertEqual(issues, [])
+        self.assertEqual(parsed["objective"], objective)
+        self.use_brief(quoted, **self.identity(), structured_brief=True)
+        code, result = self.call()
+        self.assertEqual(code, 0, result)
+
+    def test_case_distinct_commands_and_paths_launch(self):
+        for name, value in (("source_one", "lower directory"), ("Source_One", "mixed directory")):
+            directory = self.root / name
+            directory.mkdir()
+            (directory / "input.txt").write_text(value)
+        for name, label in (("VerifyScopedOutput.py", "mixed script"),
+                            ("verifyscopedoutput.py", "lower script")):
+            program = ("from pathlib import Path\nimport sys\n"
+                       f"print({label!r}, (Path(sys.argv[-1]) / 'input.txt').read_text())\n")
+            (self.root / name).write_text(program)
+            process = subprocess.run([sys.executable, str(self.root / name), "--directory", "source_one"],
+                                     cwd=self.root, capture_output=True, text=True, check=True)
+            self.assertEqual(process.stdout.strip(), label + " lower directory")
+        pairs = (
+            ("python3 VerifyScopedOutput.py --directory source_one",
+             "python3 verifyscopedoutput.py --directory source_one"),
+            ("python3 VerifyScopedOutput.py --directory source_one",
+             "python3 VerifyScopedOutput.py --directory Source_One"),
+        )
+        for first, second in pairs:
+            with self.subTest(first=first, second=second):
+                self.use_brief(render(self.record(), task=first + "\n" + second + "\n"),
+                               **self.identity(), structured_brief=True)
+                code, result = self.call(preview=True)
+                self.assertEqual(code, 0, result)
+        code, result = self.call()
+        self.assertEqual(code, 0, result)
 
     def test_ordinary_fences_and_nested_examples_keep_legacy_prose(self):
         for example in (

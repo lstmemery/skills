@@ -7,6 +7,15 @@ scope. Do not restate those fields in prose or carry instructions over from
 another brief: the pre-launch check refuses restated fields, repeated
 instructions or sections, unreplaced placeholders, and a second declaration.
 
+The check is best-effort protection against accidental copying, not a security
+boundary or a complete Markdown parser. It strips ordinary quote/list prefixes,
+inline code markers, and paired emphasis, and compares text across heading
+levels. Duplicate comparisons preserve case, including command and path text.
+Remaining exotic Markdown variants, such as HTML wrappers, escaped delimiters,
+and formatting that spans multiple lines, are accepted limits: a copied
+instruction in those forms may go undetected. Keep the declaration authoritative
+and review the brief's meaning before launch.
+
 ## Assignment
 
 Field rules (schema 1; unknown fields and duplicate JSON keys are invalid):
