@@ -255,7 +255,17 @@ overrides select the reviewer independently. Do not supply `task_file`,
 The reviewer waits without allocating a pane until the author settles with a
 complete, unresolved-free collection and a valid, ready worker result. The
 helper verifies the receipt-pinned candidate and current branch head, then
-renders the [review-worker template](review.md#copyable-review-worker-brief-full-or-delta)
+resolves the repository only from `candidate.repo`; the author's `cwd` or any
+default checkout is never used. `candidate.repo` must be an absolute path to the
+main checkout or a linked worktree of the author's leased repository (same Git
+common directory). The candidate branch must be checked out in exactly one
+worktree, that worktree must exist, and it must be the author's leased
+`repository_worktree.path`, with its current Git common directory matching the
+candidate repository. A relative, missing, foreign, or ambiguous location
+leaves the reviewer unlaunched with a `cannot pin independent review` issue.
+The generated brief prints the resolved repository, worktree, and Git common
+directory for coordinator verification; the same values are retained in the
+job's `review_binding`. The helper then renders the [review-worker template](review.md#copyable-review-worker-brief-full-or-delta)
 with the coding task ID, author/reviewer identities and candidate base/head.
 The originating author brief and required context are supplied as spec evidence.
 The reviewer writes its explicit verdict in `done.json`, alongside the task,

@@ -1018,7 +1018,7 @@ class Engine:
         if reason:
             job["issue"] = reason
             return
-        if "review_of" in spec and "review_binding" not in job:
+        if "review_of" in spec and "worktree_path" not in job.get("review_binding", {}):
             try:
                 job["review_binding"] = pin_candidate(self.root, self.state, spec)
             except (JobError, OSError, ValueError, KeyError) as error:

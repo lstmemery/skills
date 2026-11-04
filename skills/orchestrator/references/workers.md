@@ -348,7 +348,10 @@ of discovery. Symlinked directories inside the run tree are skipped and never
 traversed.
 
 Repository changes also require the candidate record in
-[review.md](review.md). Use paths for the complete patch, file inventory,
+[review.md](review.md). Set `candidate.repo` to the absolute path of the
+repository checkout or linked worktree holding the candidate branch; a linked
+independent review resolves its repository from that field and refuses
+relative or ambiguous values. Use paths for the complete patch, file inventory,
 review findings, and check evidence; do not place the patch in this JSON.
 
 ## Validate and recover

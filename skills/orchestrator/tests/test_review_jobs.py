@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -218,6 +219,154 @@ class ReviewJobsTests(unittest.TestCase):
         _, result = self.call(jobs=[self.author, {"job_id": "reviewer", "review_of": "author"}])
         self.assertIsNone(result["jobs"][1]["pane_id"])
         self.assertIn("branch moved", result["jobs"][1]["issue"])
+
+    def write_candidate(self, **changes):
+        fixture = json.loads(self.fixture.read_text())
+        fixture["worker_results"]["author"]["candidate"].update(changes)
+        self.fixture.write_text(json.dumps(fixture))
+
+    def linked_layout(self):
+        """Use real Git metadata under paths with spaces outside the default layout."""
+        main = self.root / "odd repos" / "main checkout"
+        main.parent.mkdir()
+        self.repo.rename(main)
+        self.repo = main
+        self.git("-C", str(main), "switch", "main")
+        linked = self.root / "lease area" / "candidate worktree"
+        self.git("-C", str(main), "worktree", "add", str(linked), "candidate")
+        self.author["cwd"] = str(linked)
+        self.author["repository_worktree"] = {
+            **self.author["repository_worktree"], "path": str(linked),
+            "repo_root": str(main), "git_common_dir": str(main / ".git")}
+        self.write_candidate(repo=str(linked))
+        return main, linked
+
+    def test_review_resolves_nonstandard_linked_worktree_from_candidate_record(self):
+        main, linked = self.linked_layout()
+
+        code, result = self.call(jobs=[self.author, {"job_id": "reviewer", "review_of": "author"}])
+
+        self.assertEqual(code, 0, result)
+        prompt = (self.root / "prompt-reviewer.txt").read_text()
+        self.assertIn(f"Resolved repository: {main.resolve()}\n", prompt)
+        self.assertIn(f"Resolved worktree: {linked.resolve()}\n", prompt)
+        self.assertIn(f"Resolved git common dir: {(main / '.git').resolve()}\n", prompt)
+        binding = json.loads((self.run / "state.json").read_text())["jobs"][1]["review_binding"]
+        self.assertEqual(binding["worktree_path"], str(linked.resolve()))
+
+    def blocked_review(self):
+        _, result = self.call(jobs=[self.author, {"job_id": "reviewer", "review_of": "author"}])
+        reviewer = result["jobs"][1]
+        self.assertIsNone(reviewer["pane_id"])
+        self.assertFalse((self.root / "prompt-reviewer.txt").exists())
+        self.assertIn("cannot pin independent review", reviewer["issue"])
+        return reviewer["issue"]
+
+    def test_candidate_repo_naming_either_checkout_resolves_to_one_location(self):
+        main, linked = self.linked_layout()
+        alias = self.root / "candidate alias"
+        alias.symlink_to(linked, target_is_directory=True)
+        for declared in (str(main), str(linked), str(linked) + "/.", str(alias)):
+            with self.subTest(declared=str(declared)):
+                shutil.rmtree(self.run, ignore_errors=True)
+                (self.root / "prompt-reviewer.txt").unlink(missing_ok=True)
+                self.write_candidate(repo=str(declared))
+
+                code, result = self.call(jobs=[self.author, {"job_id": "reviewer", "review_of": "author"}])
+
+                self.assertEqual(code, 0, result)
+                prompt = (self.root / "prompt-reviewer.txt").read_text()
+                self.assertIn(f"Resolved repository: {main.resolve()}\n", prompt)
+                self.assertIn(f"Resolved worktree: {linked.resolve()}\n", prompt)
+
+    def test_unresolvable_candidate_repository_blocks_review_before_launch(self):
+        other = self.root / "other repo"
+        self.git("init", "-b", "main", str(other))
+        cases = {
+            "relative": ("repo", "must be an absolute"),
+            "missing": (str(self.root / "no such repo"), "does not exist"),
+            "not a repository": (str(self.root), "failed"),
+            "different repository": (str(other), "author's leased repository"),
+        }
+        for name, (repo, message) in cases.items():
+            with self.subTest(case=name):
+                shutil.rmtree(self.run, ignore_errors=True)
+                self.write_candidate(repo=repo)
+                self.assertIn(message, self.blocked_review())
+
+    def test_missing_or_ambiguous_candidate_branch_blocks_review_before_launch(self):
+        _, linked = self.linked_layout()
+        second = self.root / "second holder"
+        cases = {
+            "missing branch": (lambda: self.write_candidate(branch="no-such-branch"),
+                               "not checked out in any worktree"),
+            "branch not checked out": (lambda: self.git("-C", str(linked), "switch", "--detach"),
+                                       "not checked out in any worktree"),
+            "branch in two worktrees": (lambda: self.git(
+                "-C", str(self.repo), "worktree", "add", "--force", str(second), "candidate"),
+                                        "checked out in several worktrees"),
+        }
+        for name, (change, message) in cases.items():
+            with self.subTest(case=name):
+                shutil.rmtree(self.run, ignore_errors=True)
+                self.git("-C", str(linked), "switch", "candidate")
+                self.write_candidate(repo=str(linked), branch="candidate")
+                change()
+                self.assertIn(message, self.blocked_review())
+
+    def test_candidate_worktree_must_be_the_authors_leased_worktree(self):
+        self.linked_layout()
+        self.author["cwd"] = str(self.repo)
+        self.author["repository_worktree"]["path"] = str(self.repo)
+
+        self.assertIn("not the author's leased worktree", self.blocked_review())
+
+    def test_missing_candidate_worktree_blocks_review_before_launch(self):
+        _, linked = self.linked_layout()
+        moved = self.root / "moved away"
+        linked.rename(moved)
+        self.write_candidate(repo=str(self.repo))
+
+        self.assertIn("candidate worktree is missing", self.blocked_review())
+
+    def test_replaced_candidate_worktree_cannot_resolve_to_a_foreign_repository(self):
+        main, linked = self.linked_layout()
+        linked.rename(self.root / "original candidate")
+        self.git("init", "-b", "candidate", str(linked))
+        self.write_candidate(repo=str(main))
+
+        self.assertIn("candidate worktree Git common directory", self.blocked_review())
+
+    def test_resume_repins_legacy_review_binding_from_the_validated_candidate(self):
+        main, linked = self.linked_layout()
+        fixture = json.loads(self.fixture.read_text())
+        fixture["jobs"] = {"author": "working"}
+        self.fixture.write_text(json.dumps(fixture))
+        self.call(jobs=[self.author, {"job_id": "reviewer", "review_of": "author"}])
+        state_path = self.run / "state.json"
+        state = json.loads(state_path.read_text())
+        author, reviewer = state["jobs"]
+        (Path(author["host_output"]) / "receipt.json").write_text(json.dumps({
+            "schema_version": 1, "request_id": "review-fixture", "job_id": "author",
+            "attempt_id": author["attempt_id"], "outcome": "complete",
+            "artifacts": ["result.json", "worker-report.md"], "unresolved": []}))
+        reviewer["review_binding"] = {
+            "candidate": {**self.candidate, "repo": str(linked)},
+            "repo_path": str(self.root / "obsolete checkout"), "capture_base": self.base,
+            "author_identity": author["agent_name"], "task_id": "coding-task",
+            "author_task_file": str(self.task), "author_task": self.task.read_text(),
+            "required_context": []}
+        state_path.write_text(json.dumps(state))
+        del fixture["jobs"]
+        self.fixture.write_text(json.dumps(fixture))
+
+        code, result = self.call("resume")
+
+        self.assertEqual(code, 0, result)
+        prompt = (self.root / "prompt-reviewer.txt").read_text()
+        self.assertIn(f"Resolved repository: {main.resolve()}\n", prompt)
+        self.assertIn(f"Resolved worktree: {linked.resolve()}\n", prompt)
+        self.assertNotIn("obsolete checkout", prompt)
 
     def test_scheduled_review_requires_verdict_in_done_even_with_report_verdict(self):
         review = self.clean_review_output()
