@@ -186,14 +186,21 @@ class WorkerBriefCommandTest(unittest.TestCase):
 
     def test_branch_names_follow_git_check_ref_format(self):
         names = ("fix/1267-worker-brief-validation", "candidate", "release/v1.2", "a.b/c_d",
+                 "fix/c++", "feature/@name", "release/v1=ok", "@", "fix/é", "fix/name]",
+                 "fix/a;b", "fix/a!b", "fix/a#b", "fix/a$b", "fix/a&b", "fix/a(b)",
+                 "fix/a%b", "fix/a,b", "fix/a}b", "fix/name.LOCK", "fix/" + "a" * 260,
                  "-leading-dash", "HEAD", ".hidden", "feature/.hidden", "a/.b", "bad..branch",
                  "a//b", "/lead", "trail/", "trail.", "x.lock", "x.lock/y", "a@{b", "has space",
                  "tilde~1", "caret^", "colon:x", "q?", "star*", "br[a]", "back\\slash", "")
+        names += tuple("feature/" + chr(code) + "name" for code in range(1, 128))
         for name in names:
             with self.subTest(name=name):
                 git = subprocess.run(["git", "check-ref-format", "--branch", name],
                                      capture_output=True, timeout=5).returncode == 0
                 self.assertEqual(records.is_branch_name(name), git)
+        for value in (None, True, 42, [], {}, "fix/\0name"):
+            with self.subTest(value=value):
+                self.assertFalse(records.is_branch_name(value))
 
     def test_duplicate_declaration_blocks_are_refused(self):
         block = DECLARATION_START + json.dumps(self.record()) + "\n```\n"
@@ -439,6 +446,62 @@ class WorkerBriefLaunchTest(unittest.TestCase):
                   "objective: \"Copied from another assignment.\"\n")
         self.assert_refused(copied, "no ```json worker-brief declaration")
 
+    def test_markdown_formatting_cannot_hide_leftovers_or_duplicates(self):
+        instruction = "Run the fixture checks and record their exit codes in checks.txt."
+        cases = {
+            "code key": ("\n`task_id`: copied-task\n", "restates 'task_id'"),
+            "numbered key": ("\n1. task_id: copied-task\n", "restates 'task_id'"),
+            "numbered parenthesis key": ("\n2) **`task_id`**: copied-task\n", "restates 'task_id'"),
+            "bulleted key": ("\n+ `repository`: /old/fixture-repo\n", "restates 'repository'"),
+            "bullet styles": (f"\n- {instruction}\n* {instruction}\n", "duplicate instruction"),
+            "number and code styling": (
+                f"\n1. {instruction}\n2) **Run** the `fixture` checks and record their exit codes in checks.txt.\n",
+                "duplicate instruction"),
+            "heading levels": ("\n## Recovery\n\n### Recovery\n", "duplicate section heading 'recovery'"),
+            "heading styling": ("\n## `Recovery`\n\n### **Recovery**\n", "duplicate section heading 'recovery'"),
+        }
+        for name, (extra, message) in cases.items():
+            with self.subTest(name=name):
+                self.assert_refused(render(self.record(), extra=extra), message, structured_brief=True)
+
+    def test_distinct_formatted_instructions_and_inline_identifiers_launch(self):
+        task = ("1. Read `fixture_one.json` and record the expected fixture fields.\n"
+                "2) Read `fixture_two.json` and record the expected fixture fields.\n"
+                "- Report `fixture_one.json` in the evidence inventory.\n"
+                "* Report `fixture_two.json` in the evidence inventory.\n"
+                "Use `task_id` when describing the fixture identity.\n"
+                "## **Inputs**\n\n### `Outputs`\n")
+        self.use_brief(render(self.record(), task=task), **self.identity(), structured_brief=True)
+        code, result = self.call()
+        self.assertEqual(code, 0, result)
+
+    def test_formatted_copied_identity_cannot_downgrade_to_legacy_prose(self):
+        for prefix in ("`task_id`", "1. task_id", "- **task_id**"):
+            with self.subTest(prefix=prefix):
+                self.assert_refused(prefix + ": copied-task\n", "no ```json worker-brief declaration")
+
+    def test_unsupported_declaration_fences_cannot_downgrade_to_legacy_prose(self):
+        for opening in ("```JSON worker-brief", "```json worker-brief extra",
+                        "~~~json WORKER-BRIEF", "```worker-brief json",
+                        "```json worker-brief`extra"):
+            with self.subTest(opening=opening):
+                content = render(self.record(task_id="copied-task")).replace(
+                    "```json worker-brief", opening, 1)
+                self.assert_refused(content, "unsupported worker-brief declaration fence")
+
+    def test_ordinary_fences_and_nested_examples_keep_legacy_prose(self):
+        for example in (
+                '```json\n{"task_id": "example-value"}\n```\n',
+                '```JSON worker-briefing\n{"task_id": "example-value"}\n```\n',
+                '````text\n```JSON worker-brief\n{"task_id": "example-value"}\n```\n````\n',
+                '~~~python\nprint("worker-brief example")\n~~~\n'):
+            with self.subTest(example=example):
+                self.use_brief("Inspect the fixture. These are illustrative examples.\n" + example,
+                               structured_brief=False)
+                code, result = self.call(preview=True)
+                self.assertEqual(code, 0, result)
+                self.assertFalse(self.run.exists())
+
     def test_identity_mismatches_are_refused(self):
         cases = {
             "copied task id": (self.record(task_id="other-task"), "task_id 'other-task' does not match"),
@@ -566,6 +629,15 @@ class WorkerBriefLaunchTest(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertEqual(result["error"], "invalid_input")
                 self.assertIn(message, result["message"])
+
+    def test_git_valid_punctuation_branches_match_the_manifest(self):
+        for branch in ("fix/c++", "feature/@name", "release/v1=ok", "feature/é"):
+            with self.subTest(branch=branch):
+                record, changes = self.repository_job(branch=branch)
+                self.use_brief(render(record), **self.identity(), **changes, candidate_branch=branch)
+                for operation in ("run", "add"):
+                    code, result = self.call(operation, preview=True)
+                    self.assertEqual(code, 0, result)
 
     def test_git_invalid_candidate_branch_is_refused(self):
         for branch in ("-leading-dash", "HEAD", ".hidden", "feature/.hidden"):

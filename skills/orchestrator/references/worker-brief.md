@@ -11,21 +11,22 @@ instructions or sections, unreplaced placeholders, and a second declaration.
 
 Field rules (schema 1; unknown fields and duplicate JSON keys are invalid):
 
-- `task_id`, `assignment_revision`: the exact attempt identity in the
-  coordinator's assignment record (managed: `worker_result`, or `job_id` and
-  revision 1; direct: the `workers.json` roster entry).
-- `worker_mode`: `literal` or `inferential`; it never changes routing.
-- `cwd`: the absolute worker working directory; equals the assignment `cwd`.
-- `output_directory`: `managed` for `herdr-jobs.py` and native dispatch, which
-  assign it at launch; otherwise the absolute rostered task directory.
-- `repository`: `null` unless the assignment writes a repository; then exactly
-  `repo` (lease `repo_root`), `worktree` (lease `path`), `branch` (assignment
-  `candidate_branch`), and `base` (lease `base_commit`, full commit ID).
-- `scope.editable`: exactly the assignment `editable_paths`.
-- `scope.protected`: every default and assignment protected path, including
-  acceptance tests; it may add more.
-- `required_context`: objects with `path` and `purpose`, optional `kind`.
-- `done_checks`: at least one executable or source-auditable check.
+- Copy the exact `task_id` and `assignment_revision` from the coordinator's
+  assignment record (managed: `worker_result`, or `job_id` and revision 1;
+  direct: the `workers.json` roster entry).
+- Set `worker_mode` to `literal` or `inferential`; it never changes routing.
+- Use the assignment's absolute working directory for `cwd`.
+- Set `output_directory` to `managed` for `herdr-jobs.py` and native dispatch,
+  which assign it at launch; otherwise use the absolute rostered task directory.
+- Set `repository` to `null` unless the assignment writes a repository; then
+  provide exactly `repo` (lease `repo_root`), `worktree` (lease `path`),
+  `branch` (assignment `candidate_branch`), and `base` (lease `base_commit`,
+  full commit ID).
+- Copy exactly the assignment's `editable_paths` into `scope.editable`.
+- Include every default and assignment protected path in `scope.protected`,
+  including acceptance tests; it may add more.
+- List `required_context` as objects with `path`, `purpose`, and optional `kind`.
+- Include at least one executable or source-auditable check in `done_checks`.
 - All other values are non-empty strings.
 
 ```json worker-brief

@@ -154,7 +154,7 @@ def is_commit_id(value):
 # with `.lock`, no `..`, `//`, `@{`, or trailing `/` or `.`.
 BRANCH_NAME = re.compile(
     r"^(?!-)(?!HEAD$)(?!/)(?!.*(?:\.\.|//|@\{|\.lock(?:/|$)|/$|\.$|(?:^|/)\.))"
-    r"[A-Za-z0-9._/-]{1,255}$")
+    r"[^\x00-\x20\x7f~^:?*\[\\]+$")
 
 
 def is_branch_name(value):

@@ -496,7 +496,7 @@ must declare at least one `editable_paths` entry, and must set `cwd` to that
 record's `path`. An empty or omitted editable scope is rejected during
 preparation, before launch. A record on a `false` job is rejected.
 An optional `candidate_branch` names the branch the writer will commit to; it
-must be a plain ASCII branch name that `git check-ref-format --branch` accepts
+must be a plain branch name that `git check-ref-format --branch` accepts
 and is rejected on a non-writer. A job with `candidate_branch` requires a
 structured worker brief, and a brief that declares a repository requires
 `candidate_branch`. Optional `structured_brief: true` requires a structured

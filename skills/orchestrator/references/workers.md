@@ -55,7 +55,8 @@ side is right.
   `--preview`) and `native-dispatch.py` check every task file before any run
   state, lease, or transport effect. A task must carry a valid declaration
   when its job sets `structured_brief: true` or `candidate_branch`, or when
-  the task text has a declaration, a `task_id:`/`assignment_revision:` line,
+  the task text has a declaration or apparent declaration fence, a
+  `task_id:`/`assignment_revision:` line (including Markdown formatting),
   or the generated worker result-record heading. The job fields are the
   authority: the task text cannot lift them, so a copied prose brief on such a
   job is refused. Use `structured_brief: true` to require this contract on a job.
@@ -92,7 +93,12 @@ side is right.
   `output_directory`, `editable_paths`, `protected_paths`, `scope`,
   `scope.readable`, `scope.editable`, or `scope.protected` line
   outside the declaration (including in a copied YAML block), repeated instruction lines of 40 or more characters, and
-  repeated section headings.
+  repeated section headings. List markers and inline code/emphasis formatting
+  are normalized before comparison; heading text is compared across heading
+  levels. An apparent `worker-brief` fence with unsupported info syntax
+  (for example `JSON worker-brief` or `json worker-brief extra`) is a hard
+  error, even on an otherwise legacy job. Unrelated language fences and
+  marker text nested inside another fence are not themselves declaration fences.
 
 Jail `check-brief --jail` inventory checks are unchanged. To use structured
 validation for a jail brief, replace its YAML assignment core with the
