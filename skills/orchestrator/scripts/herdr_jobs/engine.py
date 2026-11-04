@@ -1009,6 +1009,12 @@ class Engine:
         return self.defer_quota_recovery and (
             job["rate_limit_seen"] or any(item["action"] == "rate_limit_retry" for item in job["history"]))
 
+    def refuse_review(self, job, error):
+        job["issue"] = f"cannot pin independent review: {error}"
+        if job["pane_id"] is None:
+            self.release_admission(job)
+        self.checkpoint()
+
     def launch(self, job):
         if self.fresh_quota_recovery_deferred(job):
             job["issue"] = "fresh quota recovery deferred; coordinator effect reconciliation required"
@@ -1022,7 +1028,7 @@ class Engine:
             try:
                 job["review_binding"] = pin_candidate(self.root, self.state, spec)
             except (JobError, OSError, ValueError, KeyError) as error:
-                job["issue"] = f"cannot pin independent review: {error}"
+                self.refuse_review(job, error)
                 return
             self.checkpoint()
         ensure_task_admitted(spec["task_kind"], spec["job_id"])
@@ -1034,10 +1040,7 @@ class Engine:
                 try:
                     job["review_binding"] = pin_candidate(self.root, self.state, spec)
                 except (JobError, OSError, ValueError, KeyError) as error:
-                    job["issue"] = f"cannot pin independent review: {error}"
-                    if job["pane_id"] is None:
-                        self.release_admission(job)
-                    self.checkpoint()
+                    self.refuse_review(job, error)
                     return
                 self.checkpoint()
             planned = self.lifecycle.step(job)

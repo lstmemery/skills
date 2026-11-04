@@ -390,6 +390,56 @@ class ReviewJobsTests(unittest.TestCase):
 
         self.assert_capacity_resume_refuses_review("checked out in several worktrees", cap)
 
+    def legacy_review_with_held_lease(self, *, run_id=None, pane_id=None):
+        main, _, cap = self.review_waiting_for_capacity()
+        state_path = self.run / "state.json"
+        state = json.loads(state_path.read_text())
+        reviewer = state["jobs"][1]
+        del reviewer["review_binding"]["worktree_path"]
+        del reviewer["review_binding"]["git_common_dir"]
+        if pane_id is not None:
+            reviewer["pane_id"] = pane_id
+            reviewer["phase"] = "split"
+            reviewer["history"].append({"action": "split", "attempt_id": reviewer["attempt_id"],
+                                        "pane_id": pane_id})
+        state_path.write_text(json.dumps(state))
+        held = self.admission("acquire", "--provider", reviewer["provider"],
+                              "--model", reviewer["admission_model"],
+                              "--lease-id", reviewer["admission_lease_id"],
+                              "--run-id", run_id or state["request"]["request_id"])
+        self.assertTrue(held["admitted"])
+        self.git("-C", str(main), "worktree", "add", "--force",
+                 str(self.root / "second holder"), "candidate")
+        return reviewer, cap
+
+    def test_legacy_binding_refusal_releases_an_unused_held_admission_lease(self):
+        _, cap = self.legacy_review_with_held_lease()
+
+        self.assert_capacity_resume_refuses_review("checked out in several worktrees", cap)
+
+    def test_legacy_binding_refusal_preserves_another_runs_admission_lease(self):
+        self.legacy_review_with_held_lease(run_id="fixture-other-run")
+        before = self.admission("status")["leases"]
+
+        code, result = self.call("resume")
+
+        self.assertEqual(code, 3, result)
+        self.assertEqual(result["error"], "conflict")
+        self.assertEqual(self.admission("status")["leases"], before)
+        self.assertFalse((self.root / "prompt-reviewer.txt").exists())
+
+    def test_legacy_binding_refusal_preserves_admission_once_a_pane_exists(self):
+        reviewer, _ = self.legacy_review_with_held_lease(pane_id="fixture-existing-review-pane")
+        before = self.admission("status")["leases"]
+
+        _, result = self.call("resume")
+
+        self.assertEqual(result["jobs"][1]["pane_id"], reviewer["pane_id"])
+        self.assertTrue(result["jobs"][1]["admission_acquired"])
+        self.assertIn("cannot pin independent review", result["jobs"][1]["issue"])
+        self.assertEqual(self.admission("status")["leases"], before)
+        self.assertFalse((self.root / "prompt-reviewer.txt").exists())
+
     def test_resume_repins_legacy_review_binding_from_the_validated_candidate(self):
         main, linked = self.linked_layout()
         fixture = json.loads(self.fixture.read_text())
