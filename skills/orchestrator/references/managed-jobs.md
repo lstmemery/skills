@@ -131,6 +131,10 @@ for later `finish` retries.
 To abandon a job that has no collected receipt, use `JOB_ID=cancelled` with a
 reason. This works for pending jobs that never launched and for interrupted
 launched jobs whose exact owned worker is freshly verified idle, done, or exited.
+It also accepts an already closed workspace with a saved
+`external_workspace_closed` retirement record matching the job's exact attempt,
+pane, and workspace. This records cancellation without querying the missing pane
+again; unresolved external effects still prevent cancellation.
 It requires no `worker_result` declaration. Active or unverified workers,
 unresolved external effects, ambiguous lease ownership, and jobs with a collected
 receipt are refused. Cancellation does not stop a worker; reconcile or stop it

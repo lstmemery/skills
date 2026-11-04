@@ -110,14 +110,18 @@ class Engine:
             self.release_admission(job)
         return result["admitted"]
 
+    def owned_admission_lease(self, job):
+        lease = next((item for item in self.admission.status()["leases"]
+                      if item["lease_id"] == job["admission_lease_id"]), None)
+        if lease is not None and (lease["run_id"] != self.state["request"]["request_id"]
+                                  or lease["provider"] != normalize_provider(job["provider"])
+                                  or lease["model"] != normalize_model(job["admission_model"])):
+            raise JobError("conflict", "cannot release an admission lease owned by another run or worker")
+        return lease
+
     def release_admission(self, job):
         if job["admission_acquired"]:
-            lease = next((item for item in self.admission.status()["leases"]
-                          if item["lease_id"] == job["admission_lease_id"]), None)
-            if lease is not None and (lease["run_id"] != self.state["request"]["request_id"]
-                                      or lease["provider"] != job["provider"]
-                                      or lease["model"] != job["admission_model"]):
-                raise JobError("conflict", "cannot release an admission lease owned by another run or worker")
+            self.owned_admission_lease(job)
             self.admission.release(job["admission_lease_id"])
             job["admission_acquired"] = False
 
@@ -1221,7 +1225,9 @@ class Engine:
             raise JobError("decision_needed", "cannot cancel a job with an unresolved external effect")
         never_launched = (job["phase"] == "pending" and job["pane_id"] is None
                           and job["workspace_id"] is None and not job["history"])
-        workspace_absent = recorded and (job["workspace_closed"] or not self.transport.workspace_is_open(job))
+        retirement = self.external_workspace_retirement(job) if job["workspace_closed"] else None
+        workspace_absent = retirement is not None or (
+            recorded and (job["workspace_closed"] or not self.transport.workspace_is_open(job)))
         if not never_launched and not workspace_absent:
             if not job["pane_id"] or not job["workspace_id"]:
                 raise JobError("decision_needed", "cancellation requires an owned pane and workspace")
@@ -1232,18 +1238,19 @@ class Engine:
             if not any(item.get("action") == "move" and item.get("attempt_id") == job["attempt_id"]
                        and item.get("pane_id") == job["pane_id"] for item in job["history"]):
                 raise JobError("decision_needed", "cancellation lacks workspace ownership evidence")
-        lease = next((item for item in self.admission.status()["leases"]
-                      if item["lease_id"] == job["admission_lease_id"]), None)
-        if lease is not None and (lease["run_id"] != self.state["request"]["request_id"]
-                                  or lease.get("pending_effect") is not None
-                                  or lease["provider"] != job["provider"]
-                                  or lease["model"] != job["admission_model"]):
+        lease = self.owned_admission_lease(job)
+        if lease is not None and lease.get("pending_effect") is not None:
             raise JobError("decision_needed", "cancellation cannot release an ambiguously owned admission lease")
         if recorded:
             return
+        if retirement is not None:
+            inactivity_evidence = retirement["evidence"]
+        elif never_launched:
+            inactivity_evidence = "No worker was launched."
+        else:
+            inactivity_evidence = f"Owned worker in pane {job['pane_id']} is verified inactive."
         evidence = (f"Coordinator cancelled managed job {job['spec']['job_id']} attempt {job['attempt_id']}: "
-                    f"{reason}. " + ("No worker was launched." if never_launched else
-                                     f"Owned worker in pane {job['pane_id']} is verified inactive."))
+                    f"{reason}. {inactivity_evidence}")
         worker = job["spec"].get("worker_result")
         if worker:
             self.record_worker_disposition(job, {
@@ -1674,12 +1681,16 @@ class Engine:
         else:
             job["issue"] = None
 
+    @staticmethod
+    def external_workspace_retirement(job):
+        return next((item for item in reversed(job["history"])
+                     if item.get("action") == "external_workspace_closed"
+                     and item.get("attempt_id") == job["attempt_id"]
+                     and item.get("workspace_id") == job["workspace_id"]
+                     and item.get("pane_id") == job["pane_id"]), None)
+
     def release_retired_admission(self, job):
-        retirement = next((item for item in reversed(job["history"])
-                           if item.get("action") == "external_workspace_closed"
-                           and item.get("attempt_id") == job["attempt_id"]
-                           and item.get("workspace_id") == job["workspace_id"]
-                           and item.get("pane_id") == job["pane_id"]), None)
+        retirement = self.external_workspace_retirement(job)
         if retirement is not None:
             self.admission.release(job["admission_lease_id"],
                                    reconciliation_evidence=retirement["evidence"])
