@@ -78,7 +78,7 @@ def parse_finish_overrides(values, reason):
         job_id, separator, disposition = value.partition("=")
         if (not separator or not job_id.strip() or not disposition.strip() or "=" in disposition
                 or disposition.strip() not in WORKER_DISPOSITIONS):
-            raise JobError("invalid_input", "coordinator disposition override must be JOB_ID=completed|blocked|failed")
+            raise JobError("invalid_input", "coordinator disposition override must be JOB_ID=completed|blocked|failed|cancelled")
         job_id = job_id.strip()
         if job_id in overrides:
             raise JobError("invalid_input", f"duplicate coordinator disposition override for {job_id}")
@@ -123,6 +123,8 @@ def finish_message(finish):
               if item["worker_result_validation"] == "not_requested"]
     not_started = [job_id for job_id, item in validations.items()
                    if item["worker_result_validation"] == "not_started"]
+    cancelled = [job_id for job_id, item in validations.items()
+                 if item["worker_result_validation"] == "cancelled_without_receipt"]
     dispositions = []
     for job_id in validated:
         item = validations[job_id]
@@ -139,6 +141,9 @@ def finish_message(finish):
                           for job_id, item in validations.items()
                           if item.get("repository_worktree_retained_reason")}
     parts = []
+    if cancelled:
+        parts.append("Recorded coordinator cancellation without a collected worker result or receipt for: "
+                     + ", ".join(cancelled) + ".")
     if not_started:
         parts.append("Recorded startup-failure dispositions without worker result or receipt for: "
                      + ", ".join(not_started) + ".")

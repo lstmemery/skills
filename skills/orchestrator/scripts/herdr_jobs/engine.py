@@ -28,7 +28,7 @@ from .worktrees import release_local_lease, status_local_lease
 
 
 PHASES = {"pending", "split", "moved", "retry_ready", "ready", "submitted", "failed"}
-WORKER_DISPOSITIONS = {"completed", "blocked", "failed"}
+WORKER_DISPOSITIONS = {"completed", "blocked", "failed", "cancelled"}
 class Engine:
     def __init__(self, root, transport, deadline, admission_store=None):
         self.root = Path(root).absolute()
@@ -112,6 +112,12 @@ class Engine:
 
     def release_admission(self, job):
         if job["admission_acquired"]:
+            lease = next((item for item in self.admission.status()["leases"]
+                          if item["lease_id"] == job["admission_lease_id"]), None)
+            if lease is not None and (lease["run_id"] != self.state["request"]["request_id"]
+                                      or lease["provider"] != job["provider"]
+                                      or lease["model"] != job["admission_model"]):
+                raise JobError("conflict", "cannot release an admission lease owned by another run or worker")
             self.admission.release(job["admission_lease_id"])
             job["admission_acquired"] = False
 
@@ -1202,8 +1208,60 @@ class Engine:
         return {"released": True, "already_released": release["already_released"],
                 "release": release["release"]}
 
+    def cancel_without_receipt(self, job, reason):
+        """Record cancellation only after proving the attempt is inactive."""
+        recorded = job.get("issue_code") == "coordinator_cancelled"
+        if recorded:
+            if job["worker_disposition_override"] != {"disposition": "cancelled", "reason": reason}:
+                raise JobError("conflict", "coordinator cancellation differs from its recorded decision")
+        if not recorded and job["collection"] is not None:
+            raise JobError("invalid_input", "cancellation without a receipt cannot replace a collected worker result")
+        pending = job["pending_effect"]
+        if pending is not None and not (recorded and pending["action"] == "workspace_close"):
+            raise JobError("decision_needed", "cannot cancel a job with an unresolved external effect")
+        never_launched = (job["phase"] == "pending" and job["pane_id"] is None
+                          and job["workspace_id"] is None and not job["history"])
+        workspace_absent = recorded and (job["workspace_closed"] or not self.transport.workspace_is_open(job))
+        if not never_launched and not workspace_absent:
+            if not job["pane_id"] or not job["workspace_id"]:
+                raise JobError("decision_needed", "cancellation requires an owned pane and workspace")
+            observation = self.transport.observe(job)
+            if (observation.get("identity_verified") is not True
+                    or observation.get("state") not in ("idle", "done", "exited")):
+                raise JobError("decision_needed", "cannot cancel an active or unverified worker")
+            if not any(item.get("action") == "move" and item.get("attempt_id") == job["attempt_id"]
+                       and item.get("pane_id") == job["pane_id"] for item in job["history"]):
+                raise JobError("decision_needed", "cancellation lacks workspace ownership evidence")
+        lease = next((item for item in self.admission.status()["leases"]
+                      if item["lease_id"] == job["admission_lease_id"]), None)
+        if lease is not None and (lease["run_id"] != self.state["request"]["request_id"]
+                                  or lease.get("pending_effect") is not None
+                                  or lease["provider"] != job["provider"]
+                                  or lease["model"] != job["admission_model"]):
+            raise JobError("decision_needed", "cancellation cannot release an ambiguously owned admission lease")
+        if recorded:
+            return
+        evidence = (f"Coordinator cancelled managed job {job['spec']['job_id']} attempt {job['attempt_id']}: "
+                    f"{reason}. " + ("No worker was launched." if never_launched else
+                                     f"Owned worker in pane {job['pane_id']} is verified inactive."))
+        worker = job["spec"].get("worker_result")
+        if worker:
+            self.record_worker_disposition(job, {
+                "task_id": worker["task_id"], "assignment_revision": worker["assignment_revision"],
+                "disposition": "cancelled", "summary": "Coordinator cancelled the job without a worker receipt.",
+                "evidence": evidence})
+        job.update(phase="failed", settled=True, issue_code="coordinator_cancelled",
+                   worker_disposition="cancelled",
+                   worker_disposition_override={"disposition": "cancelled", "reason": reason})
+        if never_launched:
+            job["workspace_closed"] = True
+        job["telemetry"]["ended_at"] = now()
+        job["history"].append({"action": "coordinator_cancelled", "observed_at": now(),
+                               "attempt_id": job["attempt_id"], "evidence": evidence})
+        self.checkpoint()
+
     def finish(self, disposition_overrides=None, override_reason=None, coordinator_grades=None):
-        """Record worker dispositions and close only settled, collected jobs."""
+        """Finish collected jobs or explicitly cancel proven inactive attempts."""
         disposition_overrides = disposition_overrides or {}
         coordinator_grades = coordinator_grades or {}
         if not isinstance(disposition_overrides, dict):
@@ -1218,15 +1276,16 @@ class Engine:
                 raise JobError("invalid_input", "coordinator override reason must not be blank")
         worker_job_ids = {job["spec"]["job_id"] for job in self.state["jobs"]
                           if job["spec"].get("worker_result")}
-        unknown_overrides = set(disposition_overrides) - worker_job_ids
+        job_ids = {job["spec"]["job_id"] for job in self.state["jobs"]}
+        unknown_overrides = {job_id for job_id, value in disposition_overrides.items()
+                             if job_id not in job_ids or (value != "cancelled" and job_id not in worker_job_ids)}
         if unknown_overrides:
             raise JobError("invalid_input", "coordinator disposition override references job(s) without a worker result: "
                            + ", ".join(sorted(unknown_overrides)))
         for job_id, disposition in disposition_overrides.items():
             text(job_id, "coordinator override job_id", 100)
             if disposition not in WORKER_DISPOSITIONS:
-                raise JobError("invalid_input", "coordinator disposition override must be completed, blocked, or failed")
-        job_ids = {job["spec"]["job_id"] for job in self.state["jobs"]}
+                raise JobError("invalid_input", "coordinator disposition override must be completed, blocked, failed, or cancelled")
         if set(coordinator_grades) - job_ids:
             raise JobError("invalid_input", "coordinator grade references unknown job(s): "
                            + ", ".join(sorted(set(coordinator_grades) - job_ids)))
@@ -1244,6 +1303,17 @@ class Engine:
                                and job.get("issue_code") == "codex_cwd_untrusted"
                                and (job["pending_effect"] is None
                                     or job["pending_effect"]["action"] == "workspace_close"))
+            stored_override = job.get("worker_disposition_override") or {}
+            cancellation = disposition_overrides.get(job_id, stored_override.get("disposition")) == "cancelled"
+            if cancellation:
+                reason = override_reason if job_id in disposition_overrides else stored_override["reason"]
+                try:
+                    self.cancel_without_receipt(job, reason)
+                except JobError as error:
+                    outcomes[job_id] = {"finished": False, "issue": str(error),
+                                        "worker_result_validation": validation}
+                    continue
+                validation = "cancelled_without_receipt"
             if job_id in self.telemetry_grade_tampering:
                 issue = ("worker-writable telemetry contained a coordinator_grade; tampering was detected "
                          "and the value was ignored. Rerun finish with --coordinator-grade after review.")
@@ -1252,17 +1322,17 @@ class Engine:
                 outcomes[job_id] = {"finished": False, "issue": issue,
                                     "worker_result_validation": validation}
                 continue
-            if not startup_failure and (not job["settled"] or job["collection"] is None or job["collection_error"]):
+            if not cancellation and not startup_failure and (not job["settled"] or job["collection"] is None or job["collection_error"]):
                 outcomes[job_id] = {"finished": False, "issue": "worker is not settled with a collected receipt",
                                     "worker_result_validation": validation}
                 continue
-            if startup_failure:
+            if startup_failure and not cancellation:
                 self.record_startup_disposition(job, disposition_overrides.get(job_id), override_reason)
                 validation = "not_started"
             requested_grade = coordinator_grades.get(job_id)
             if requested_grade is not None:
                 self.record_coordinator_grade(job, requested_grade)
-            if job["spec"].get("local_lane") is True:
+            if job["spec"].get("local_lane") is True and not cancellation:
                 try:
                     validation_result = self.transport.validate_independent(job)
                     if not isinstance(validation_result, dict):
@@ -1314,7 +1384,7 @@ class Engine:
                                         "worker_result_validation": validation,
                                         "independent_validation": status}
                     continue
-            if worker and not startup_failure:
+            if worker and not startup_failure and not cancellation:
                 try:
                     result_path = Path(job["host_output"]) / "result.json"
                     identity = WorkerIdentity(worker["task_id"], worker["assignment_revision"])
@@ -1370,7 +1440,7 @@ class Engine:
             candidate = result.get("candidate") if isinstance(result, dict) else None
             override = job.get("worker_disposition_override")
             abandoned_reason = (override["reason"] if isinstance(override, dict)
-                                and override.get("disposition") == "failed" else None)
+                                and override.get("disposition") in ("failed", "cancelled") else None)
             repository_release = self.repository_worktree_release(
                 job, candidate, abandoned_reason=abandoned_reason)
             if repository_release is not None:
@@ -1425,7 +1495,7 @@ class Engine:
                 outcomes[job_id]["repository_worktree_released"] = repository_release["released"]
                 if repository_release.get("retained"):
                     outcomes[job_id]["repository_worktree_retained_reason"] = repository_release["reason"]
-            if worker and not startup_failure:
+            if worker and not startup_failure and not cancellation:
                 outcomes[job_id]["worker_result_outcome"] = result["outcome"]
                 if job.get("worker_disposition_override") is not None:
                     outcomes[job_id]["coordinator_override_reason"] = job["worker_disposition_override"]["reason"]
@@ -1450,6 +1520,8 @@ class Engine:
 
     def observe(self, job):
         self.remember_verified_working_activity(job, job["observed"])
+        if job.get("issue_code") == "coordinator_cancelled":
+            return
         if job["phase"] == "failed" and job.get("issue_code") == "codex_cwd_untrusted":
             self.release_admission(job)
             return
