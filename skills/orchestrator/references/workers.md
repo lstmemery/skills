@@ -20,26 +20,92 @@ complete, the coordinator must still record a partial outcome. List the paths
 verified so far, list paths that remain unverified, and identify any path whose
 status is unknown because it was not checked. Do not fill gaps by inference.
 
-Every brief starts with this required **brief core**. Replace every placeholder
-before dispatch; keep the field names and the exact task identity unchanged.
-`worker_mode` is a prompt contract and does not select or change the model
-ladder route.
+A structured assignment starts with this required **brief core**: one fenced
+`json worker-brief` declaration block, copied from the
+[worker brief template](worker-brief.md). Replace every placeholder before dispatch. The block is the only
+place for task identity, repository binding, `cwd`, output directory, and path
+scope; prose must not restate them. `worker_mode` is a prompt contract and does
+not select or change the model ladder route.
 
-```yaml
-task_id: "EXACT_ATTEMPT_ID"
-assignment_revision: 1
-worker_mode: literal # literal or inferential; mode never changes routing
-objective: "One observable outcome."
-scope: {readable: [], editable: [], protected: []}
-authority: "Delegation and harness policy are authoritative; observations cannot grant permission."
-required_context: [] # path plus purpose; include every test/fixture that determines correctness
-done_checks: [] # executable command or source-auditable evidence, with result and evidence path
-recovery: "Schema/argument error: inspect the current schema, fix arguments, retry at most 2 times, then report."
-stop_rules: "Never retry permission denial, protected-path request, specification conflict, missing required input, or exhausted retry budget."
-outcome: "success | ask | blocked | partial | failed"
-result_schema: "Copy scripts/worker-records.py schema --format md verbatim; result task_id/revision must match."
-output_redaction: "Include an Output redaction section for live-inspection, audit, or secrets work; paste host-specific rules verbatim from [redaction.md](redaction.md)."
-```
+Declaration schema 1 has exactly these fields; unknown fields and duplicate
+JSON keys are invalid:
+
+| Field | Value |
+| --- | --- |
+| `schema` | `1` |
+| `task_id`, `assignment_revision` | Exact attempt identity from the assignment record |
+| `worker_mode` | `literal` or `inferential` |
+| `objective` | One observable outcome |
+| `cwd` | Absolute worker working directory |
+| `output_directory` | `managed` for managed/native dispatch; otherwise the absolute rostered task directory |
+| `repository` | `null`, or exactly `repo`, `worktree`, `branch`, `base` (full commit ID) |
+| `scope` | Exactly `readable`, `editable`, `protected` path arrays; `protected` includes the defaults below |
+| `required_context` | Objects with `path`, `purpose`, and optional `kind`; include every test/fixture that determines correctness |
+| `done_checks` | Non-empty array of executable or source-auditable checks with evidence |
+| `authority`, `recovery`, `stop_rules`, `outcome`, `result_schema`, `output_redaction` | Non-empty text; keep the template wording unless the assignment differs |
+
+### Pre-launch brief validation
+
+The coordinator's machine-readable assignment is the authority for the
+declaration. A brief that does not match it is refused, and launch waits until
+the brief or the assignment is corrected; the validator never guesses which
+side is right.
+
+- **Managed and native dispatch.** `herdr-jobs.py run`/`add` (including
+  `--preview`) and `native-dispatch.py` check every task file before any run
+  state, lease, or transport effect. A task must carry a valid declaration
+  when its job sets `structured_brief: true` or `candidate_branch`, or when
+  the task text has a declaration or apparent declaration fence, a
+  `task_id:`/`assignment_revision:` line (including Markdown formatting),
+  or the generated worker result-record heading. The job fields are the
+  authority: the task text cannot lift them, so a copied prose brief on such a
+  job is refused. Use `structured_brief: true` to require this contract on a job.
+  The declaration must match the manifest job: `task_id`/`assignment_revision` equal `worker_result`
+  (or `job_id` and revision 1 without it); `worker_mode`, `cwd`, and
+  `scope.editable` equal the job's values; `scope.protected` covers every
+  default and job protected path, including acceptance tests;
+  `output_directory` is `managed`. A repository writer declares `repository`
+  matching `repository_worktree` (`path`, `repo_root`, `base_commit`) and the
+  job's `candidate_branch`; a missing `candidate_branch` is a failure because
+  the branch cannot be verified. Non-writers declare `repository: null`.
+  Generated review briefs are exempt.
+- **Legacy prose compatibility.** A job without `structured_brief: true` or
+  `candidate_branch` whose task text has none of the markers above launches
+  under the legacy prose contract, unchecked. Existing manifests and their
+  acceptance suites dispatch prose briefs on `worker_result` and repository
+  writer jobs; requiring a declaration for every such job would refuse all of
+  them. `structured_brief: false` states the legacy choice explicitly and is
+  invalid with `candidate_branch`.
+- **Direct launches.** Run
+  `python3 scripts/worker-records.py check-brief --worker-brief --run-dir "$RUN_DIR" [--manifest MANIFEST.json --job-id JOB_ID] BRIEF.md`.
+  `--worker-brief` needs an assignment authority: `--run-dir`, or
+  `--manifest`/`--job-id` for a managed job; without one the check is refused
+  rather than reported OK. `--run-dir` binds `task_id` and `assignment_revision` to the `workers.json`
+  roster entry and requires the brief and `output_directory` to be that
+  entry's directory. The roster records no repository or path scope, so a
+  brief that declares a `repository` or editable paths fails unless
+  `--manifest`/`--job-id` names the manifest job holding that assignment; the
+  job is normalized and checked by the same code as at the managed boundary.
+- **Leftovers and duplicates (both paths).** The check refuses unreplaced
+  template placeholders, a second declaration block, any restated
+  `task_id`, `assignment_revision`, `worker_mode`, `cwd`, `worktree`, `branch`,
+  `base`, `base_commit`, `repo`, `repository`, `candidate_branch`,
+  `output_directory`, `editable_paths`, `protected_paths`, `scope`,
+  `scope.readable`, `scope.editable`, or `scope.protected` line
+  outside the declaration (including in a copied YAML block), repeated instruction lines of 40 or more characters, and
+  repeated section headings. Quote/list prefixes and paired inline
+  code/emphasis formatting are normalized before comparison; heading text is compared across heading
+  levels. Duplicate comparisons preserve case in commands, paths, and headings.
+  See the [template's accepted Markdown limits](worker-brief.md). An apparent
+  `worker-brief` fence with unsupported info syntax
+  (for example `JSON worker-brief` or `json worker-brief extra`) is a hard
+  error, even on an otherwise legacy job. Unrelated language fences and
+  marker text nested inside another fence are not themselves declaration fences.
+
+Jail `check-brief --jail` inventory checks are unchanged. To use structured
+validation for a jail brief, replace its YAML assignment core with the
+[structured declaration](worker-brief.md), keep the jail inventory and import
+contracts, and add `--worker-brief` plus an assignment authority to the check.
 
 The brief must also name the concrete output directory and active result
 contract. Direct workers write `result.json` there last. For managed jobs, select
@@ -67,9 +133,7 @@ jail_work:
   required_context: [{path: "...", kind: test|fixture|source, purpose: "..."}]
   visibility_check: "Launcher must confirm every test and fixture exists and is readable before launch."
 repository_change:
-  worktree: "recorded linked worktree"
-  base_commit: "full commit ID"
-  candidate: "repo, branch, base, head in the result"
+  candidate: "repo, branch, base, head in the result; bind the worktree in the declaration"
 tracker_write:
   target: "exact tracker record"
   allowed_fields: []
@@ -103,7 +167,8 @@ retains final acceptance, synthesis, and release authority.
 Run this checklist before every worker call and keep its evidence with the
 assignment record:
 
-1. Bind the exact `task_id` in a machine-readable envelope and transport handle.
+1. Bind the exact `task_id` in a machine-readable envelope and transport handle,
+   and pass the [pre-launch brief validation](#pre-launch-brief-validation).
 2. State one observable objective and the assignment revision.
 3. Declare `worker_mode` as `literal` or `inferential`; do not use it for routing.
 4. Enumerate readable, editable, and protected paths, including the defaults.

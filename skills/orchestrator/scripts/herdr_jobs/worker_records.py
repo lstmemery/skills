@@ -14,9 +14,12 @@ from . import preflight_batch
 from . import review_dispositions
 from . import review_evidence
 from . import jail_brief
+from . import worker_brief
 
 
 MAX_REVISION = 2**63 - 1
+REDACTION_WARNING = ("{brief} mentions TrueNAS, system.general, wg0, or secrets "
+                     "but has no Output redaction section.")
 RESULT_REQUIRED_FIELDS = (
     "task_id",
     "assignment_revision",
@@ -114,35 +117,96 @@ def check_brief_redaction(brief_path):
     except OSError as error:
         records.invalid(f"cannot read brief at {brief_path}: {error.strerror or error}")
     # Markdown fenced code is illustrative content, not a section of the brief.
-    # CommonMark closes a fence only with its opening character and at least
-    # its opening length. An unclosed fence extends through end of document.
-    outside_fences = []
-    fence_char = None
-    fence_length = 0
-    for line in content.splitlines():
-        if fence_char is None:
-            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
-            if opening:
-                marker, info = opening.groups()
-                if marker[0] == "~" or "`" not in info:
-                    fence_char = marker[0]
-                    fence_length = len(marker)
-                    continue
-            outside_fences.append(line)
-            continue
-
-        closing = re.match(r"^ {0,3}([`~]+)[ \t]*$", line)
-        if (closing and closing.group(1)[0] == fence_char
-                and len(closing.group(1)) >= fence_length
-                and len(set(closing.group(1))) == 1):
-            fence_char = None
-            fence_length = 0
-    content = "\n".join(outside_fences)
+    content = "\n".join(line for _, line in worker_brief.BriefLines(content).prose)
     if not re.search(r"truenas|system\.general|\bwg0\b|secrets?", content, re.I):
         return False
     if re.search(r"^#{1,6}\s+Output redaction\s*$", content, re.I | re.M):
         return False
     return True
+
+
+def _manifest_assignment(manifest_path, job_id):
+    """Project one manifest job, the coordinator's assignment record, for a brief check."""
+    manifest_path = Path(manifest_path).absolute()
+    manifest = _read_json(manifest_path, "assignment manifest")
+    jobs = manifest.get("jobs") if isinstance(manifest, dict) else None
+    if not isinstance(jobs, list):
+        records.invalid(f"assignment manifest {manifest_path} has no jobs array")
+    matches = [job for job in jobs if isinstance(job, dict) and job.get("job_id") == job_id]
+    if len(matches) != 1:
+        records.invalid(f"assignment manifest {manifest_path} must contain exactly one job {job_id!r}")
+    job = matches[0]
+    # The same normalization records.prepare applies at the launch boundary.
+    records.fields(job, records.JOB_REQUIRED_FIELDS, records.JOB_OPTIONAL_FIELDS, "job")
+    records.identifier(job_id, "job_id")
+    records.validate_writer_intent(job, job_id)
+    scope = records.job_path_scope(job, job_id, manifest_path.parent)
+    cwd = records.job_repository_binding(job, job_id, manifest_path.parent)
+    if "worker_result" in job:
+        records.worker_result_record(job["worker_result"])
+    return worker_brief.assignment_from_job({**job, **scope, "cwd": cwd})
+
+
+def check_worker_brief(brief_path, run_dir=None, manifest=None, job_id=None):
+    """Return declaration, leftover, roster-identity, and assignment issues.
+
+    At least one assignment authority (``run_dir`` or ``manifest``) is required;
+    without one the declared identity could not be compared with anything.
+    """
+    if run_dir is None and manifest is None:
+        records.invalid("a worker-brief check needs an assignment authority: "
+                        "--run-dir, or --manifest with --job-id")
+    # Load the assignment first so a malformed manifest is refused even when
+    # the brief also fails.
+    assignment = _manifest_assignment(manifest, job_id) if manifest is not None else None
+    try:
+        content = Path(brief_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return [f"cannot read brief at {brief_path}: {getattr(error, 'strerror', None) or error}"]
+    declaration, issues = worker_brief.brief_issues(content)
+    if declaration is None:
+        return issues
+    if run_dir is not None:
+        run_root = Path(run_dir).resolve()
+        entries = [entry for entry in _parse_roster(run_root)
+                   if entry.identity.task_id == declaration["task_id"]]
+        if not entries:
+            return issues + [f"task_id {declaration['task_id']!r} is not registered in {run_root / 'workers.json'}"]
+        entry = entries[0]
+        if entry.identity.assignment_revision != declaration["assignment_revision"]:
+            issues.append(
+                f"assignment_revision {declaration['assignment_revision']} does not match roster "
+                f"revision {entry.identity.assignment_revision}")
+        directory = (run_root / entry.directory).resolve()
+        if Path(brief_path).resolve().parent != directory:
+            issues.append(
+                f"brief is not in the rostered directory {entry.directory.as_posix()!r} for "
+                f"task_id {declaration['task_id']!r}")
+        if assignment is not None:
+            # A direct worker writes into its rostered directory, not a managed one.
+            assignment["output_directory"] = str(directory)
+        else:
+            output = declaration["output_directory"]
+            if output == worker_brief.MANAGED_OUTPUT or Path(output).resolve() != directory:
+                issues.append(f"output_directory {output!r} does not match rostered directory {str(directory)!r}")
+            # The roster binds identity only; it cannot vouch for repository or edit scope.
+            if declaration["repository"] is not None or declaration["scope"]["editable"]:
+                issues.append("repository and editable scope cannot be verified from workers.json; "
+                              "pass --manifest and --job-id for the assignment record")
+    if assignment is not None:
+        issues.extend(worker_brief.assignment_issues(declaration, assignment))
+    return issues
+
+
+def _report_brief(brief, issues, redaction_warning, checked):
+    if redaction_warning:
+        issues.append(REDACTION_WARNING.format(brief=brief))
+    if issues:
+        for issue in issues:
+            print(f"ERROR: {issue}", file=sys.stderr)
+        return 1
+    print(f"BRIEF OK: {brief} ({checked} checked)")
+    return 0
 
 
 def _validate_candidate(candidate):
@@ -763,6 +827,19 @@ def build_parser():
         "--bundle-root", type=Path,
         help="root of the staged jail bundle (required with --jail)",
     )
+    brief_parser.add_argument(
+        "--worker-brief", action="store_true",
+        help="validate the json worker-brief declaration and flag duplicate or leftover instructions",
+    )
+    brief_parser.add_argument(
+        "--run-dir", type=Path,
+        help="bind the declared identity to this run's workers.json roster (requires --worker-brief)",
+    )
+    brief_parser.add_argument(
+        "--manifest", type=Path,
+        help="assignment manifest whose --job-id entry the declaration must match (requires --worker-brief)",
+    )
+    brief_parser.add_argument("--job-id", help="manifest job to compare (requires --manifest)")
 
     disposition_parser = commands.add_parser("record-disposition", help="write a terminal coordinator disposition")
     disposition_parser.add_argument("worker_dir", type=Path)
@@ -823,26 +900,26 @@ def main(argv=None):
                 parser.error("check-brief --jail requires --bundle-root")
             if args.bundle_root is not None and not args.jail:
                 parser.error("check-brief --bundle-root requires --jail")
+            if (args.run_dir is not None or args.manifest is not None) and not args.worker_brief:
+                parser.error("check-brief --run-dir and --manifest require --worker-brief")
+            if (args.manifest is None) != (args.job_id is None):
+                parser.error("check-brief --manifest and --job-id must be given together")
+            if args.worker_brief and args.run_dir is None and args.manifest is None:
+                parser.error("check-brief --worker-brief requires --run-dir or --manifest/--job-id; "
+                             "the declared identity cannot be verified without an assignment record")
             redaction_warning = check_brief_redaction(args.brief)
+            if args.worker_brief:
+                issues = check_worker_brief(args.brief, args.run_dir, args.manifest, args.job_id)
+                if args.jail:
+                    issues.extend(jail_brief.validate_jail_brief(args.brief, args.bundle_root))
+                return _report_brief(args.brief, issues, redaction_warning,
+                                     "worker-brief declaration")
             if args.jail:
                 issues = jail_brief.validate_jail_brief(args.brief, args.bundle_root)
-                if redaction_warning:
-                    issues.append(
-                        f"{args.brief} mentions TrueNAS, system.general, wg0, or secrets "
-                        "but has no Output redaction section."
-                    )
-                if issues:
-                    for issue in issues:
-                        print(f"ERROR: {issue}", file=sys.stderr)
-                    return 1
-                print(f"BRIEF OK: {args.brief} (jail inventory and bundle inputs checked)")
-                return 0
+                return _report_brief(args.brief, issues, redaction_warning,
+                                     "jail inventory and bundle inputs")
             if redaction_warning:
-                print(
-                    f"WARNING: {args.brief} mentions TrueNAS, system.general, wg0, "
-                    "or secrets but has no Output redaction section.",
-                    file=sys.stderr,
-                )
+                print(f"WARNING: {REDACTION_WARNING.format(brief=args.brief)}", file=sys.stderr)
                 return 1
             print(f"BRIEF OK: {args.brief}")
             return 0
