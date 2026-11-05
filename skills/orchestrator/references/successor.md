@@ -62,3 +62,11 @@ unavailable, pause mutations and new launches, preserve uncommitted changes and
 live workers, record the specific gap and durable resume instruction, and report
 that automatic renewal is unavailable. Do not clean, reset, release, or otherwise
 repurpose retained work as fallback.
+
+For Claude worker handoff, retain the managed run directory and exact owned
+handle. Once the live contract enables `claude` and its verified exact catalog
+per [host integration](host-integration.md), use managed launch/resume and its
+receipt collector; remove any historical direct-launch workaround from the
+successor's next-action instructions for those enabled model/effort pairs.
+An unverified or unlisted pair remains refused. Handoff observations never
+authorize a contract edit, dialog input, or an unmanaged production fallback.

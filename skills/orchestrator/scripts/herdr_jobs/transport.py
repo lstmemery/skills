@@ -26,6 +26,7 @@ from .local_lane import (check_preconditions as check_local_lane_preconditions,
 from .prompt import (PromptNotStarted, has_active_turn_status, pane_text_submit,
                      submit_and_verify)
 from .codex_trust import trust_cwd
+from .claude_trust import trust_cwd as trust_claude_cwd
 
 
 class BudgetExpired(Exception):
@@ -92,6 +93,30 @@ def catalog_models(catalog, runtime):
     if not isinstance(catalog.get("models"), list):
         raise JobError("unavailable_capability", "model discovery returned no models list")
     return catalog["models"]
+
+
+def claude_catalog(attestation):
+    """Validate operator authority independently of runtime alias discovery."""
+    fields(attestation, ["verified", "models"], label="claude_exact_catalog")
+    if attestation["verified"] is not True or not isinstance(attestation["models"], list) or not attestation["models"]:
+        raise JobError("unavailable_capability", "Claude exact catalog must be verified and nonempty")
+    seen = set()
+    for item in attestation["models"]:
+        fields(item, ["id", "efforts"], label="Claude exact catalog model")
+        model = item["id"]
+        if (not isinstance(model, str)
+                or re.fullmatch(r"claude-(?:sonnet|opus|haiku)-[0-9]+(?:-[0-9]+)+", model) is None
+                or model in seen):
+            raise JobError("unavailable_capability", "Claude catalog IDs must be unique exact version IDs; aliases are refused")
+        seen.add(model)
+        efforts = item["efforts"]
+        if (not isinstance(efforts, list) or not efforts
+                or not all(isinstance(effort, str) for effort in efforts)
+                or len(set(efforts)) != len(efforts)):
+            raise JobError("unavailable_capability", "Claude catalog efforts must be a nonempty unique list")
+        for effort in efforts:
+            validate_effort("claude-code", effort)
+    return attestation["models"]
 
 
 def pi_catalog(output):
@@ -228,7 +253,7 @@ class NativeTransport:
         self.deadline = deadline
         self.binding = fields(load_json(binding_path), ["schema_version", "verified", "herdr_help_sha256",
                               "herdr_agent_help_sha256", "herdr_pane_help_sha256", "supported_kinds", "orchestrator_help_sha256",
-                              "server_version", "paths", "jail_export"], ["jail_default"])
+                              "server_version", "paths", "jail_export"], ["jail_default", "claude_exact_catalog"])
         version(self.binding["schema_version"])
         if self.binding["verified"] is not True:
             raise JobError("unavailable_capability", "host contract is not verified")
@@ -377,7 +402,9 @@ class NativeTransport:
             elif runtime not in available and not (runtime == "pi" and shutil.which("pi")):
                 raise JobError("unavailable_capability", f"exact runtime unavailable: {runtime}; no substitution")
             if requested_model is not None and job["job_id"] not in models:
-                if runtime == "pi":
+                if runtime == "claude-code" and "claude_exact_catalog" in self.binding:
+                    catalog = {"models": claude_catalog(self.binding["claude_exact_catalog"])}
+                elif runtime == "pi":
                     catalog = pi_catalog(self.read_terminal(["pi", "--offline", "--list-models"]))
                 else:
                     catalog = self.read([self.orchestrator, "models", runtime, "--json", "--compact"])
@@ -548,9 +575,10 @@ class NativeTransport:
                     shlex.join([sys.executable, str(runner), "--request", str(launch_request)])]
         else:
             raise ValueError(f"unknown effect: {action}")
-        if (action == "start" and spec["route"]["runtime"] == "claude-code"
-                and "haiku" in (job["resolved_model"] or "").lower()):
-            self.configure_haiku_environment(job)
+        if action == "start" and spec["route"]["runtime"] == "claude-code":
+            trust_claude_cwd(spec["cwd"])
+            if "haiku" in (job["resolved_model"] or "").lower():
+                self.configure_haiku_environment(job)
         if codex_prompt_start:
             trust_cwd(spec["cwd"])
             # A prompt-bearing Codex invocation makes Herdr's startup timeout

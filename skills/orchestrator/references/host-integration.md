@@ -32,6 +32,40 @@ Set `verified` only after the actual jailed default has been confirmed. The
 managed helper refuses a missing attestation and any model or effort other than
 this verified pair.
 
+For ordinary Claude jobs, the operator may bind an exact catalog independently
+of `orchestrator models claude-code`, which can return only partial aliases.
+After verifying the exact model and each enabled effort on the installed CLI,
+add this top-level sibling and include `claude` in `supported_kinds` only after
+the named-worker identity checks above pass:
+
+```json
+"claude_exact_catalog": {
+  "verified": true,
+  "models": [
+    {"id": "claude-sonnet-5-5", "efforts": ["medium"]}
+  ]
+}
+```
+
+This minimal addition enables only Sonnet 5.5 at medium effort. Add other exact
+IDs and efforts only after verifying those pairs. Each entry has exactly `id`
+and a nonempty, unique `efforts` list. IDs must be versioned
+`claude-{sonnet,opus,haiku}-N-N` IDs (optionally with further numeric version/date
+segments); aliases, duplicate IDs, unknown fields, and efforts outside `low`,
+`medium`, `high`, `xhigh` invalidate the whole attestation. When present, this
+catalog is authoritative: malformed, unverified, or unlisted entries do not fall
+back to runtime discovery. Without it, only the existing complete exact runtime
+catalog can pass; a partial alias catalog still fails closed. Runtime availability,
+Herdr kind/identity binding, routing authority, and provider admission remain
+separate required gates.
+
+Verify the coordinator and worker share Claude's config location and canonical
+cwd. Managed starts pre-trust only that cwd as described in
+[managed jobs](managed-jobs.md). Check a fresh cwd with quotes/Unicode, backup
+permissions and idempotence, idle startup, then exactly one prompt. A remaining
+trust/authentication dialog must remain blocked with no input sent. Never use
+an offline fixture result as the live canary attestation.
+
 Set `verified: true` only after those facts are established. It is an operator assertion about a verified contract, not a script-generated attestation. No keys or private configuration snapshots belong in this file. A changed socket endpoint, server version, or help digest stops execution rather than silently retargeting an existing run. The endpoint binding cannot identify a process replacement that reuses the same socket path; Herdr must expose a process-generation value before the contract can enforce that stronger guarantee.
 
 ## Exercise the integration
@@ -39,8 +73,9 @@ Set `verified: true` only after those facts are established. It is an operator a
 Claude support in the adapter does not enable it on an unverified host. Stage
 the proposed `supported_kinds` addition separately from the live contract, and
 keep that live contract unchanged until the operator verification above passes.
-For each enabled exact Claude model, verify discovery includes the exact ID and
-supported effort metadata; a partial alias catalog still refuses launch. Claude
+For each enabled exact Claude model, verify the operator-attested exact catalog
+above or complete runtime discovery supplies its exact ID and effort metadata;
+a partial alias catalog alone still refuses launch. Claude
 efforts above `xhigh` are refused even if the catalog advertises them. Before
 enabling Haiku, also verify `herdr pane run` exports persist into a later agent
 start in the same pane, and that the attempt-specific compaction readback is
