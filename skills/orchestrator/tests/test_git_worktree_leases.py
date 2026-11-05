@@ -326,6 +326,31 @@ class GitWorktreeLeaseTest(unittest.TestCase):
         self.assertEqual(preview.returncode, 0, preview.stderr)
         self.assertEqual(json.loads(preview.stdout)["batch_state"], "preview")
 
+    def test_status_ignores_orphan_directories_with_dangling_gitfiles(self):
+        acquired = self.acquire(self.base)
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        record = json.loads(acquired.stdout)
+        orphan = self.home / ".local/share/orchestrator/worktrees/repo-orphan"
+        orphan.mkdir()
+        (orphan / ".git").write_text(f"gitdir: {self.root}/gone/.git/worktrees/repo-orphan\n")
+        environment = {**os.environ, "HOME": str(self.home)}
+
+        status = subprocess.run([sys.executable, str(ALLOCATOR), "status", "--lease-id",
+                                 record["lease_id"]], cwd=self.root, env=environment,
+                                capture_output=True, text=True, timeout=15)
+
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["lease"]["lease_id"], record["lease_id"])
+
+        # A real git dir whose marker names a different worktree must still fail closed.
+        git_dir = Path(self.git("-C", record["path"], "rev-parse", "--absolute-git-dir"))
+        marker = git_dir / "orchestrator-lease.json"
+        marker.write_text(marker.read_text().replace(record["path"], str(self.root / "elsewhere")))
+        status = subprocess.run([sys.executable, str(ALLOCATOR), "status", "--lease-id",
+                                 record["lease_id"]], cwd=self.root, env=environment,
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(status.returncode, 0)
+
     def test_forged_or_unavailable_local_lease_fails_closed(self):
         acquired = self.acquire(self.base)
         self.assertEqual(acquired.returncode, 0, acquired.stderr)
