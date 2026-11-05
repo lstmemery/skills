@@ -371,6 +371,28 @@ def _local_lease_active_use(record):
     return None
 
 
+def _dangling_gitfile(worktree):
+    """True when .git is a gitfile whose target no longer exists.
+
+    The lease marker lives in the Git metadata directory, so such an orphan
+    cannot hold a lease. Any other failure still reaches Git and fails closed.
+    """
+    gitfile = worktree / ".git"
+    try:
+        if gitfile.is_symlink() or not gitfile.is_file():
+            return False
+        text = gitfile.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    first = text.splitlines()[0] if text.splitlines() else ""
+    if not first.startswith("gitdir:"):
+        return False
+    target = Path(first[len("gitdir:"):].strip())
+    if not target.is_absolute():
+        target = worktree / target
+    return not target.exists()
+
+
 def _active_local_lease_records(root, run_command):
     if not root.exists():
         return []
@@ -380,7 +402,7 @@ def _active_local_lease_records(root, run_command):
         unavailable(f"cannot list Git worktree leases: {error.strerror}")
     records = []
     for worktree in worktrees:
-        if not (worktree / ".git").exists():
+        if not (worktree / ".git").exists() or _dangling_gitfile(worktree):
             continue
         git_dir = _worktree_git_dir(worktree, run_command)
         marker = git_dir / GIT_LEASE_MARKER
