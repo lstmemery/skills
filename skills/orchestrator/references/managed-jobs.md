@@ -188,6 +188,28 @@ The former `-c projects.*.trust_level` override did not suppress the live trust
 dialog and is not the prevention mechanism. Jail `exec` workers keep their
 existing launcher and config; this pre-trust applies to ordinary host workers.
 
+Immediately before an ordinary Claude start, the helper also pre-trusts only
+the canonical worker cwd. Claude Code 2.1.318 stores this as
+`projects[canonical_cwd].hasTrustDialogAccepted: true` in `~/.claude.json`, or
+`$CLAUDE_CONFIG_DIR/.claude.json` when that absolute override is set. The
+coordinator and Herdr worker must share that config location. The format and
+path selector were verified from the installed package's `yy`, `Q7e`, `TDr`,
+and `X_` functions; the public [settings documentation](https://code.claude.com/docs/en/settings)
+also identifies `.claude.json` as the per-project trust store. Legacy
+`.config.json` and custom OAuth config selection require a verified adapter
+and are refused by this path.
+
+A sibling `.claude.json.orchestrator.lock` serializes managed trust writers.
+The helper preserves all unrelated JSON bytes, writes and fsyncs a mode-0600
+`.claude.json.orchestrator-backup-*` copy and its directory before atomic
+replacement, and makes no config write or backup when the exact cwd is already
+trusted. It never adds ancestor, sibling, or repository-root trust. Malformed
+JSON, duplicate keys, invalid project shapes, symlinks, and nonregular files
+refuse start. A detected external edit aborts; as with Codex, an editor outside
+the managed lock can race the final replace. No credentials file is read.
+Persisted trust may still be ignored by the runtime or a different worker
+environment; a remaining dialog fails closed with no input or prompt sent.
+
 A Codex startup trust dialog is a failed launch with an actionable config/cwd
 message. No dialog input or task replay is sent. The pending start is resolved
 as failed, admission is released, and `finish` can close that owned workspace
@@ -437,7 +459,7 @@ For a selected Haiku model (including its native alias), the launcher first
 exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` in that owned pane and verifies
 an attempt-specific readback. An unverified environment leaves the start effect
 unresolved and sends no runtime start or task prompt. The environment is scoped
-to the worker pane; shared Claude configuration is not edited.
+to the worker pane; the shared config edit is limited to exact-cwd trust above.
 
 Claude leases and backoffs use the `claude` provider pool, independently of
 Codex. The usual receipt/artifact collector applies to Claude: list `DONE` as a

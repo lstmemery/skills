@@ -86,7 +86,8 @@ class TransportTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.codex_home = self.root / "codex-home"
-        environment = patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)})
+        environment = patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home),
+                                              "CLAUDE_CONFIG_DIR": str(self.root / "claude-home")})
         environment.start()
         self.addCleanup(environment.stop)
         self.jail_exports = ((self.root, PurePosixPath("/work")),)

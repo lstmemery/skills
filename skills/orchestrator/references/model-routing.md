@@ -175,7 +175,9 @@ reason, and local-lane completion records the independent validator result.
 
 `claude` is the CSV harness alias for runtime `claude-code`, Herdr kind `claude`.
 Its managed start requires the verified host binding, exact model/effort
-discovery, and the Claude admission pool. Claude effort is capped at `xhigh`;
+discovery or the operator-attested `claude_exact_catalog` in
+[host integration](host-integration.md), and the Claude admission pool.
+Claude effort is capped at `xhigh`;
 Haiku starts additionally require the pane-scoped compaction environment
 described in [managed jobs](managed-jobs.md). Offline support does not attest a
 live host contract or authorize a manual fallback launch.
@@ -201,8 +203,10 @@ capability gaps rather than assumed upgrades.
 Codex discovery accepts both the older flat model catalog and current
 `runtimes[].models` catalog. Claude's installed discovery may be partial and
 contain only `opus`/`sonnet` aliases. That does not verify the CSV's exact
-Claude versions: hold the affected choice until an exact available catalog
-adapter is verified. Level 8 can recover to its configured Codex fallback with
+Claude versions: hold the affected choice until a complete exact runtime catalog
+or the operator-attested exact host catalog is verified. A missing attestation
+leaves partial alias discovery refused; an existing attestation must be well
+formed and list the requested model/effort. Level 8 can recover to its configured Codex fallback with
 that evidence. Levels 1–7 keep their Codex primaries; an unavailable Claude
 fallback is a gap, not permission to invent another route.
 

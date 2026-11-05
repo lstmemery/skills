@@ -15,5 +15,11 @@
     "agent_kind": ["SET_FROM_VERIFIED_HOST_RESPONSE"],
     "agent_name": ["SET_FROM_VERIFIED_HOST_RESPONSE"]
   },
-  "jail_export": null
+  "jail_export": null,
+  "claude_exact_catalog": {
+    "verified": false,
+    "models": [
+      {"id": "claude-sonnet-5-5", "efforts": ["medium"]}
+    ]
+  }
 }

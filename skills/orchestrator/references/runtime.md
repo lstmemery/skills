@@ -404,7 +404,11 @@ Managed execution requires `claude` in the live host contract's
 `supported_kinds`, added only after the named helper-owned Claude worker check
 in [host integration](host-integration.md) verifies kind, pane, name, idle
 startup, native `--model`/`--effort` arguments, and prompt observation. Until
-that live binding is verified, the managed refusal stands. Check startup
+that live binding is verified, the managed refusal stands. Verify
+model/effort authority via complete exact discovery or the verified
+`claude_exact_catalog` host attestation; aliases alone never suffice. Managed
+start pre-trusts only the canonical cwd as described in
+[managed jobs](managed-jobs.md). Check startup
 readiness before submission. A prompt timeout or stalled response can occur
 after delivery; read agent state/output before any resend.
 
