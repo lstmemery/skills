@@ -404,6 +404,9 @@ class NativeTransport:
             if requested_model is not None and job["job_id"] not in models:
                 if runtime == "claude-code" and "claude_exact_catalog" in self.binding:
                     catalog = {"models": claude_catalog(self.binding["claude_exact_catalog"])}
+                    if requested_effort is None:
+                        raise JobError("unavailable_capability",
+                                       "Claude attested catalog requires an explicit supported effort; no default is authorized")
                 elif runtime == "pi":
                     catalog = pi_catalog(self.read_terminal(["pi", "--offline", "--list-models"]))
                 else:

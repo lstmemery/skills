@@ -50,6 +50,18 @@ class ClaudeCatalogTest(unittest.TestCase):
         with self.assertRaisesRegex(JobError, "discovery incomplete"):
             self.preflight()
 
+    def test_attested_model_without_requested_effort_refuses_new_and_pending_jobs(self):
+        self.fixture.spec.pop("override")
+        self.adapter.binding["claude_exact_catalog"] = {"verified": True, "models": [
+            {"id": "claude-sonnet-5-5", "efforts": ["medium"]}]}
+        pending = {"jobs": [{"spec": self.fixture.spec, "resolved_model": "claude-sonnet-5-5",
+                             "phase": "pending", "pending_effect": None}]}
+        for existing in (None, pending):
+            with self.subTest(resuming=existing is not None):
+                with self.assertRaises(JobError) as raised:
+                    self.adapter.preflight({"jobs": [self.fixture.spec], "policy": {}}, existing)
+                self.assertEqual(raised.exception.kind, "unavailable_capability")
+
     def test_malformed_or_unverified_attestation_never_falls_back_to_discovery(self):
         self.fixture.catalog = {"models": [{"id": "claude-sonnet-5-5", "efforts": ["medium"]}]}
         for attestation in (None, [], {}, {**ATTESTATION, "verified": False},
