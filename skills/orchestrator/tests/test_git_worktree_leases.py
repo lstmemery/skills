@@ -314,6 +314,7 @@ class GitWorktreeLeaseTest(unittest.TestCase):
                 "output_expectation": "A repository change.",
                 "override": {"runtime": "codex", "instruction": "Make the change."},
                 "writes_repository": True,
+                "editable_paths": [str(Path(record["path"]) / "out")],
                 "repository_worktree": record,
             }],
         }))

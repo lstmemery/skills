@@ -397,6 +397,7 @@ class WorktreeAllocationTest(unittest.TestCase):
                       "output_expectation": "A report.",
                       "override": {"runtime": "codex", "instruction": "Write the report."},
                       "writes_repository": True,
+                      "editable_paths": [str(self.root / "out")],
                       "repository_worktree": record}]}))
 
         with self.assertRaisesRegex(JobError, "cwd must equal repository_worktree.path"):
@@ -416,6 +417,7 @@ class WorktreeAllocationTest(unittest.TestCase):
                       "output_expectation": "A report.",
                       "override": {"runtime": "codex", "instruction": "Write the report."},
                       "writes_repository": True,
+                      "editable_paths": [str(worktree / "out")],
                       "repository_worktree": record}]}))
 
         prepared = prepare(manifest, PACKAGE / "launch-policy.json")
