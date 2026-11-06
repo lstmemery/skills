@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "cwd": "skills/orchestrator",
+  "tests": [
+    {
+      "module": "test_git_worktree_leases",
+      "reason": "creates and verifies linked worktree leases"
+    },
+    {
+      "module": "test_worktrees",
+      "reason": "worktree allocation and git layout probes"
+    },
+    {
+      "module": "test_local_lane",
+      "reason": "local lane worktree gates query git"
+    },
+    {
+      "module": "test_jobs",
+      "reason": "managed job records verify repository worktrees"
+    },
+    {
+      "module": "test_review_jobs",
+      "reason": "review jobs capture git history"
+    },
+    {
+      "module": "test_worker_records",
+      "reason": "candidate records resolve git refs"
+    },
+    {
+      "module": "test_worker_brief",
+      "reason": "briefs validate worktree and branch"
+    },
+    {
+      "module": "test_model_ladder",
+      "reason": "ladder tests reference worktree gates"
+    },
+    {
+      "module": "test_route_decision",
+      "reason": "native local route leases a worktree"
+    },
+    {
+      "module": "test_ladder_regressions",
+      "reason": "ladder regressions reference worktrees"
+    },
+    {
+      "module": "test_integration_preflight",
+      "reason": "builds synthetic git repositories"
+    },
+    {
+      "module": "test_claude_trust",
+      "reason": "trust tests create worktrees and git repositories"
+    },
+    {
+      "module": "test_codex_trust",
+      "reason": "trust tests create worktrees and git repositories"
+    }
+  ]
+}

@@ -69,6 +69,22 @@ Use a reason to make the handoff clear; deferred tasks appear in the report.
 Omitted tasks, unknown deferrals, and tasks both selected and deferred block the
 batch, while allowing the supplied candidates to proceed as a partial landing.
 
+### Checkout context for git/worktree-sensitive tests
+
+Tests that shell out to git or inspect worktree layout can pass in a linked
+worktree and fail in a primary checkout (#1264). Such modules are declared in
+`tests/checkout-sensitive.json`, each with a reason; a test in
+`test_checkout_preflight.py` fails when a test module that mentions git or
+worktrees is missing from it. Once every candidate is otherwise ready, the
+preflight clones the repo fresh (`.git` a directory, git dir equal to the
+common dir, verified rather than assumed), checks out the target head, merges
+each candidate head, and runs each declared module there. The report's
+`checkout_preflight` block names the checkout context (`fresh-primary-checkout`,
+path, git dirs, merged head) on every module with its status and test count.
+A failing module, a module that runs zero tests, or a candidate that does not
+merge cleanly blocks the batch. A merged tree without the manifest records
+`not_applicable`. Linked-worktree results are not integration evidence.
+
 For managed coding and review jobs, pass their run directories directly instead
 of assembling a batch roster or copying records:
 

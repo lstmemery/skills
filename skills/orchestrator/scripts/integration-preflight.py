@@ -20,7 +20,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from herdr_jobs import review_evidence
+from herdr_jobs import checkout_preflight, review_evidence
 from herdr_jobs.managed_preflight import materialize_runs
 # Keep historical parser imports available to callers; the domain owns their rules.
 from herdr_jobs.review_evidence import (
@@ -618,6 +618,16 @@ def main(argv=None):
         if target_head_after != target_head:
             for candidate in candidates:
                 block_candidate(candidate, "target branch moved during preflight")
+        checkout = None
+        if (
+            not batch_issues
+            and all(candidate["status"] == "ready" for candidate in candidates)
+        ):
+            checkout = checkout_preflight.run_checkout_preflight(
+                repo, target_head, [candidate["head"] for candidate in candidates]
+            )
+            if checkout["status"] == "blocked":
+                batch_issues.extend(checkout["issues"])
         outcome = (
             "ready"
             if not batch_issues and all(candidate["status"] == "ready" for candidate in candidates)
@@ -637,6 +647,8 @@ def main(argv=None):
             ],
             "batch_issues": batch_issues,
         }
+        if checkout is not None:
+            report["checkout_preflight"] = checkout
         if managed_jobs is not None:
             report.update(managed_jobs=managed_jobs, managed_input_dir=str(input_dir))
         if native_imports:
