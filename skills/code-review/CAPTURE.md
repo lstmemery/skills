@@ -140,3 +140,15 @@ one way: the commit is refused unless gitleaks actually ran, and
 `CODE_REVIEW_SECRETS_SCANNER=stdlib-only` is ignored. Exit 1 means a match or
 missing coverage; exit 2 means invalid input. The hook is not active until
 enabled with `git config core.hooksPath` (or a copied hook) by the repo owner.
+`core.hooksPath` is resolved relative to the repository root, and git silently
+skips a hooks directory that does not exist, so verify after enabling that a
+staged fake token is refused. For a repository that contains this skill at
+`skills/code-review`, use `skills/code-review/hooks`; for one that holds this
+checkout under `skills/` (such as `~/agents`), use `skills/skills/code-review/hooks`.
+
+The commit gate requires a live-fingerprint denylist. It reads
+`CODE_REVIEW_SECRET_FINGERPRINTS` or, when unset, `~/.config/code-review/secret-fingerprints`
+(`$XDG_CONFIG_HOME` honoured). A missing or empty file refuses the commit (exit
+2). Feed the file with `scripts/build_fingerprint_denylist.py`, which reads
+secret values from stdin and stores only 16-character sha256 prefixes at mode 600.
+The gate always scans the current directory's repository; no variable redirects it.
