@@ -45,6 +45,14 @@
     {
       "module": "test_integration_preflight",
       "reason": "builds synthetic git repositories"
+    },
+    {
+      "module": "test_claude_trust",
+      "reason": "trust tests create worktrees and git repositories"
+    },
+    {
+      "module": "test_codex_trust",
+      "reason": "trust tests create worktrees and git repositories"
     }
   ]
 }

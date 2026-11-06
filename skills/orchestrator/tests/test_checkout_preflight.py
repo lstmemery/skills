@@ -168,6 +168,45 @@ class FreshPrimaryCheckoutTest(unittest.TestCase):
         self.assertEqual(report["status"], "blocked")
         self.assertIn("does not merge cleanly", report["issues"][0])
 
+    def test_fully_skipped_module_cannot_pass(self):
+        skipped = ("import unittest\n\nclass S(unittest.TestCase):\n"
+                   "    @unittest.skip('x')\n    def test_a(self):\n        pass\n")
+        target = self.declare(test_skipped=skipped)
+        head = self.candidate()
+
+        report = checkout_preflight.run_checkout_preflight(self.repo, target, [head])
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(report["tests"][0]["tests_skipped"], 1)
+
+    def test_candidate_cannot_delete_the_target_manifest(self):
+        target = self.declare(test_linked_only=LINKED_ONLY)
+        git("switch", "-q", "-c", "nomanifest", target, cwd=self.repo)
+        (self.tests / "checkout-sensitive.json").unlink()
+        self.commit("delete manifest")
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        git("switch", "-q", "main", cwd=self.repo)
+
+        report = checkout_preflight.run_checkout_preflight(self.repo, target, [head])
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertIn("removes", report["issues"][0])
+
+    def test_candidate_cannot_drop_declared_modules(self):
+        target = self.declare(test_linked_only=LINKED_ONLY, test_anywhere=ANYWHERE)
+        git("switch", "-q", "-c", "dropper", target, cwd=self.repo)
+        (self.tests / "checkout-sensitive.json").write_text(json.dumps({
+            "version": 1, "cwd": "skills/orchestrator",
+            "tests": [{"module": "test_anywhere", "reason": "synthetic"}]}))
+        self.commit("drop module")
+        head = git("rev-parse", "HEAD", cwd=self.repo)
+        git("switch", "-q", "main", cwd=self.repo)
+
+        report = checkout_preflight.run_checkout_preflight(self.repo, target, [head])
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertIn("test_linked_only", report["issues"][0])
+
     def test_tree_without_manifest_is_not_applicable(self):
         head = self.candidate()
         report = checkout_preflight.run_checkout_preflight(self.repo, self.base, [head])

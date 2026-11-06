@@ -23,6 +23,8 @@ CONTEXT_KIND = "fresh-primary-checkout"
 MODULE = re.compile(r"^test_[A-Za-z0-9_]+$")
 SUMMARY_RAN = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
 SUMMARY_FAILED = re.compile(r"^FAILED \((.*)\)$", re.MULTILINE)
+SUMMARY_SKIPPED = re.compile(r"\bskipped=(\d+)")
+SUMMARY_STATUS = re.compile(r"^(?:OK|FAILED) \((.*)\)$", re.MULTILINE)
 MODULE_TIMEOUT_SECONDS = 1800
 
 
@@ -47,11 +49,20 @@ def load_manifest(tree):
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text())
+        return parse_manifest(path.read_text(), tree)
+    except OSError as error:
+        raise CheckoutError(f"invalid checkout-sensitive manifest: {error}") from error
+
+
+def parse_manifest(text, tree):
+    try:
+        data = json.loads(text)
         cwd = data["cwd"]
         modules = [entry["module"] for entry in data["tests"]]
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (ValueError, KeyError, TypeError) as error:
         raise CheckoutError(f"invalid checkout-sensitive manifest: {error}") from error
+    if not isinstance(data, dict):
+        raise CheckoutError("invalid checkout-sensitive manifest: not an object")
     if data.get("version") != 1 or not isinstance(cwd, str) or not modules:
         raise CheckoutError("invalid checkout-sensitive manifest: version 1 with tests required")
     if len(set(modules)) != len(modules) or not all(
@@ -62,6 +73,14 @@ def load_manifest(tree):
     if not (root / cwd / "tests").is_dir() or not (root / cwd).resolve().is_relative_to(root):
         raise CheckoutError("invalid checkout-sensitive manifest: cwd has no tests directory")
     return cwd, modules
+
+
+def target_manifest(checkout, target_head):
+    """Manifest declared at the target head itself, or None if it has none."""
+    shown = _git(checkout, "show", f"{target_head}:{MANIFEST}", check=False)
+    if shown.returncode != 0:
+        return None
+    return parse_manifest(shown.stdout, checkout)
 
 
 def describe_context(checkout):
@@ -122,11 +141,19 @@ def run_module(checkout, cwd, module):
     output = result.stdout + result.stderr
     ran = SUMMARY_RAN.search(output)
     tests_run = int(ran.group(1)) if ran else 0
+    skipped = 0
+    status_line = SUMMARY_STATUS.search(output)
+    if status_line:
+        match = SUMMARY_SKIPPED.search(status_line.group(1))
+        skipped = int(match.group(1)) if match else 0
+    executed = tests_run - skipped
     failed = SUMMARY_FAILED.search(output)
-    # A module that discovers no tests proves nothing, so it cannot pass.
-    passed = result.returncode == 0 and tests_run > 0
+    # A module that discovers or executes no tests proves nothing (a fully
+    # skipped module included), so it cannot pass.
+    passed = result.returncode == 0 and executed > 0
     record = {"module": module, "status": "passed" if passed else "failed",
-              "returncode": result.returncode, "tests_run": tests_run}
+              "returncode": result.returncode, "tests_run": tests_run,
+              "tests_skipped": skipped}
     if failed:
         record["summary"] = failed.group(1)
     if not passed:
@@ -141,6 +168,16 @@ def run_checkout_preflight(repo, target_head, candidate_heads):
         try:
             checkout = build_checkout(repo, target_head, candidate_heads, parent)
             manifest = load_manifest(checkout)
+            required = target_manifest(checkout, target_head)
+            if required is not None:
+                # The target already opted in: a candidate must not switch the
+                # stage off or drop declared modules.
+                if manifest is None:
+                    raise CheckoutError(f"candidate removes {MANIFEST} declared at the target head")
+                dropped = [m for m in required[1] if m not in manifest[1]]
+                if dropped or required[0] != manifest[0]:
+                    raise CheckoutError("candidate drops checkout-sensitive modules or changes "
+                                        f"cwd declared at the target head: {', '.join(dropped)}")
             if manifest is None:
                 return {"status": "not_applicable",
                         "reason": f"no {MANIFEST} in the merged tree", "tests": []}

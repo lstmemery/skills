@@ -10,16 +10,6 @@ from unittest.mock import patch
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-retry = types.ModuleType("herdr_jobs.retry")
-retry.codex_retry_cli_args = lambda value: []
-retry.validate_codex_retry_provider = lambda value: None
-retry.validate_pi_project_settings = lambda cwd, value: None
-retry.prepare_pi_run_profile = lambda *args, **kwargs: None
-worktrees = types.ModuleType("herdr_jobs.worktrees")
-worktrees.verify_repository_worktree = lambda *args: None
-sys.modules.setdefault("herdr_jobs.retry", retry)
-sys.modules.setdefault("herdr_jobs.worktrees", worktrees)
-
 from herdr_jobs.model_ladder import load_ladder, select
 from herdr_jobs.records import JobError, prepare
 from herdr_jobs.transport import Deadline, NativeTransport, _codex_config, _native_model
