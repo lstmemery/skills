@@ -261,7 +261,15 @@ def trust_cwd(cwd, path=None):
         return {"changed": True, "config": str(path), "cwd": cwd, "backup": backup}
 
 
-def _stale_paths(document):
+def run_before(candidate, cutoff):
+    """True when candidate is under ORCHESTRATOR_ROOT/runs/<YYYY-MM-DD>/ with a date before cutoff."""
+    if cutoff is None:
+        return False
+    parts = candidate.relative_to(ORCHESTRATOR_ROOT).parts
+    return len(parts) > 2 and parts[0] == "runs" and parts[1] < cutoff
+
+
+def _stale_paths(document, runs_before=None):
     projects = document.get("projects", {})
     if not isinstance(projects, dict):
         raise JobError("invalid_input", "Codex projects must be a TOML table")
@@ -279,6 +287,9 @@ def _stale_paths(document):
         try:
             candidate.lstat()
         except FileNotFoundError:
+            paths.append(name)
+            continue
+        if run_before(candidate, runs_before):
             paths.append(name)
     return sorted(paths)
 
@@ -299,15 +310,15 @@ def _pruned(source, paths):
     return source.encode()
 
 
-def prune_trust(path=None, *, apply=False):
+def prune_trust(path=None, *, apply=False, runs_before=None):
     """Report stale managed project trust entries; mutation requires opt-in."""
     path = Path(path) if path is not None else config_path()
     if not apply:
-        paths = _stale_paths(_parse(_read(path)))
+        paths = _stale_paths(_parse(_read(path)), runs_before)
         return {"dry_run": True, "count": len(paths), "paths": paths, "backup": None}
     with _locked(path):
         original = _read(path)
-        paths = _stale_paths(_parse(original))
+        paths = _stale_paths(_parse(original), runs_before)
         backup = None
         if paths:
             backup = _replace(path, original, _pruned(original.decode(), paths))

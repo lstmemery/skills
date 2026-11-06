@@ -472,6 +472,26 @@ class TransportTest(unittest.TestCase):
                                  "--pane", "moved:1", "--timeout", "5000", "--", "-C", str(self.root),
                                  "-m", "native-id", prompt])
 
+    def test_start_registers_the_exact_cwd_in_each_cli_config_before_launch(self):
+        # Codex 0.166.0 ignores parent-path trust in git repos; Claude Code 2.1.318 honours it.
+        # The managed fallback is to register every launch cwd individually.
+        codex = FakeHerdr(start_code=1)
+        self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)
+        with patch("herdr_jobs.transport.command", codex.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+        config = tomllib.loads((self.codex_home / "config.toml").read_text())
+        self.assertEqual(config["projects"][str(self.root.resolve())]["trust_level"], "trusted")
+
+        claude = FakeHerdr()
+        self.spec.update(kind="claude", model="claude-sonnet-5-5",
+                         route={"mode": "agent", "runtime": "claude-code"}, override={"effort": "high"})
+        self.adapter.binding["supported_kinds"].append("claude")
+        self.job["resolved_model"] = "claude-sonnet-5-5"
+        with patch("herdr_jobs.transport.command", claude.command):
+            self.adapter.effect("start", self.job, "Assigned work")
+        document = json.loads((self.root / "claude-home" / ".claude.json").read_text())
+        self.assertIs(document["projects"][str(self.root.resolve())]["hasTrustDialogAccepted"], True)
+
     def test_codex_multiline_start_round_trips_prompt_through_file_pointer(self):
         fake = FakeHerdr(start_code=1)
         self.adapter.raw = NativeTransport.raw.__get__(self.adapter, NativeTransport)

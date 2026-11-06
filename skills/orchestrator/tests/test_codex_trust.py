@@ -174,6 +174,19 @@ class CodexTrustTest(unittest.TestCase):
         self.assertEqual(Path(report["backup"]).read_bytes(), original)
         self.assertEqual(prune_trust(self.config)["count"], 0)
 
+    def test_prune_runs_before_removes_old_existing_run_entries_only(self):
+        old = self.root / "runs" / "2026-10-01" / "done"
+        new = self.root / "runs" / "2026-11-05" / "active"
+        kept = self.root / "worktrees" / "kept"
+        for path in (old, new, kept):
+            path.mkdir(parents=True)
+        self.config.write_text("".join(f'[projects.{json.dumps(str(path))}]\ntrust_level="trusted"\n'
+                                       for path in (old, new, kept)))
+        self.assertEqual(prune_trust(self.config)["count"], 0)
+        self.assertEqual(prune_trust(self.config, runs_before="2026-11-01")["paths"], [str(old)])
+        prune_trust(self.config, apply=True, runs_before="2026-11-01")
+        self.assertEqual(sorted(tomllib.loads(self.config.read_text())["projects"]), sorted([str(new), str(kept)]))
+
     def test_prune_inline_and_dotted_entries_preserves_live_and_nontrust_values(self):
         missing = json.dumps(str(self.root / "gone"))
         other = json.dumps(str(self.root / "gone-with-settings"))
