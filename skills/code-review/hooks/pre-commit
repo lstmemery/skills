@@ -1,0 +1,7 @@
+#!/bin/sh
+# Pre-commit secrets gate. Not active until enabled; see the 1075 report.
+# Resolves the gate relative to this file so it works from any checkout.
+here=$(cd "$(dirname "$0")" && pwd -P)
+top=$(git rev-parse --show-toplevel) || exit 2
+cd "$top" || exit 2
+exec python3 -I "$here/../scripts/commit_gate.py"

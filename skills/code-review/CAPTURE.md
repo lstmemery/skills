@@ -129,3 +129,14 @@ entries. It favors reliable local evidence over minimal disk use; it claims corr
 the recorded evidence only, not review speed. Authorities
 are explicit local paths; spec discovery and missing-spec handling remain in the
 calling skill.
+
+## Commit-path gate
+
+`hooks/pre-commit` runs `scripts/commit_gate.py`, which feeds staged index
+content through the same `SecretGate` used for capture (redacted gitleaks, hex
+false-positive tuning, `.code-review-secrets-allow`, and the
+`CODE_REVIEW_SECRET_FINGERPRINTS` live-fingerprint denylist). It is stricter in
+one way: the commit is refused unless gitleaks actually ran, and
+`CODE_REVIEW_SECRETS_SCANNER=stdlib-only` is ignored. Exit 1 means a match or
+missing coverage; exit 2 means invalid input. The hook is not active until
+enabled with `git config core.hooksPath` (or a copied hook) by the repo owner.
