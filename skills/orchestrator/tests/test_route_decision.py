@@ -310,6 +310,7 @@ class RouteDecisionTest(unittest.TestCase):
         request = self.request(
             backend="native", task_class="summary", local_lane=True,
             cwd=str(worktree), writes_repository=True, repository_worktree=lease,
+            editable_paths=[str(worktree / "out")],
             acceptance_tests=[str(self.root / "task.md")],
             independent_validator={"argv": ["python3", "validate.py", "{output_dir}"]},
             override={"instruction": "Use the approved local Pi/Qwen tuple at medium effort.",

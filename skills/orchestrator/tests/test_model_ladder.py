@@ -91,6 +91,7 @@ class LadderTest(unittest.TestCase):
                                "base_commit": "a" * 40}
         values = dict(
             local_lane=True, writes_repository=True, repository_worktree=repository_worktree,
+            editable_paths=[str(self.root / "out")],
             acceptance_tests=[str(acceptance)],
             independent_validator={"argv": ["python3", "validate.py", "{output_dir}"]},
             override={"instruction": "Use the explicitly approved local route.", "runtime": "pi",
@@ -165,7 +166,7 @@ class LadderTest(unittest.TestCase):
         escalation = self.escalation(2)
         escalation["failure"]["category"] = "quality"
         with self.assertRaisesRegex(JobError, "concrete reasoning failure"):
-            self.prepared(writes_repository=True,
+            self.prepared(writes_repository=True, editable_paths=[str(self.root / "out")],
                           repository_worktree={"schema_version": 1, "path": str(self.root),
                                                "lease_id": "lease", "lease_holder": "routes",
                                                "repo_root": str(self.root),
