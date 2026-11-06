@@ -843,6 +843,48 @@ class IntegrationPreflightTests(unittest.TestCase):
                          ["w-fixture:p1", "w-fixture:p2"])
         self.assertFalse((self.run_dir / "workers.txt").exists())
 
+    def declare_checkout_tests(self, body):
+        tests = self.repo / "skills/orchestrator/tests"
+        tests.mkdir(parents=True)
+        (tests / "test_probe.py").write_text(body)
+        (tests / "checkout-sensitive.json").write_text(json.dumps({
+            "version": 1, "cwd": "skills/orchestrator",
+            "tests": [{"module": "test_probe", "reason": "synthetic"}]}))
+        self.git("-C", str(self.repo), "add", "-A")
+        self.git("-C", str(self.repo), "commit", "-m", "declare checkout tests")
+
+    def test_ready_report_names_the_fresh_primary_checkout_for_each_test(self):
+        self.declare_checkout_tests(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n")
+        self.write_review()
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(Path(json.loads(result.stdout)["evidence"]).read_text())
+        checkout = report["checkout_preflight"]
+        self.assertEqual(checkout["status"], "ready")
+        self.assertEqual(checkout["tests"][0]["checkout_context"]["kind"], "fresh-primary-checkout")
+        self.assertTrue(checkout["tests"][0]["checkout_context"]["primary"])
+        self.assertEqual(checkout["tests"][0]["tests_run"], 1)
+
+    def test_linked_worktree_only_test_blocks_otherwise_ready_batch(self):
+        self.declare_checkout_tests(
+            "import subprocess, unittest\n"
+            "def rev(*a):\n"
+            "    return subprocess.run(['git', 'rev-parse', *a], capture_output=True, text=True).stdout.strip()\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_linked(self):\n"
+            "        self.assertNotEqual(rev('--absolute-git-dir'),"
+            " rev('--path-format=absolute', '--git-common-dir'))\n")
+        self.write_review()
+
+        result = self.command()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "blocked")
+        self.assertIn("fresh primary checkout", result.stdout)
+
     def test_native_candidate_can_be_reviewed_in_a_later_managed_run(self):
         roots, jobs = self.managed_fixture(review_of="task-1")
         native_run = self.native_fixture(Path(jobs[0]["host_output"]) / "result.json")
