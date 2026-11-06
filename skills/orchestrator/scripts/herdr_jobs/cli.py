@@ -2,10 +2,12 @@
 
 import argparse
 import os
+import re
 from pathlib import Path
 import sys
 
 from .cleanup import cleanup_stale, close_workspace
+from .claude_trust import prune_trust as prune_claude_trust
 from .codex_trust import prune_trust
 from .continuation import continue_job
 from .engine import Engine, WORKER_DISPOSITIONS
@@ -26,6 +28,12 @@ class Parser(argparse.ArgumentParser):
         raise JobError("invalid_input", message)
 
 
+def _cutoff(value):
+    if value is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise JobError("invalid_input", "--runs-before must be YYYY-MM-DD")
+    return value
+
+
 def parser():
     result = Parser(description="Launch, checkpoint, collect, and finish Herdr jobs and worker fleets. JSON output; Python 3.11+ / POSIX.")
     commands = result.add_subparsers(dest="operation", required=True)
@@ -34,6 +42,15 @@ def parser():
     prune_mode = prune.add_mutually_exclusive_group()
     prune_mode.add_argument("--dry-run", action="store_true", help="report stale entries without writes (default)")
     prune_mode.add_argument("--apply", action="store_true", help="back up and remove stale scoped trust entries")
+    prune.add_argument("--runs-before", metavar="YYYY-MM-DD",
+                       help="also prune existing runs/<date>/ entries dated before this day")
+    claude_prune = commands.add_parser("prune-claude-trust", help="prune stale orchestrator project entries from the Claude config (dry-run by default)")
+    claude_prune.add_argument("--config", help="Claude config path (defaults to $CLAUDE_CONFIG_DIR/.claude.json or ~/.claude.json)")
+    claude_mode = claude_prune.add_mutually_exclusive_group()
+    claude_mode.add_argument("--dry-run", action="store_true", help="report stale entries without writes (default)")
+    claude_mode.add_argument("--apply", action="store_true", help="back up and remove stale entries")
+    claude_prune.add_argument("--runs-before", metavar="YYYY-MM-DD",
+                              help="also prune existing runs/<date>/ entries dated before this day")
     cleanup = commands.add_parser("cleanup-stale", help="reconcile managed Herdr panes and provider leases")
     cleanup.add_argument("--dry-run", action="store_true", default=True,
                          help="report planned cleanup without mutations (default)")
@@ -174,7 +191,11 @@ def main(argv=None, transport_factory=LaunchTransport, *, backend="managed"):
     try:
         args = parser().parse_args(argv)
         if args.operation == "prune-codex-trust":
-            print(encoded(prune_trust(args.config, apply=args.apply)).decode())
+            print(encoded(prune_trust(args.config, apply=args.apply, runs_before=_cutoff(args.runs_before))).decode())
+            return 0
+        if args.operation == "prune-claude-trust":
+            print(encoded(prune_claude_trust(args.config, apply=args.apply,
+                                             runs_before=_cutoff(args.runs_before))).decode())
             return 0
         if args.operation == "cleanup-stale":
             result = cleanup_stale(args, env=os.environ)

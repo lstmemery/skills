@@ -11,7 +11,11 @@ from unittest.mock import patch
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "scripts"))
 
-from herdr_jobs.claude_trust import config_path, trust_cwd
+from contextlib import redirect_stdout
+import io
+
+from herdr_jobs.claude_trust import config_path, prune_trust, trust_cwd
+from herdr_jobs.cli import main
 from herdr_jobs.records import JobError
 
 
@@ -150,3 +154,73 @@ class ClaudeTrustTest(unittest.TestCase):
             (self.root / ".claude/.config.json").write_bytes(b"{}")
             with self.assertRaisesRegex(JobError, "legacy"):
                 config_path()
+
+class ClaudePruneTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        patched = patch("herdr_jobs.codex_trust.ORCHESTRATOR_ROOT", self.root)
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.config = self.root / ".claude.json"
+        (self.root / "runs" / "2026-10-01" / "live").mkdir(parents=True)
+        (self.root / "runs" / "2026-11-05" / "new").mkdir(parents=True)
+        (self.root / "worktrees" / "kept").mkdir(parents=True)
+
+    def document(self, names, indent=2):
+        projects = {str(self.root / name): {"hasTrustDialogAccepted": True, "keep": [1, 2]} for name in names}
+        projects["/var/empty/outside-missing"] = {"hasTrustDialogAccepted": True}
+        return json.dumps({"mcpServers": {"x": {"command": "y"}}, "projects": projects, "tail": 0},
+                          indent=indent).replace('"tail": 0', '"tail": 1.50e+3')
+
+    def test_dry_run_reports_missing_entries_and_changes_nothing(self):
+        original = self.document(["runs/2026-10-01/gone", "runs/2026-10-01/live", "worktrees/kept"]).encode()
+        self.config.write_bytes(original)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["prune-claude-trust", "--config", str(self.config)])
+        report = json.loads(output.getvalue())
+        self.assertEqual((code, report["dry_run"], report["count"]), (0, True, 1))
+        self.assertEqual(report["paths"], [str(self.root / "runs/2026-10-01/gone")])
+        self.assertEqual(self.config.read_bytes(), original)
+
+    def test_apply_removes_missing_entries_with_backup_and_keeps_other_bytes(self):
+        for indent in (2, None):
+            with self.subTest(indent=indent):
+                names = ["runs/2026-10-01/gone", "runs/2026-10-01/live", "runs/2026-10-01/gone2"]
+                original = self.document(names, indent).encode()
+                self.config.write_bytes(original)
+                result = prune_trust(self.config, apply=True)
+                self.assertEqual(result["count"], 2)
+                self.assertEqual(Path(result["backup"]).read_bytes(), original)
+                after = json.loads(self.config.read_bytes())
+                self.assertEqual(sorted(after["projects"]), sorted([
+                    str(self.root / "runs/2026-10-01/live"), "/var/empty/outside-missing"]))
+                self.assertEqual(after["tail"], 1500.0)
+                self.assertIn(b"1.50e+3", self.config.read_bytes())
+
+    def test_apply_handles_removing_every_trailing_and_every_project_entry(self):
+        only = {"projects": {str(self.root / "runs/2026-10-01/gone"): {"hasTrustDialogAccepted": True}}, "a": 1}
+        self.config.write_text(json.dumps(only))
+        prune_trust(self.config, apply=True)
+        self.assertEqual(json.loads(self.config.read_text()), {"projects": {}, "a": 1})
+        last = {"projects": {str(self.root / "worktrees/kept"): {"x": 1},
+                             str(self.root / "runs/2026-10-01/gone"): {"y": 2}}}
+        self.config.write_text(json.dumps(last, indent=1))
+        prune_trust(self.config, apply=True)
+        self.assertEqual(list(json.loads(self.config.read_text())["projects"]), [str(self.root / "worktrees/kept")])
+
+    def test_runs_before_prunes_only_old_run_dates_never_worktrees(self):
+        self.config.write_text(self.document(["runs/2026-10-01/live", "runs/2026-11-05/new", "worktrees/kept"]))
+        report = prune_trust(self.config, runs_before="2026-11-01")
+        self.assertEqual(report["paths"], [str(self.root / "runs/2026-10-01/live")])
+        result = prune_trust(self.config, apply=True, runs_before="2026-11-01")
+        self.assertEqual(result["count"], 1)
+        self.assertIn(str(self.root / "runs/2026-11-05/new"), json.loads(self.config.read_text())["projects"])
+
+    def test_runs_before_rejects_malformed_dates(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["prune-claude-trust", "--config", str(self.config), "--runs-before", "yesterday"])
+        self.assertNotEqual(code, 0)
